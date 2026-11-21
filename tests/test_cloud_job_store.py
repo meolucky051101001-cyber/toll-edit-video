@@ -66,6 +66,11 @@ def test_job_store_lifecycle():
         assert store.update_progress(claimed.job_id, state="processing", percent=60, step_name="Đang xử lý") is True
         assert store.update_progress(claimed.job_id, state="downloading", percent=85, step_name="Đang tải về") is True
         assert store.update_progress(claimed.job_id, state="validating", percent=95, step_name="Kiểm tra") is True
+        # Model the verified provider cleanup before admitting the next allocation.
+        store.record_cleanup_result(
+            claimed.job_id, claimed.attempt, "test-session-123",
+            verified_stopped=True, cleanup_status="verified", attempts=1,
+        )
         assert store.update_progress(
             claimed.job_id,
             state="completed",

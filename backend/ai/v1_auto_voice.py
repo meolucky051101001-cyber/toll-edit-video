@@ -855,7 +855,8 @@ def decide_video_voice(
     job_id: Optional[str] = None,
     voice_config: Optional[Dict[str, Any]] = None,
     visual_sub_to_speech: bool = False,
-) -> Dict[str, Any]:
+    defer_script_fallback: bool = False,
+) -> Optional[Dict[str, Any]]:
     """
     Hàm quyết định giọng chung (Unified Voice Decision Function - Codex Plan):
     - Chế độ Auto: Phân tích câu thoại đầu -> Chọn và lưu snapshot (Nữ -> CapCut Mai; Nam -> BV075; Unknown -> thủ công).
@@ -875,6 +876,8 @@ def decide_video_voice(
     actual_mode = "auto" if raw_mode in ("dialogue", "smart_dialogue", "dual") else raw_mode
     auto_cfg = voice_config if voice_config is not None else get_auto_voice_config(workspace)
     is_dual = bool(auto_cfg.get("dual_voice", False)) or dialogue_mode_requested
+    if defer_script_fallback and is_dual and actual_mode != "manual":
+        return None
     resolved_job_id = job_id or out_dir_path.name
     content_hash = compute_file_sha256(video_path or original_audio_path)
     snapshot_cfg = {
@@ -1176,6 +1179,8 @@ def decide_video_voice(
 
         context_reason = ""
         if visual_sub_to_speech and (gender == "unknown" or confidence < CONFIDENCE_THRESHOLD):
+            if defer_script_fallback:
+                return None  # Resolve from the final translated script at stage 6.
             inferred_gender, inferred_conf = infer_gender_from_script_context(video_path, srt_segments)
             logger.info("🎙️ Video không lời thoại -> suy luận theo ngữ cảnh nội dung: %s (conf=%.2f)", inferred_gender.upper(), inferred_conf)
             gender = inferred_gender

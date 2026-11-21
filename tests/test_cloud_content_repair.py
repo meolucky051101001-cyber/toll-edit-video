@@ -193,19 +193,20 @@ def test_run_argv_monitored_survives_connection_lost_and_streams_live_progress(m
     progress_events: list[tuple[int, str]] = []
     colab_calls: list[list[str]] = []
 
-    monkeypatch.setattr(colab_bridge, "_write_wsl_temp_script", lambda *_a, **_k: None)
-    monkeypatch.setattr(colab_bridge, "_remove_wsl_temp_file", lambda *_a, **_k: None)
     monkeypatch.setattr(colab_bridge, "upload_file", lambda *_a, **_k: (True, "ok"))
     monkeypatch.setattr(colab_bridge, "_wait_interruptible", lambda *_a, **_k: False)
 
     poll_step = {"n": 0}
 
-    def fake_run_colab(colab_args, **_kwargs):
+    def fake_run_colab(colab_args, *, stdin_text, **_kwargs):
         args_list = list(colab_args)
         colab_calls.append(args_list)
-        script_arg = args_list[args_list.index("-f") + 1]
-        if "colab_launch_" in script_arg:
+        assert args_list[:3] == ["exec", "-s", "cjob4620779da1"]
+        assert "-f" not in args_list
+        assert "synthetic-secret-token-xyz" not in stdin_text
+        if "AUTODUB_LAUNCH_JSON:" in stdin_text:
             return 0, 'AUTODUB_LAUNCH_JSON:{"launched": true, "sup_pid": 4321}', ""
+        assert "AUTODUB_POLL_JSON:" in stdin_text
         poll_step["n"] += 1
         if poll_step["n"] == 1:
             payload = {

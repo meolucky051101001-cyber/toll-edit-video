@@ -15,7 +15,7 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception as _phase6_exc: logger.debug('Suppressed error in ai.translation.module (sys.stderr.reconfigure): %s', type(_phase6_exc).__name__, exc_info=False)
 
 import json
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import requests
 import base64
 import re
@@ -408,7 +408,7 @@ def resolve_effective_glossary(
 
 DOMAIN_TRANSLATION_PROFILES: Dict[str, str] = {
     "general": (
-        "- NGỮ CẢNH TỔNG QUÁT: Giữ văn phong tự nhiên theo nội dung thực tế trong khung hình; giữ nguyên tên riêng, thương hiệu và thông số đo lường chuẩn (ví dụ khoảng trắng rõ giữa chữ và số)."
+        "- NGỮ CẢNH TỔNG QUÁT: Giữ văn phong tự nhiên theo nội dung thực tế trong khung hình; giữ nguyên tên riêng, thương hiệu và thông số đo lường chuẩn (ví dụ khoảng trắng rõ giữa chữ và số). Tự suy luận chính xác ngữ cảnh (thủ công, review, công nghệ, ẩm thực hoặc kịch ngắn) trực tiếp từ hình ảnh khung hình và mạch thoại."
     ),
     "craft": (
         "- CHỦ ĐỀ THỦ CÔNG / SỔ TAY / MÔ HÌNH:\n"
@@ -435,6 +435,43 @@ DOMAIN_TRANSLATION_PROFILES: Dict[str, str] = {
 
 _DOMAIN_CLASSIFICATION_CACHE: Dict[str, str] = {}
 
+_DOMAIN_KEYWORD_RULES: Dict[str, Tuple[str, ...]] = {
+    "tech_pc": (
+        "rtx", "gtx", "gpu", "cpu", "vram", "fps", "ssd", "hdd", "ram",
+        "显卡", "主板", "内存", "帧率", "电脑", "处理器", "固态", "硬盘", "跑分", "游戏机", "主机", "配置",
+    ),
+    "craft": (
+        "diy", "bjd", "手帐", "手账", "贴纸", "胶带", "粘土", "毛线", "钩织", "手工",
+        "涂色", "石膏", "娃娃", "头壳", "羽毛", "拼装", "模型", "微缩", "三合院", "鬓角",
+    ),
+    "food_life": (
+        "食材", "调味", "下锅", "翻炒", "好吃", "美食", "食谱", "做饭", "炖", "煮",
+        "烘焙", "农村", "摘菜", "蘑菇", "干饭", "真香", "下饭",
+    ),
+    "review": (
+        "开箱", "测评", "评测", "推荐", "性价比", "链接", "好用", "材质", "实测", "平替",
+        "种草", "收纳", "好物", "入手", "开箱", "踩雷",
+    ),
+    "drama": (
+        "老公", "老婆", "婆婆", "总裁", "分手", "结婚", "穿越", "重生", "反转", "老板", "闺蜜",
+    ),
+}
+
+
+def _classify_domain_from_keywords(sample_texts: Optional[Sequence[str]]) -> str:
+    """Classify domain synchronously in <1ms using source transcript/cue keywords."""
+    joined = " ".join(str(t or "").strip() for t in (sample_texts or []) if str(t or "").strip()).lower()
+    if not joined:
+        return "general"
+    best_domain = "general"
+    best_score = 0
+    for dom, keywords in _DOMAIN_KEYWORD_RULES.items():
+        score = sum(1 for kw in keywords if kw in joined)
+        if score > best_score:
+            best_score = score
+            best_domain = dom
+    return best_domain if best_score >= 1 else "general"
+
 
 def classify_video_domain(
     frames_b64: Optional[Sequence[str]],
@@ -442,9 +479,16 @@ def classify_video_domain(
     api_key: str = "",
     stop_checker=None,
 ) -> str:
-    """Phân loại nhanh chủ đề video (6 nhóm) từ tối đa 3 khung hình mẫu + câu thoại đầu."""
-    frames_list = [str(f) for f in (frames_b64 or []) if f][:3]
+    """Phân loại nhanh chủ đề video (6 nhóm) từ từ khóa tức thời hoặc Gemini Vision tùy chọn."""
     samples = [str(t).strip()[:80] for t in (sample_texts or []) if str(t or "").strip()][:8]
+    kw_domain = _classify_domain_from_keywords(samples)
+    if kw_domain != "general":
+        return kw_domain
+
+    if os.getenv("V1_GEMINI_VISION_DOMAIN_CLASSIFY", "0").strip().lower() not in ("1", "true", "yes"):
+        return "general"
+
+    frames_list = [str(f) for f in (frames_b64 or []) if f][:3]
     if not api_key or not frames_list:
         return "general"
 
@@ -864,6 +908,17 @@ def translate_with_gemini(
                 logger.warning("Gemini chunk %d..%d không thành công; giữ cache những chunk hợp lệ, không dùng nguyên văn thay bản dịch", i, i + len(chunk_texts))
                 return None
             all_translated.extend(chunk_res)
+            ready = kwargs.get("_on_ready_texts")
+            if (ready and end < len(texts) and has_valid_meta
+                    and validate_translation_batch_quality(chunk_texts, chunk_res, glossary=kwargs.get("glossary"),
+                                                           target_lang=target_lang)[0]):
+                accepted = []
+                for src, dst, meta in zip(chunk_texts, chunk_res, cue_meta[i:end]):
+                    if (isinstance(dst, str) and dst.strip() and not _contains_cjk(dst)
+                            and 0 < len(dst.split()) <= (meta.get("max_words") or 0)
+                            and not translation_meaning_issues(src, dst)):
+                        accepted.append(normalize_subtitle_text(dst))
+                ready(accepted)
             if has_valid_meta:
                 for pos, translated in enumerate(chunk_res, start=i):
                     speaker = cue_meta[pos].get("speaker")
@@ -1360,6 +1415,27 @@ def _is_hard_translation_quality_reason(reason: str) -> bool:
     )
 
 
+def _is_repair_worthy_translation_reason(reason: str) -> bool:
+    """Return True for structural, glossary, format, or speech-integrity defects that merit targeted LLM repair."""
+    if _is_hard_translation_quality_reason(reason):
+        return True
+    text = str(reason or "")
+    return any(
+        marker in text
+        for marker in (
+            "thuật ngữ",
+            "chứa dấu ba chấm",
+            "chưa viết hoa",
+            "dấu kết câu ở giữa",
+            "sai số lượng, số đo hoặc đơn vị",
+            "sai số tiền hoặc đơn vị tiền",
+            "đổi hoặc bỏ số hiệu/số cỡ",
+            "bỏ phủ định hoặc lời cấm",
+            "đảo ngược phủ định hoặc lời cấm",
+        )
+    )
+
+
 def validate_translation_batch_quality(
     source_texts,
     translated_texts,
@@ -1448,7 +1524,8 @@ def _repair_cue_meta(source, translated, metadata, indexes, reasons):
     return result
 
 
-def _fit_translation_cues(source, translated, metadata, *, api_key, script_mode, max_speed, stop_checker, deadline):
+def _fit_translation_cues(source, translated, metadata, *, api_key, script_mode, max_speed, stop_checker, deadline,
+                          on_ready_texts=None):
     """Give likely overlong translations one optional, bounded rewrite before TTS."""
     from v1_speech_guard import VI_SECONDS_PER_WORD, natural_speed_limit, vietnamese_spoken_seconds
 
@@ -1475,6 +1552,10 @@ def _fit_translation_cues(source, translated, metadata, *, api_key, script_mode,
     until = min(time.monotonic() + 15, deadline) if deadline is not None else time.monotonic() + 15
     if not items or until - time.monotonic() <= 1:
         return translated
+
+    if on_ready_texts:
+        pending = {item["index"] for item in items}
+        on_ready_texts([text for idx, text in enumerate(translated) if idx not in pending])
 
     candidates = condense_vietnamese_subtitles_batch(
         items, api_key=api_key, deadline=until, stop_checker=stop_checker,
@@ -1648,12 +1729,17 @@ def translate_subtitles(
             target_lang=target_lang,
         )
         if not is_valid:
-            # Granular retry: Retry specifically failing items with alternate LLM candidate
+            # Granular retry only for hard/structural/glossary defects (or when strict meaning policy is enabled).
+            strict_meaning = translation_meaning_policy() == "strict"
+            repair_worthy = strict_meaning or any(
+                _is_repair_worthy_translation_reason(r) for r in reasons
+            )
             failing_indices = set()
-            for r in reasons:
-                m = re.match(r"Câu (\d+)", r)
-                if m:
-                    failing_indices.add(int(m.group(1)) - 1)
+            if repair_worthy:
+                for r in reasons:
+                    m = re.match(r"Câu (\d+)", r)
+                    if m:
+                        failing_indices.add(int(m.group(1)) - 1)
 
             if failing_indices:
                 sorted_failing = sorted(failing_indices)
@@ -1757,6 +1843,7 @@ def translate_subtitles(
                 texts, translated_texts, kwargs["cue_meta"], api_key=g_key_for_domain,
                 script_mode=script_mode, max_speed=kwargs.get("max_speech_speed"),
                 stop_checker=kwargs.get("stop_checker"), deadline=kwargs.get("overall_deadline"),
+                on_ready_texts=kwargs.get("_on_ready_texts"),
             )
         try:
             from mojibake_repair import repair_vietnamese_mojibake

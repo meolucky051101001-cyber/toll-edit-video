@@ -5,7 +5,7 @@ Hoạt động song song và hoàn toàn độc lập với bot Local (backend/t
 - Nhận trực tiếp link video (Douyin, TikTok, Xiaohongshu, YouTube, Facebook...) hoặc file video gửi/forward.
 - Tự động khóa quyền sử dụng (auto-pair) cho tài khoản Telegram đầu tiên nhắn tin để bảo vệ quỹ CU.
 - Kiểm tra hạn mức CU hôm nay trước khi tải/cấp phát GPU; đồng bộ trực tiếp vào CloudJobStore (hiển thị live trên Dashboard 8089).
-- Xuất video thành phẩm vào D:\\ToolV1_Cloud (hoặc AUTODUB_CLOUD_OUTPUT_DIR) và gửi trả lại ngay trên Telegram.
+- Lưu video vào D:\\ToolV1_Cloud (hoặc AUTODUB_CLOUD_OUTPUT_DIR) và gửi thông báo hoàn tất trên Telegram.
 """
 
 from __future__ import annotations
@@ -13,46 +13,46 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import glob
 import json
 import logging
 import math
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlsplit
 import uuid
 
 from .cloud_config import BACKEND_DIR, WORKSPACE_DIR, get_cloud_output_dir
 from .cloud_contract import (
+    DASHBOARD_GPU_SETTING,
+    TELEGRAM_SOURCE_CHANNEL,
     admit_and_enqueue_job,
     get_cloud_status_snapshot,
     get_error_remediation,
     probe_video_metadata,
     request_job_cancellation,
-    run_provider_action_nonblocking,
+    resolve_cloud_source_channel,
+    stamp_provider_usage_observation,
 )
 from .cloud_job_store import CloudJobStore
 from .cloud_orchestrator import CloudOrchestrator
 from .cloud_security import (
     ALLOWED_VOICES,
+    CUDA_GPU_TYPES,
     CloudValidationError,
     get_default_allowed_roots,
     redact_secrets,
     resolve_cloud_bot_token,
-    validate_gpu_type,
+    validate_video_gpu_type as validate_cloud_bot_gpu,
     validate_voice,
 )
 from .cloud_worker import CloudWorker
 from .colab_bridge import (
     ColabProviderAdapter,
-    abort_session_processes,
-    stop_all_sessions,
 )
 
 # Ngăn httpx/httpcore in URL chứa Bot Token ở mức INFO.
@@ -61,8 +61,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("cloud.telegram_bot")
 
 TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES = 20 * 1024 * 1024  # 20 MB (giới hạn Bot API chuẩn)
-TELEGRAM_SEND_MAX_BYTES = int(49.5 * 1024 * 1024)
-DISALLOWED_PIPELINE_TPUS = frozenset({"V5E1", "V6E1"})
 
 VOICE_ALIASES: Dict[str, str] = {
     "auto": "auto",
@@ -127,17 +125,6 @@ def resolve_voice_choice(raw_value: str) -> str:
             code="UNSUPPORTED_VOICE",
         )
     return validate_voice(mapped)
-
-
-def validate_cloud_bot_gpu(raw_value: str) -> str:
-    """Kiểm tra GPU hợp lệ cho pipeline video CUDA (chặn chọn nhầm TPU)."""
-    gpu = validate_gpu_type(raw_value)
-    if gpu in DISALLOWED_PIPELINE_TPUS:
-        raise CloudValidationError(
-            f"Pipeline lồng tiếng cần NVIDIA CUDA nên không dùng TPU `{gpu}`. Hãy chọn `T4`, `L4`, `A100` hoặc `H100`.",
-            code="UNSUPPORTED_GPU",
-        )
-    return gpu
 
 
 def _safe_stem(raw_name: str, fallback: str = "cloud_video") -> str:
@@ -219,7 +206,7 @@ class CloudBotStateFiles:
                 if not isinstance(loaded, dict):
                     return dict(defaults)
                 gpu = str(loaded.get("gpu_type") or "T4").upper()
-                if gpu in DISALLOWED_PIPELINE_TPUS:
+                if gpu not in CUDA_GPU_TYPES:
                     gpu = "T4"
                 voice = str(loaded.get("voice") or "auto")
                 if voice not in ALLOWED_VOICES:
@@ -240,6 +227,14 @@ class CloudBotStateFiles:
         return current
 
 
+def get_cloud_default_gpu(store: CloudJobStore) -> str:
+    """Read the shared selection, falling back to preferences from older bots."""
+    saved = store.get_setting(DASHBOARD_GPU_SETTING)
+    if saved in CUDA_GPU_TYPES:
+        return saved
+    return CloudBotStateFiles(store.db_path.parent).get_prefs()["gpu_type"]
+
+
 @dataclass
 class CloudBotQueuedItem:
     item_id: str
@@ -254,6 +249,7 @@ class CloudBotQueuedItem:
     allow_no_speech: bool = False
     status_message: Any = None
     cancelled: bool = False
+    cloud_job_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
 
 
@@ -276,85 +272,6 @@ async def _safe_edit_message(message: Any, text: str, *, parse_mode: Optional[st
                     pass
             if attempt == 0:
                 await asyncio.sleep(0.8)
-
-
-async def _deliver_video_to_telegram(
-    bot: Any,
-    chat_id: int,
-    final_video: Path,
-    caption: str,
-    status_msg: Any,
-) -> bool:
-    """Gửi file thành phẩm lên khung chat Telegram (tự chia phần không nén nếu > 49.5MB)."""
-    file_size = final_video.stat().st_size
-    if file_size <= TELEGRAM_SEND_MAX_BYTES:
-        with open(final_video, "rb") as vf:
-            await bot.send_video(
-                chat_id=chat_id,
-                video=vf,
-                caption=caption,
-                supports_streaming=True,
-                read_timeout=600,
-                write_timeout=600,
-                connect_timeout=120,
-            )
-        return True
-
-    await _safe_edit_message(
-        status_msg,
-        f"📤 Video thành phẩm nặng `{file_size // (1024 * 1024)} MB` (đã lưu nguyên bản tại `{final_video.parent}`).\n"
-        "Đang tách phần nguyên gốc (không nén giảm nét) để gửi qua Telegram...",
-    )
-    probe = probe_video_metadata(final_video)
-    duration = float(probe.get("duration_seconds") or 0.0)
-    if duration <= 0:
-        return False
-
-    num_chunks = max(2, math.ceil(file_size / TELEGRAM_SEND_MAX_BYTES))
-    chunk_time = max(10.0, duration / num_chunks)
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
-
-    with tempfile.TemporaryDirectory(prefix="cloudbot_split_") as split_dir:
-        pattern = str(Path(split_dir) / "part_%03d.mp4")
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(final_video),
-            "-c",
-            "copy",
-            "-f",
-            "segment",
-            "-segment_time",
-            f"{chunk_time:.2f}",
-            "-reset_timestamps",
-            "1",
-            pattern,
-        ]
-        await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-        )
-        parts = sorted(glob.glob(str(Path(split_dir) / "part_*.mp4")))
-        if not parts:
-            return False
-        for idx, part_path in enumerate(parts, 1):
-            part_caption = f"{caption}\n\n(Phần {idx}/{len(parts)})" if idx == 1 else f"🎬 Phần {idx}/{len(parts)}"
-            with open(part_path, "rb") as vf:
-                await bot.send_video(
-                    chat_id=chat_id,
-                    video=vf,
-                    caption=part_caption,
-                    supports_streaming=True,
-                    read_timeout=600,
-                    write_timeout=600,
-                    connect_timeout=120,
-                )
-    return True
 
 
 class CloudTelegramBotService:
@@ -385,6 +302,7 @@ class CloudTelegramBotService:
                 self.store,
                 adapter=self._adapter_factory(),
                 allowed_roots=[self.workspace_dir, get_cloud_output_dir(), *get_default_allowed_roots()],
+                enable_warm_session_reuse=adapter_factory is None,
             ),
         )
         self._thread: Optional[threading.Thread] = None
@@ -393,6 +311,7 @@ class CloudTelegramBotService:
         self._queue: Optional[asyncio.Queue[Optional[CloudBotQueuedItem]]] = None
         self._pending_items: List[CloudBotQueuedItem] = []
         self._active_item: Optional[CloudBotQueuedItem] = None
+        self._active_items: Dict[str, CloudBotQueuedItem] = {}
         self._items_lock = threading.Lock()
         self._lock_handle: Optional[Any] = None
         self._running = False
@@ -409,13 +328,17 @@ class CloudTelegramBotService:
                 for item in self._pending_items
             ):
                 return True
-            active_pre_gpu = (
-                self._active_item is not None
-                and not self._active_item.cancelled
-                and str(self._active_item.gpu_type or "").strip().upper() == gpu_norm
-            )
-        if active_pre_gpu and self._cloud_worker.get_current_job() is None:
-            return True
+            active_items = list(self._active_items.values())
+            if self._active_item is not None and self._active_item not in active_items:
+                active_items.append(self._active_item)
+        for item in active_items:
+            if item.cancelled or str(item.gpu_type or "").strip().upper() != gpu_norm:
+                continue
+            if not item.cloud_job_id:
+                return True
+            current = self.store.get_job(item.cloud_job_id)
+            if current is not None and current.state == "queued":
+                return True
         return False
 
     @property
@@ -424,21 +347,58 @@ class CloudTelegramBotService:
 
     def is_busy(self) -> bool:
         with self._items_lock:
-            has_items = self._active_item is not None or any(not item.cancelled for item in self._pending_items)
+            has_items = bool(self._active_items) or self._active_item is not None or any(not item.cancelled for item in self._pending_items)
         return has_items or (self._cloud_worker.get_current_job() is not None)
+
+    def _get_prefs(self) -> Dict[str, Any]:
+        prefs = self.state_files.get_prefs()
+        prefs["gpu_type"] = get_cloud_default_gpu(self.store)
+        return prefs
 
     def get_status(self) -> Dict[str, Any]:
         token_present = bool(resolve_cloud_bot_token())
         with self._items_lock:
             queued_len = sum(1 for item in self._pending_items if not item.cancelled)
+            active_len = len(self._active_items) or int(self._active_item is not None)
+        default_gpu = get_cloud_default_gpu(self.store)
         return {
             "configured": token_present,
             "running": bool(self._running and self._thread and self._thread.is_alive()),
             "bot_username": self._bot_username,
             "queued_count": queued_len,
+            "active_count": active_len,
+            "default_gpu": default_gpu,
+            "concurrency_limit": self.store.get_concurrency_limit(default_gpu),
             "output_dir": str(get_cloud_output_dir()),
             "last_error": self._last_error,
         }
+
+    def list_intake_jobs(self) -> List[Dict[str, Any]]:
+        """Describe videos still in bot intake, before they have a Cloud job row."""
+        jobs = []
+        with self._items_lock:
+            groups = ((self._active_items.values(), "intake"), (self._pending_items, "queued"))
+            for items, state in groups:
+                for item in items:
+                    if item.cancelled or item.cloud_job_id:
+                        continue
+                    name = redact_secrets(item.file_name)
+                    if not name:
+                        try:
+                            hostname = urlsplit(item.url).hostname
+                        except ValueError:
+                            hostname = None
+                        name = f"Video từ {hostname or 'Telegram'}"
+                    jobs.append({
+                        "job_id": f"telegram-{item.item_id}",
+                        "queue_key": f"cloudbot:{item.item_id}",
+                        "video_name": name,
+                        "gpu_type": item.gpu_type,
+                        "state": state,
+                        "step_name": "Đang tải video nguồn" if state == "intake" else "Đang chờ bot tải video",
+                        "source": "Telegram",
+                    })
+        return jobs
 
     def _acquire_singleton_lock(self) -> bool:
         lock_path = self.state_files.state_dir / "cloud_bot.lock"
@@ -514,14 +474,17 @@ class CloudTelegramBotService:
                 loop.call_soon_threadsafe(stop_ev.set)
             except RuntimeError:
                 pass
-        if self._cloud_worker.get_current_job() is not None:
-            self._cloud_worker.cancel_current_job(reason="Cloud Node đang dừng dịch vụ.")
-        rel_fn = getattr(self._cloud_worker.orchestrator, "release_warm_sessions", None)
-        if callable(rel_fn):
-            try:
-                rel_fn()
-            except Exception:
-                pass
+        with self._items_lock:
+            for item in [*self._pending_items, *self._active_items.values()]:
+                item.cancelled = True
+        for job in self._telegram_jobs():
+            if job.state in ("completed", "cancelled", "failed", "error", "stopped"):
+                continue
+            reason = "Cloud Node đang dừng dịch vụ."
+            if job.state == "queued":
+                self.store.request_cancel(job.job_id, reason=reason)
+            elif not self._cloud_worker.cancel_job(job.job_id, reason=reason):
+                self.store.request_cancel(job.job_id, reason=reason)
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=max(0.5, float(timeout)))
@@ -530,6 +493,12 @@ class CloudTelegramBotService:
             self._running = False
             self._release_singleton_lock()
         return not alive
+
+    def _telegram_jobs(self) -> List[Any]:
+        return [
+            job for job in self.store.list_jobs(limit=1000000, include_hidden=True)
+            if resolve_cloud_source_channel(job.options, job.idempotency_key) == TELEGRAM_SOURCE_CHANNEL
+        ]
 
     # -------------------- Xử lý nghiệp vụ Telegram --------------------
 
@@ -553,7 +522,7 @@ class CloudTelegramBotService:
     async def cmd_start(self, update: Any, context: Any) -> None:
         if not await self._check_owner_or_reply(update):
             return
-        prefs = self.state_files.get_prefs()
+        prefs = await asyncio.to_thread(self._get_prefs)
         budget = await asyncio.to_thread(self.store.get_cu_budget_info)
         voice_label = VOICE_LABELS.get(prefs["voice"], prefs["voice"])
         out_dir = get_cloud_output_dir()
@@ -572,6 +541,7 @@ class CloudTelegramBotService:
             "• `/gpu T4` hoặc `/gpu L4` — Đổi loại GPU\n"
             "• `/voice auto|mai|nam|tuoivui|hoaimy|namminh` — Đổi giọng\n"
             "• `/budget <số_CU>` — Đổi trần bảo vệ CU/ngày\n"
+            "• `/concurrency [1-4]` — Xem hoặc đổi số video Cloud chạy song song\n"
             "• `/stop` — Huỷ job & thu hồi ngay máy ảo Colab"
         )
         await update.effective_message.reply_text(msg, parse_mode="Markdown")
@@ -579,7 +549,7 @@ class CloudTelegramBotService:
     async def cmd_status(self, update: Any, context: Any) -> None:
         if not await self._check_owner_or_reply(update):
             return
-        prefs = self.state_files.get_prefs()
+        prefs = await asyncio.to_thread(self._get_prefs)
         snap = await asyncio.to_thread(
             get_cloud_status_snapshot,
             self.store,
@@ -605,14 +575,14 @@ class CloudTelegramBotService:
         rate = float(usage.get("usage_rate") or 0.0)
         vms = int(usage.get("active_assignments") or 0)
         active_job = snap.get("active_job")
+        active_jobs = snap.get("active_jobs") or ([active_job] if active_job else [])
         with self._items_lock:
             waiting = sum(1 for item in self._pending_items if not item.cancelled)
 
-        active_line = (
-            f"🎬 Đang chạy: `{active_job['video_name']}` (`{active_job.get('percent', 0)}%` — {active_job.get('step_name', '')})"
-            if active_job
-            else "💤 Hiện không có video nào đang chạy."
-        )
+        active_line = "\n".join(
+            f"🎬 `{job['video_name']}` (`{job.get('percent', 0)}%` — {job.get('step_name', '')})"
+            for job in active_jobs
+        ) or "💤 Hiện không có video nào đang chạy."
         text = (
             "☁️ *TRẠNG THÁI CLOUD GPU*\n\n"
             f"💰 *CU còn lại (Colab):* {bal_txt}\n"
@@ -621,6 +591,9 @@ class CloudTelegramBotService:
             f"🚀 *Cấu hình Bot:* `NVIDIA {prefs['gpu_type']}` · `{VOICE_LABELS.get(prefs['voice'], prefs['voice'])}`\n"
             f"📂 *Thư mục xuất:* `{get_cloud_output_dir()}`\n"
             f"📋 *Hàng chờ Bot:* `{waiting}` video\n\n"
+            f"🔀 *Luồng {prefs['gpu_type']}:* "
+            f"`{sum(job.get('gpu_type') == prefs['gpu_type'] for job in active_jobs)} / "
+            f"{self.store.get_concurrency_limit(prefs['gpu_type'])}`\n"
             f"{active_line}"
         )
         await update.effective_message.reply_text(text, parse_mode="Markdown")
@@ -630,9 +603,9 @@ class CloudTelegramBotService:
             return
         args = getattr(context, "args", None) or []
         if not args:
-            prefs = self.state_files.get_prefs()
+            gpu = await asyncio.to_thread(get_cloud_default_gpu, self.store)
             await update.effective_message.reply_text(
-                f"🚀 GPU hiện tại: `NVIDIA {prefs['gpu_type']}`.\n"
+                f"🚀 GPU mặc định của Dashboard và Bot: `NVIDIA {gpu}`.\n"
                 "Đổi bằng lệnh: `/gpu T4`, `/gpu L4`, `/gpu A100` hoặc `/gpu H100`.",
                 parse_mode="Markdown",
             )
@@ -642,9 +615,10 @@ class CloudTelegramBotService:
         except CloudValidationError as exc:
             await update.effective_message.reply_text(f"❌ {exc}", parse_mode="Markdown")
             return
-        self.state_files.update_prefs(gpu_type=gpu)
+        await asyncio.to_thread(self.store.set_setting, DASHBOARD_GPU_SETTING, gpu)
+        limit = await asyncio.to_thread(self.store.get_concurrency_limit, gpu)
         await update.effective_message.reply_text(
-            f"✅ Đã chuyển GPU mặc định của Bot Cloud sang `NVIDIA {gpu}`.",
+            f"✅ Đã chuyển Dashboard và Bot Cloud sang `NVIDIA {gpu}` · tối đa `{limit}` luồng.",
             parse_mode="Markdown",
         )
 
@@ -710,6 +684,34 @@ class CloudTelegramBotService:
                 parse_mode="Markdown",
             )
 
+    async def cmd_concurrency(self, update: Any, context: Any) -> None:
+        if not await self._check_owner_or_reply(update):
+            return
+        args = getattr(context, "args", None) or []
+        gpu = await asyncio.to_thread(get_cloud_default_gpu, self.store)
+        if not args:
+            limit = await asyncio.to_thread(self.store.get_concurrency_limit, gpu)
+            await update.effective_message.reply_text(
+                f"🔀 Số luồng {gpu} hiện tại: `{limit}` video đồng thời (tối đa 4).\n"
+                "Đổi bằng `/concurrency 2` (chọn từ 1 đến 4).",
+                parse_mode="Markdown",
+            )
+            return
+        try:
+            if not args[0].isdigit():
+                raise ValueError("Số luồng phải là số nguyên từ 1 đến 4.")
+            limit = int(args[0])
+            await asyncio.to_thread(self.store.set_gpu_concurrency_limits, {gpu: limit})
+            await update.effective_message.reply_text(
+                f"✅ Đã đặt {gpu} tối đa `{limit}` video Cloud chạy đồng thời.",
+                parse_mode="Markdown",
+            )
+        except Exception as exc:
+            await update.effective_message.reply_text(
+                f"❌ Giá trị không hợp lệ ({redact_secrets(str(exc))}). Dùng `/concurrency 1` đến `/concurrency 4`.",
+                parse_mode="Markdown",
+            )
+
     async def cmd_nospeech(self, update: Any, context: Any) -> None:
         if not await self._check_owner_or_reply(update):
             return
@@ -739,39 +741,36 @@ class CloudTelegramBotService:
                 if not item.cancelled:
                     item.cancelled = True
                     cancelled_pending += 1
+            for item in self._active_items.values():
+                item.cancelled = True
             if self._active_item is not None:
                 self._active_item.cancelled = True
 
         def _cancel_db_and_worker():
-            cur = self._cloud_worker.get_current_job()
-            if cur is not None:
-                request_job_cancellation(
-                    self.store,
-                    cur.job_id,
-                    worker=self._cloud_worker,
-                    adapter=self._adapter_factory(),
-                    abort_fn=abort_session_processes,
-                    reason="Huỷ từ lệnh /stop trên Bot Cloud.",
-                )
-            for j in self.store.list_jobs(limit=25):
-                if j.state not in ("completed", "cancelled", "failed", "error", "stopped"):
-                    self.store.request_cancel(j.job_id, reason="Huỷ từ lệnh /stop trên Bot Cloud.")
-            rel_fn = getattr(self._cloud_worker.orchestrator, "release_warm_sessions", None)
-            if callable(rel_fn):
-                rel_fn()
+            stopped = 0
+            for job in self._telegram_jobs():
+                if job.state in ("completed", "cancelled", "failed", "error", "stopped"):
+                    continue
+                if job.state == "queued":
+                    result = self.store.request_cancel(
+                        job.job_id,
+                        reason="Huỷ từ lệnh /stop trên Bot Cloud.",
+                    )
+                    stopped += int(bool(result.get("immediate")))
+                else:
+                    if not self._cloud_worker.cancel_job(
+                        job.job_id,
+                        reason="Huỷ từ lệnh /stop trên Bot Cloud.",
+                    ):
+                        self.store.request_cancel(
+                            job.job_id,
+                            reason="Huỷ từ lệnh /stop trên Bot Cloud.",
+                        )
+                    stopped += 1
+            return stopped
 
-        await asyncio.to_thread(_cancel_db_and_worker)
-        action = await asyncio.to_thread(
-            run_provider_action_nonblocking,
-            stop_all_sessions,
-            timeout_seconds=1.5,
-        )
-        if action.get("timed_out"):
-            note = "Đang gửi lệnh thu hồi máy ảo Colab (kiểm tra lại sau ít giây với `/status`)."
-        elif action.get("completed") and action["result"][0]:
-            note = "Đã xác nhận dừng toàn bộ máy ảo Colab."
-        else:
-            note = "Đã ghi nhận yêu cầu dừng job & thu hồi session."
+        stopped_jobs = await asyncio.to_thread(_cancel_db_and_worker)
+        note = f"Đã gửi yêu cầu dừng `{stopped_jobs}` job Telegram Cloud đang chạy. Máy ảo đang dùng bởi tác vụ khác sẽ được giữ nguyên."
 
         await update.effective_message.reply_text(
             f"🛑 Đã huỷ `{cancelled_pending}` video đang chờ. {note}",
@@ -793,7 +792,7 @@ class CloudTelegramBotService:
             )
             return
 
-        prefs = self.state_files.get_prefs()
+        prefs = await asyncio.to_thread(self._get_prefs)
         for url in urls:
             await self._enqueue_item(
                 message=message,
@@ -823,7 +822,7 @@ class CloudTelegramBotService:
         orig_name = getattr(video_obj, "file_name", None) or f"telegram_video_{uuid.uuid4().hex[:6]}.mp4"
         if not Path(orig_name).suffix:
             orig_name += ".mp4"
-        prefs = self.state_files.get_prefs()
+        prefs = await asyncio.to_thread(self._get_prefs)
         await self._enqueue_item(
             message=message,
             kind="telegram_video",
@@ -859,7 +858,7 @@ class CloudTelegramBotService:
         with self._items_lock:
             self._pending_items.append(item)
             position = sum(1 for x in self._pending_items if not x.cancelled) + (
-                1 if self._active_item is not None else 0
+                len(self._active_items) or int(self._active_item is not None)
             )
         short_src = source_label if len(source_label) <= 68 else source_label[:65] + "..."
         item.status_message = await message.reply_text(
@@ -880,7 +879,9 @@ class CloudTelegramBotService:
                 sys.path.insert(0, str(BACKEND_DIR))
             from social_downloader import download_social_video
 
-            ok, path_str, title, err = download_social_video(url, str(dest_dir), tag)
+            ok, path_str, title, err = download_social_video(
+                url, str(dest_dir), tag, retry_xhs_page_transport=True,
+            )
         if not ok or not path_str:
             raise RuntimeError(err or "Không tải được video từ đường link đã gửi.")
         downloaded = Path(path_str)
@@ -925,18 +926,19 @@ class CloudTelegramBotService:
         Không bao giờ chạm tới provider nếu SQLite sạch hoặc đang có job khoẻ mạnh.
         """
         now = time.time()
-        active = self.store.get_active_job()
-        has_expired_active = bool(
-            active is not None
-            and (active.lease_expires_at is None or float(active.lease_expires_at) < now)
+        active_jobs = self.store.list_active_jobs()
+        active_ids = {job.job_id for job in active_jobs}
+        has_expired_active = any(
+            job.lease_expires_at is None or float(job.lease_expires_at) < now
+            for job in active_jobs
         )
         pending_events = self.store.list_pending_cleanup_events()
         has_orphan_cleanup = False
         if pending_events:
-            if active is None or has_expired_active:
+            if not active_jobs or has_expired_active:
                 has_orphan_cleanup = True
             else:
-                has_orphan_cleanup = any(ev.get("job_id") != active.job_id for ev in pending_events)
+                has_orphan_cleanup = any(ev.get("job_id") not in active_ids for ev in pending_events)
 
         reclaimable_warm = (
             self.store.list_reclaimable_warm_sessions(only_expired=True, now=now)
@@ -949,27 +951,47 @@ class CloudTelegramBotService:
 
         adapter = self._adapter_factory()
         results = self.store.reconcile_expired_leases(adapter=adapter, now=now)
-        if self.store.get_active_job() is None and self.store.list_pending_cleanup_events():
+        if not self.store.list_active_jobs() and self.store.list_pending_cleanup_events():
             results.extend(self.store.recover(adapter=adapter, only_expired_leases=False, now=time.time()))
         return results
 
-    def _refresh_provider_usage_if_stale_sync(self) -> Optional[Dict[str, Any]]:
-        """
-        Tự động làm mới snapshot số dư Colab trong SQLite khi bản ghi trước đó đã quá 300s.
-        Không gọi provider nếu chưa từng có snapshot hoặc snapshot vẫn còn mới.
-        """
+    def _cancel_abandoned_queued_jobs_sync(self) -> int:
+        """Drop Telegram DB rows whose in-memory delivery item was lost on restart (no provider calls)."""
+        with self._items_lock:
+            known_ids = {
+                item.cloud_job_id
+                for item in [*self._pending_items, *self._active_items.values()]
+                if item.cloud_job_id
+            }
+        cancelled = 0
+        for job in self._telegram_jobs():
+            if job.state == "queued" and job.job_id not in known_ids:
+                result = self.store.request_cancel(
+                    job.job_id,
+                    reason="Bot Cloud đã khởi động lại; gửi lại video để khôi phục thông báo Telegram.",
+                )
+                cancelled += int(bool(result.get("immediate")))
+        return cancelled
+
+    def _refresh_provider_usage_if_stale_sync(self) -> None:
+        """Record a fresh read-only usage sample when an existing observation is no longer usable."""
         snap = self.store.get_provider_usage_snapshot()
         if snap is None or (snap.get("ok") and not snap.get("is_stale")):
-            return None
+            return
         adapter = self._adapter_factory()
         get_usage_fn = getattr(adapter, "get_usage", None)
         if not callable(get_usage_fn):
-            return None
+            return
         usage = get_usage_fn()
         if isinstance(usage, dict):
-            self.store.record_provider_usage_snapshot(usage)
-            return usage
-        return None
+            sample = stamp_provider_usage_observation(usage, observed_at=time.time())
+            self.store.record_provider_usage_snapshot(sample)
+
+    async def _refresh_provider_usage_if_stale(self) -> None:
+        try:
+            await asyncio.to_thread(self._refresh_provider_usage_if_stale_sync)
+        except Exception as exc:
+            logger.warning("Làm mới số dư Colab gặp cảnh báo: %s", redact_secrets(str(exc)))
 
     async def _process_item(self, bot: Any, item: CloudBotQueuedItem) -> None:
         if item.cancelled:
@@ -978,6 +1000,8 @@ class CloudTelegramBotService:
 
         started = time.monotonic()
         local_source_path: Optional[Path] = None
+        cloud_job = None
+        processing_task: Optional[asyncio.Task] = None
         loop = asyncio.get_running_loop()
 
         try:
@@ -987,11 +1011,7 @@ class CloudTelegramBotService:
             except Exception as rec_exc:
                 logger.warning("Đối soát session mồ côi trước job gặp cảnh báo: %s", redact_secrets(str(rec_exc)))
 
-            fresh_usage: Optional[Dict[str, Any]] = None
-            try:
-                fresh_usage = await asyncio.to_thread(self._refresh_provider_usage_if_stale_sync)
-            except Exception as usage_exc:
-                logger.warning("Làm mới số dư Colab trước job gặp cảnh báo: %s", redact_secrets(str(usage_exc)))
+            await self._refresh_provider_usage_if_stale()
 
             # 1. Kiểm tra ngân sách CU hôm nay trước khi tải video (0 CU nếu vượt trần)
             decision = await asyncio.to_thread(
@@ -999,7 +1019,6 @@ class CloudTelegramBotService:
                 cu_estimated=0.5,
                 gpu_type=item.gpu_type,
                 enforce_budget=True,
-                provider_usage=fresh_usage,
             )
             if not decision.get("allowed", True):
                 reason = redact_secrets(str(decision.get("reason") or "Đã chạm hạn mức CU hôm nay."))
@@ -1039,33 +1058,8 @@ class CloudTelegramBotService:
                 await _safe_edit_message(item.status_message, "🛑 Đã huỷ trước khi cấp phát GPU.")
                 return
 
-            # Chờ tuần tự nếu Dashboard đang chạy dở 1 job trên cùng kho SQLite để tái sử dụng warm VM (0 mở trùng 2 máy)
-            from .cloud_worker import peek_cloud_worker
-
-            waited_notice = False
-            while not item.cancelled:
-                dash_w = peek_cloud_worker()
-                dash_job = dash_w.get_current_job() if dash_w is not None else None
-                if dash_job is None:
-                    break
-                if not waited_notice:
-                    waited_notice = True
-                    await _safe_edit_message(
-                        item.status_message,
-                        f"⏳ Đang chờ job `{dash_job.video_name[:40]}` hoàn tất để nhận lại máy ảo GPU `{item.gpu_type}` giữ ấm...",
-                    )
-                await asyncio.sleep(1.0)
-
-            if item.cancelled:
-                await _safe_edit_message(item.status_message, "🛑 Đã huỷ trước khi cấp phát GPU.")
-                return
-
-            # 3. Đưa vào CloudJobStore & claim nguyên tử (làm mới lại nếu bước tải video kéo dài > 300s)
-            claim_usage: Optional[Dict[str, Any]] = None
-            try:
-                claim_usage = await asyncio.to_thread(self._refresh_provider_usage_if_stale_sync)
-            except Exception as usage_exc2:
-                logger.warning("Làm mới số dư Colab trước claim gặp cảnh báo: %s", redact_secrets(str(usage_exc2)))
+            # 3. Queue first, then claim this exact row within the shared Cloud concurrency limit.
+            await self._refresh_provider_usage_if_stale()
 
             allowed_roots = [self.workspace_dir, get_cloud_output_dir(), *get_default_allowed_roots()]
             self._cloud_worker.orchestrator.allowed_roots = allowed_roots
@@ -1073,14 +1067,13 @@ class CloudTelegramBotService:
                 admit_and_enqueue_job,
                 self.store,
                 video_path=str(local_source_path),
-                source_channel="cloud_telegram_bot",
+                source_channel=TELEGRAM_SOURCE_CHANNEL,
                 source_job_id=item.item_id,
                 gpu_type=item.gpu_type,
                 task_type="full_pipeline",
                 voice=item.voice,
                 enforce_budget=True,
-                provider_usage=claim_usage or fresh_usage,
-                claim_immediately=True,
+                claim_immediately=False,
                 owner_id=self._cloud_worker.worker_id,
                 idempotency_key=f"cloudbot:{item.item_id}",
                 allowed_roots=allowed_roots,
@@ -1090,6 +1083,46 @@ class CloudTelegramBotService:
                     "source_label": item.source_label[:200],
                 },
             )
+            item.cloud_job_id = cloud_job.job_id
+            waited_notice = False
+            while not item.cancelled and not (self._stop_async_ev and self._stop_async_ev.is_set()):
+                await self._refresh_provider_usage_if_stale()
+                if item.cancelled or (self._stop_async_ev and self._stop_async_ev.is_set()):
+                    continue
+                # With no raw usage payload, claim_next reads the current snapshot in its transaction.
+                claimed = await asyncio.to_thread(
+                    self.store.claim_next,
+                    owner_id=self._cloud_worker.worker_id,
+                    job_id=cloud_job.job_id,
+                )
+                if claimed is not None:
+                    cloud_job = claimed
+                    break
+                latest = await asyncio.to_thread(self.store.get_job, cloud_job.job_id)
+                if latest is None or latest.state != "queued":
+                    await _safe_edit_message(item.status_message, "🛑 Job Cloud đã rời hàng đợi hoặc được huỷ.")
+                    return
+                rejection = self.store.consume_last_claim_rejection(cloud_job.job_id)
+                if rejection:
+                    raise CloudValidationError(
+                        rejection.get("reason") or "Không thể giữ chỗ ngân sách cho job.",
+                        code=str(rejection.get("code") or "BUDGET_EXCEEDED"),
+                        http_status=int(rejection.get("http_status") or 429),
+                    )
+                if not waited_notice:
+                    waited_notice = True
+                    await _safe_edit_message(
+                        item.status_message,
+                        f"⏳ Đã tải video. Đang chờ luồng Cloud trống cho {item.gpu_type}...",
+                    )
+                await asyncio.sleep(0.5)
+            else:
+                await _safe_edit_message(item.status_message, "🛑 Đã huỷ trước khi cấp phát GPU.")
+                return
+
+            if item.cancelled:
+                await _safe_edit_message(item.status_message, "🛑 Đã huỷ trước khi cấp phát GPU.")
+                return
 
             last_edit_at = [0.0]
             last_pct = [-1]
@@ -1108,11 +1141,13 @@ class CloudTelegramBotService:
                     lambda: asyncio.create_task(_safe_edit_message(item.status_message, msg_text))
                 )
 
-            success = await asyncio.to_thread(
+            processing_task = asyncio.create_task(asyncio.to_thread(
                 self._cloud_worker.process_claimed_job,
                 cloud_job,
                 _on_progress,
-            )
+            ))
+            # Cancelling the async consumer must not delete an input still used by its worker thread.
+            success = await asyncio.shield(processing_task)
             updated = await asyncio.to_thread(self.store.get_job, cloud_job.job_id)
 
             if not success or updated is None or updated.state != "completed":
@@ -1144,36 +1179,30 @@ class CloudTelegramBotService:
             elapsed = int(max(1.0, time.monotonic() - started))
             time_str = f"{elapsed // 60}p {elapsed % 60}s" if elapsed >= 60 else f"{elapsed}s"
             cu_val = float(updated.cu_actual or 0.0)
-            caption = (
-                f"🎬 Đã lồng tiếng Việt (Cloud GPU {updated.gpu_type})\n"
-                f"⏱ {time_str} · ⚡ ~{cu_val:.3f} CU\n"
-                f"💾 Lưu tại: {result_file}"
-            )
-            await _safe_edit_message(
-                item.status_message,
-                f"📤 Đang gửi video thành phẩm lên Telegram...\n💾 Đã lưu: `{result_file}`",
-            )
-            sent_ok = False
-            try:
-                sent_ok = await _deliver_video_to_telegram(
-                    bot,
-                    item.chat_id,
-                    result_file,
-                    caption,
-                    item.status_message,
-                )
-            except Exception as send_exc:
-                logger.warning("Không gửi được file video qua Telegram: %s", redact_secrets(str(send_exc)))
-
             done_summary = (
-                f"✅ *Hoàn tất Cloud GPU ({updated.gpu_type})!*\n"
-                f"⏱ Thời gian: `{time_str}` · ⚡ Tiêu thụ: `~{cu_val:.3f} CU`\n"
-                f"💾 Đã lưu vào: `{result_file}`"
+                f"✅ Hoàn tất Cloud GPU ({updated.gpu_type})\n"
+                f"⏱ {time_str} · ⚡ ~{cu_val:.3f} CU\n"
+                f"💾 Đã lưu vào: {result_file}"
             )
-            if not sent_ok:
-                done_summary += "\n_(Video lớn hoặc mạng chậm nên chưa đính kèm trực tiếp lên chat; bạn mở file tại thư mục trên nhé.)_"
-            await _safe_edit_message(item.status_message, done_summary)
+            try:
+                await bot.send_message(chat_id=item.chat_id, text=redact_secrets(done_summary), parse_mode=None)
+            except Exception as send_exc:
+                logger.warning("Không gửi được thông báo hoàn tất: %s", redact_secrets(str(send_exc)))
+                await _safe_edit_message(item.status_message, done_summary, parse_mode=None)
 
+        except asyncio.CancelledError:
+            item.cancelled = True
+            if cloud_job is not None:
+                await asyncio.to_thread(
+                    self._cloud_worker.cancel_job, cloud_job.job_id,
+                    reason="Bot Cloud đang dừng nhận việc.",
+                )
+            if processing_task is not None:
+                try:
+                    await asyncio.shield(processing_task)
+                except Exception:
+                    pass
+            raise
         except CloudValidationError as val_exc:
             await _safe_edit_message(
                 item.status_message,
@@ -1186,6 +1215,17 @@ class CloudTelegramBotService:
                 f"❌ *Lỗi xử lý video:* {redact_secrets(str(exc))[:400]}",
             )
         finally:
+            if cloud_job is not None:
+                latest = await asyncio.to_thread(self.store.get_job, cloud_job.job_id)
+                if latest is not None and latest.state not in ("completed", "cancelled", "failed", "error", "stopped"):
+                    # This item owns its queue row; never leave a downloaded source queued after deleting it.
+                    await asyncio.to_thread(
+                        request_job_cancellation,
+                        self.store, cloud_job.job_id,
+                        worker=self._cloud_worker,
+                        adapter=self._adapter_factory(),
+                        reason="Mục Telegram đã kết thúc trước khi hoàn tất xử lý.",
+                    )
             if local_source_path is not None:
                 try:
                     local_source_path.unlink(missing_ok=True)
@@ -1200,48 +1240,67 @@ class CloudTelegramBotService:
 
     async def _queue_consumer_loop(self, app: Any, stop_ev: asyncio.Event) -> None:
         assert self._queue is not None
-        try:
-            recovered = await asyncio.to_thread(self._reconcile_orphans_sync)
-            if recovered:
-                logger.info("Đã tự động thu hồi %d phiên/job mồ côi khi khởi động Bot Cloud.", len(recovered))
-        except Exception as rec_exc:
-            logger.warning("Đối soát khởi động Bot Cloud gặp cảnh báo: %s", redact_secrets(str(rec_exc)))
+        processing: Set[asyncio.Task] = set()
+        last_reconcile = time.monotonic()
 
-        while not stop_ev.is_set():
-            get_task = asyncio.create_task(self._queue.get())
-            stop_task = asyncio.create_task(stop_ev.wait())
-            done, pending = await asyncio.wait(
-                {get_task, stop_task},
-                timeout=30.0,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for p in pending:
-                p.cancel()
-                try:
-                    await p
-                except asyncio.CancelledError:
-                    pass
-            if stop_task in done and stop_ev.is_set():
-                break
-            if get_task not in done:
-                try:
-                    await asyncio.to_thread(self._reconcile_orphans_sync)
-                except Exception as rec_exc:
-                    logger.warning("Đối soát định kỳ Bot Cloud gặp cảnh báo: %s", redact_secrets(str(rec_exc)))
-                continue
-            item = get_task.result()
-            if item is None:
-                break
-            with self._items_lock:
-                if item in self._pending_items:
-                    self._pending_items.remove(item)
-                self._active_item = item
+        async def run_item(item: CloudBotQueuedItem) -> None:
             try:
                 await self._process_item(app.bot, item)
             finally:
                 with self._items_lock:
-                    self._active_item = None
+                    self._active_items.pop(item.item_id, None)
+                    self._active_item = next(iter(self._active_items.values()), None)
                 self._queue.task_done()
+
+        try:
+            while not stop_ev.is_set():
+                processing = {task for task in processing if not task.done()}
+                limit = await asyncio.to_thread(self.store.get_concurrency_limit)
+                while len(processing) < limit and not stop_ev.is_set():
+                    try:
+                        item = self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if item is None:
+                        self._queue.task_done()
+                        stop_ev.set()
+                        break
+                    with self._items_lock:
+                        if item in self._pending_items:
+                            self._pending_items.remove(item)
+                        self._active_items[item.item_id] = item
+                        self._active_item = next(iter(self._active_items.values()), None)
+                    processing.add(asyncio.create_task(run_item(item)))
+                if time.monotonic() - last_reconcile >= 30.0:
+                    last_reconcile = time.monotonic()
+                    try:
+                        await asyncio.to_thread(self._reconcile_orphans_sync)
+                    except Exception as rec_exc:
+                        logger.warning("Đối soát định kỳ Bot Cloud gặp cảnh báo: %s", redact_secrets(str(rec_exc)))
+                try:
+                    await asyncio.wait_for(stop_ev.wait(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            with self._items_lock:
+                for item in [*self._pending_items, *self._active_items.values()]:
+                    item.cancelled = True
+            for job in self._telegram_jobs():
+                if job.state in ("completed", "cancelled", "failed", "error", "stopped"):
+                    continue
+                if job.state == "queued":
+                    await asyncio.to_thread(
+                        self.store.request_cancel, job.job_id,
+                        reason="Bot Cloud đang dừng dịch vụ.",
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._cloud_worker.cancel_job, job.job_id,
+                        reason="Bot Cloud đang dừng dịch vụ.",
+                    )
+            # Let download/worker threads finish cleanup before removing their inputs or closing the loop.
+            if processing:
+                await asyncio.gather(*processing, return_exceptions=True)
 
     def _run_bot_thread(self, token: str) -> None:
         loop = asyncio.new_event_loop()
@@ -1288,6 +1347,7 @@ class CloudTelegramBotService:
                 app.add_handler(CommandHandler("gpu", self.cmd_gpu))
                 app.add_handler(CommandHandler("voice", self.cmd_voice))
                 app.add_handler(CommandHandler(["budget", "limit"], self.cmd_budget))
+                app.add_handler(CommandHandler("concurrency", self.cmd_concurrency))
                 app.add_handler(CommandHandler("nospeech", self.cmd_nospeech))
                 app.add_handler(CommandHandler(["stop", "cancel"], self.cmd_stop))
                 app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, self.handle_video_message))
@@ -1303,6 +1363,20 @@ class CloudTelegramBotService:
                 me = await app.bot.get_me()
                 self._bot_username = getattr(me, "username", None)
                 await app.start()
+                try:
+                    await asyncio.to_thread(self._cancel_abandoned_queued_jobs_sync)
+                    recovered = await asyncio.to_thread(self._reconcile_orphans_sync)
+                    if recovered:
+                        logger.info(
+                            "Đã tự động thu hồi %d phiên/job mồ côi khi khởi động Bot Cloud.",
+                            len(recovered),
+                        )
+                except Exception as rec_exc:
+                    logger.warning(
+                        "Đối soát khởi động Bot Cloud gặp cảnh báo: %s",
+                        redact_secrets(str(rec_exc)),
+                    )
+                consumer_task = asyncio.create_task(self._queue_consumer_loop(app, stop_ev))
                 await app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
                     drop_pending_updates=False,
@@ -1315,8 +1389,9 @@ class CloudTelegramBotService:
                     self._bot_username or "unknown",
                     get_cloud_output_dir(),
                 )
-                consumer_task = asyncio.create_task(self._queue_consumer_loop(app, stop_ev))
                 await stop_ev.wait()
+                if consumer_task is not None:
+                    await consumer_task
                 break
             except Exception as exc:
                 self._running = False
@@ -1334,7 +1409,7 @@ class CloudTelegramBotService:
                 backoff = min(backoff * 2.0, 30.0)
             finally:
                 self._running = False
-                if consumer_task is not None:
+                if consumer_task is not None and not consumer_task.done():
                     consumer_task.cancel()
                     try:
                         await consumer_task

@@ -100,6 +100,7 @@ class _ExecutionContext:
     pause_checkpoint: Any = None
     run_stage: Any = None
     ocr_reader_releaser: Any = None
+    voice_prefetch: Any = None
 
 
 class V1Orchestrator:
@@ -351,7 +352,56 @@ class V1Orchestrator:
         active_qc_policy = resolve_qc_policy(c.effective_cfg, c.overrides, self.workspace)
         total_steps = 8 if active_qc_policy == "OFF" else len(STAGES_ORDER)
 
+        _notify_pending: Optional[Tuple[str, int, int, float, str, Dict[str, Any]]] = None
+        _notify_task: Optional[asyncio.Task] = None
+        _notify_cancelled_exc: Optional[BaseException] = None
+        _async_notify_enabled = (
+            os.getenv("V1_ASYNC_PROGRESS_NOTIFY", "1").strip().lower() not in ("0", "false", "no")
+        )
+
+        async def _flush_notify(timeout: Optional[float] = 3.0) -> None:
+            nonlocal _notify_task, _notify_cancelled_exc
+            if _notify_cancelled_exc is not None:
+                exc = _notify_cancelled_exc
+                _notify_cancelled_exc = None
+                raise exc
+            if _notify_task is not None:
+                try:
+                    if timeout is not None:
+                        await asyncio.wait_for(asyncio.shield(_notify_task), timeout=timeout)
+                    else:
+                        await asyncio.shield(_notify_task)
+                except asyncio.TimeoutError:
+                    pass
+                if _notify_cancelled_exc is not None:
+                    exc = _notify_cancelled_exc
+                    _notify_cancelled_exc = None
+                    raise exc
+
+        async def _drain_notify_loop() -> None:
+            nonlocal _notify_pending, _notify_task, _notify_cancelled_exc
+            try:
+                while _notify_pending is not None:
+                    item = _notify_pending
+                    _notify_pending = None
+                    s_name, st_num, tot_steps, p_val, msg_txt, det_map = item
+                    try:
+                        await progress_callback(s_name, st_num, tot_steps, p_val, msg_txt, det_map)
+                    except asyncio.CancelledError as c_exc:
+                        _notify_cancelled_exc = c_exc
+                        _notify_pending = None
+                        raise
+                    except Exception:
+                        logger.warning("Progress notification failed; keep processing job %s", job_id, exc_info=True)
+            finally:
+                _notify_task = None
+
         async def notify(stage: str, step: int, pct: float, msg: str, details: Optional[Dict[str, Any]] = None):
+            nonlocal _notify_pending, _notify_task, _notify_cancelled_exc
+            if _notify_cancelled_exc is not None:
+                exc = _notify_cancelled_exc
+                _notify_cancelled_exc = None
+                raise exc
             if progress_callback:
                 if total_steps == 8 and isinstance(msg, str):
                     msg = msg.replace(f"Bước {step}/9:", f"Bước {step}/8:")
@@ -360,7 +410,21 @@ class V1Orchestrator:
                 d["job_id"] = job_id
                 try:
                     if asyncio.iscoroutinefunction(progress_callback):
-                        await progress_callback(stage, step, total_steps, pct, msg, d)
+                        if not _async_notify_enabled or stage in ("quality_gate", "publish"):
+                            if _notify_task is not None:
+                                await _flush_notify(timeout=3.0)
+                            await progress_callback(stage, step, total_steps, pct, msg, d)
+                        else:
+                            _notify_pending = (stage, step, total_steps, pct, msg, d)
+                            if _notify_task is None or _notify_task.done():
+                                _notify_task = asyncio.create_task(_drain_notify_loop())
+                            # Yield once so fast callbacks or immediate cancellations run right away,
+                            # while slow HTTP/Telegram updates continue in background.
+                            await asyncio.sleep(0)
+                            if _notify_cancelled_exc is not None:
+                                exc = _notify_cancelled_exc
+                                _notify_cancelled_exc = None
+                                raise exc
                     else:
                         progress_callback(stage, step, total_steps, pct, msg, d)
                 except asyncio.CancelledError:
@@ -388,22 +452,39 @@ class V1Orchestrator:
         c.notify, c.check_stop = notify, check_stop
         c.pause_checkpoint, c.run_stage = pause_checkpoint, run_stage
         self._restore_execution_checkpoint(c, resume_if_possible)
-        original_audio = await self._stage_extract(c)
-        vocals_audio, no_vocals_audio = await self._stage_separate(c, original_audio)
-        srt_original, srt_segments, asr_was_empty = await self._stage_asr(c, vocals_audio, original_audio)
-        vocals_audio = getattr(c, "_recovered_vocals_audio", vocals_audio)
-        no_vocals_audio = getattr(c, "_recovered_no_vocals_audio", no_vocals_audio)
-        srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
-            c, srt_original, srt_segments, asr_was_empty)
-        translated_segments, v1_script_mode = await self._stage_translate(
-            c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio)
-        translated_segments, dubbing_audio_files, ass_path = await self._stage_tts(
-            c, original_audio, vocals_audio, srt_segments, translated_segments,
-            floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode)
-        mixed_audio = await self._stage_mix(c, original_audio, no_vocals_audio, asr_was_empty, dubbing_audio_files)
-        final_video, temp_render_video = await self._stage_render(c, ass_path, mixed_audio, main_y_pct)
-        return await self._stage_qc_and_deliver(
-            c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path)
+        completed_ok = False
+        try:
+            original_audio = await self._stage_extract(c)
+            vocals_audio, no_vocals_audio = await self._stage_separate(c, original_audio)
+            srt_original, srt_segments, asr_was_empty = await self._stage_asr(c, vocals_audio, original_audio)
+            vocals_audio = getattr(c, "_recovered_vocals_audio", vocals_audio)
+            no_vocals_audio = getattr(c, "_recovered_no_vocals_audio", no_vocals_audio)
+            srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
+                c, srt_original, srt_segments, asr_was_empty)
+            translated_segments, v1_script_mode = await self._stage_translate(
+                c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio)
+            translated_segments, dubbing_audio_files, ass_path = await self._stage_tts(
+                c, original_audio, vocals_audio, srt_segments, translated_segments,
+                floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode)
+            mixed_audio = await self._stage_mix(c, original_audio, no_vocals_audio, asr_was_empty, dubbing_audio_files)
+            final_video, temp_render_video = await self._stage_render(c, ass_path, mixed_audio, main_y_pct)
+            out_result = await self._stage_qc_and_deliver(
+                c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path)
+            completed_ok = True
+            return out_result
+        finally:
+            if getattr(c, "voice_prefetch", None):
+                await asyncio.to_thread(c.voice_prefetch.close)
+            if completed_ok:
+                await _flush_notify(timeout=3.0)
+            else:
+                _notify_pending = None
+                if _notify_task is not None and not _notify_task.done():
+                    _notify_task.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.gather(_notify_task, return_exceptions=True), timeout=0.5)
+                    except Exception:
+                        pass
 
     def _prepare_execution(self, video_path, job_id, output_dir, delivery_path, user_mode, overrides, resume_if_possible):
         v_path = Path(video_path).resolve()
@@ -424,8 +505,9 @@ class V1Orchestrator:
         # The same input may be retried with a fresh queue ID. Reuse only a
         # non-completed manifest with verified source and the same working folder.
         if resume_if_possible and not self.manifest_manager.load_manifest(job_id):
+            scan_limit = max(10, int(os.getenv("V1_RESUME_MANIFEST_SCAN_LIMIT", "50")))
             candidates = sorted(self.manifest_manager.manifest_dir.glob("*.manifest.json"),
-                                key=lambda p: p.stat().st_mtime, reverse=True)
+                                key=lambda p: p.stat().st_mtime, reverse=True)[:scan_limit]
             for candidate in candidates:
                 old = self.manifest_manager.load_manifest(candidate.name.removesuffix(".manifest.json"))
                 if (old and old.status != "completed" and Path(old.video_path).resolve() == v_path
@@ -903,16 +985,11 @@ class V1Orchestrator:
             flags = dict(c.overrides.get("feature_flags") or get_feature_flags(self.workspace))
             enable_smart = flags.get("V1_SMART_SKIP_OCR", True)
             ocr_strat = c.overrides.get("ocr_strategy") or c.planned.get("ocr_strategy", "auto")
-            if c.overrides.get("ocr_strategy"):
-                ocr_strat = c.overrides["ocr_strategy"]
-            elif enable_smart:
-                ocr_strat = "smart_skip"
-            elif not ocr_strat or ocr_strat == "auto":
-                short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
-                if c.video_dur_s > 0 and c.video_dur_s <= short_thresh:
-                    ocr_strat = "full"
-                else:
-                    ocr_strat = "smart_skip"
+            short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
+            if 0 < c.video_dur_s <= short_thresh:
+                ocr_strat = "full"
+            elif not c.overrides.get("ocr_strategy"):
+                ocr_strat = "smart_skip" if enable_smart else "full"
             try:
                 import job_tracker
                 from ai.v1_model_policy import current_v1_model_policy
@@ -979,7 +1056,7 @@ class V1Orchestrator:
             finally:
                 if "release_ocr_reader" in locals():
                     try:
-                        release_ocr_reader(force_close_session=True)
+                        release_ocr_reader(force_close_session=False)
                     except TypeError:
                         release_ocr_reader()
                 elif c.ocr_reader_releaser is not None:
@@ -1047,10 +1124,19 @@ class V1Orchestrator:
                     and v_mode != "manual"
                     and (v_cfg.get("enabled") or v_mode in ("auto", "dialogue", "smart_dialogue", "dual"))
                 )
-                if run_early_voice_lock:
+                # Single acoustic and manual choices can also be settled before
+                # translation. Script-dependent choices stay with stage 6.
+                prefetch_voice = None
+                if v_mode == "manual":
+                    manual = v_cfg.get("manual_voice") or {}
+                    if isinstance(manual, dict):
+                        prefetch_voice = {"voice_source": manual.get("source"), "voice_param": manual.get("param")}
+                elif run_early_voice_lock or (srt_segments and c.visual_sub_to_speech and vocals_audio
+                                               and v_mode == "auto" and not v_cfg.get("dual_voice")
+                                               and not all(getattr(s, "visual_sub_to_speech", False) for s in srt_segments)):
                     try:
                         from ai.v1_auto_voice import decide_video_voice
-                        voice_lock_info = await asyncio.to_thread(
+                        prefetch_voice = await asyncio.to_thread(
                             decide_video_voice,
                             out_dir=str(c.out_dir),
                             srt_segments=srt_segments,
@@ -1061,8 +1147,11 @@ class V1Orchestrator:
                             workspace=str(self.workspace),
                             voice_config=c.effective_cfg["voice_config"],
                             job_id=c.job_id,
-                            visual_sub_to_speech=bool(c.visual_sub_to_speech and asr_was_empty),
+                            visual_sub_to_speech=c.visual_sub_to_speech,
+                            defer_script_fallback=not run_early_voice_lock,
                         )
+                        if run_early_voice_lock:
+                            voice_lock_info = prefetch_voice
                     except Exception as vl_exc:
                         logger.warning("[TRANSLATE] Early voice lock fallback sang speaker='unknown': %s", vl_exc)
 
@@ -1112,23 +1201,29 @@ class V1Orchestrator:
 
                 gemini_key = c.overrides.get("api_key") or ""
                 c.check_stop()
-                translated_segments = await c.run_stage(
-                    asyncio.to_thread(
-                        translate_subtitles,
-                        srt_segments,
-                        c.effective_cfg.get("target_lang", "vi"),
-                        api_key=gemini_key,
-                        video_path=str(c.v_path),
-                        strict=True,
-                        script_mode=v1_script_mode,
-                        cue_meta=cue_meta or None,
-                        gemini_model=flag_gemini or None,
-                        max_speech_speed=(c.effective_cfg.get("feature_flags") or {}).get("V1_MAX_NATURAL_SPEED"),
-                        stop_checker=lambda: shared_state.stop_requested,
-                        folder_scope=str(c.v_path.parent),
-                    ),
-                    timeout=t_out
+                from ai.v1_voice_prefetch import CapCutPrefetch
+                prefetch = None
+                if (prefetch_voice and prefetch_voice.get("voice_source") == "capcut"
+                        and prefetch_voice.get("voice_param") and not prefetch_voice.get("dual_voice")
+                        and not any((c.out_dir / "dubbing").glob("*.mp3"))
+                        and c.effective_cfg.get("target_lang", "vi").lower().startswith("vi")):
+                    prefetch = CapCutPrefetch(c.out_dir / "dubbing", prefetch_voice["voice_param"],
+                                              (c.effective_cfg.get("feature_flags") or {}).get("V1_TTS_WORKERS", 6),
+                                              lambda: shared_state.stop_requested)
+                    c.voice_prefetch = prefetch
+                translation_work = asyncio.to_thread(
+                    translate_subtitles, srt_segments, c.effective_cfg.get("target_lang", "vi"),
+                    api_key=gemini_key, video_path=str(c.v_path), strict=True,
+                    script_mode=v1_script_mode, cue_meta=cue_meta or None, gemini_model=flag_gemini or None,
+                    max_speech_speed=(c.effective_cfg.get("feature_flags") or {}).get("V1_MAX_NATURAL_SPEED"),
+                    stop_checker=lambda: shared_state.stop_requested, folder_scope=str(c.v_path.parent),
+                    _on_ready_texts=prefetch.submit if prefetch else None,
                 )
+                try:
+                    translated_segments = await c.run_stage(translation_work, timeout=t_out)
+                finally:
+                    if prefetch:
+                        prefetch.close(wait=False)
                 save_srt(translated_segments, str(srt_translated))
                 try:
                     import job_tracker

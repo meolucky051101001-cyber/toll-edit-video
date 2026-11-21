@@ -9,10 +9,52 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import json
+from fractions import Fraction
+import subprocess
 
 
 class CaptionGeometryError(ValueError):
     pass
+
+
+class _CaptionFrameClockError(CaptionGeometryError):
+    pass
+
+
+def _probe_frame_clock(input_video, *, include_frames=False):
+    entries = "frame=best_effort_timestamp_time:format=start_time" if include_frames else "stream=r_frame_rate,avg_frame_rate"
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-threads", "2", "-select_streams", "v:0",
+         *(["-show_frames", "-show_format"] if include_frames else ["-show_streams"]), "-show_entries", entries,
+         "-of", "json", str(input_video)],
+        capture_output=True, text=True, encoding="utf-8", timeout=120 if include_frames else 15,
+        check=True, shell=False,
+    )
+    return json.loads(probe.stdout)
+
+
+def _source_has_variable_frame_rate(input_video):
+    try:
+        stream = _probe_frame_clock(input_video)["streams"][0]
+        nominal = Fraction(stream["r_frame_rate"])
+        average = Fraction(stream["avg_frame_rate"])
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, IndexError, ZeroDivisionError):
+        return False
+    return nominal > 0 and average > 0 and nominal != average
+
+
+def _verified_frame_times(input_video, duration):
+    try:
+        source = _probe_frame_clock(input_video, include_frames=True)
+        start = source.get("format", {}).get("start_time", "0")
+        origin = 0.0 if start == "N/A" else float(start)
+        times = [round(float(frame["best_effort_timestamp_time"]) - origin, 6) for frame in source["frames"]]
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError) as exc:
+        raise _CaptionFrameClockError("FFprobe could not verify source frame timestamps") from exc
+    if (not times or any(not math.isfinite(timestamp) or not 0 <= timestamp < duration for timestamp in times)
+            or any(right <= left for left, right in zip(times, times[1:]))):
+        raise _CaptionFrameClockError("Source presentation timestamps must increase within the video duration")
+    return times
 
 
 def _iou(a, b):
@@ -163,7 +205,7 @@ def _reconcile_two_scales(first, second, *, band_top, band_bottom):
     return sorted(merged)
 
 
-def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None):
+def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_bounds=None):
     """Return measured boxes, or verified empty; ambiguous detections raise.
 
     A supported dialogue-caption band is needed to classify detected text as
@@ -175,15 +217,33 @@ def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None):
         top, bottom = max(0., band_top - margin), min(1., band_bottom + margin)
     else:
         top, bottom = 0., 1.
-    raw1 = _detect(reader, frame, top=top, bottom=bottom, scale=1.)
-    raw2 = _detect(reader, frame, top=top, bottom=bottom, scale=1.5)
+    if anchored and x_bounds is not None:
+        width = frame.shape[1]
+        left, right = int(x_bounds[0] * width), math.ceil(x_bounds[1] * width)
+        crop = frame[:, left:right]
+        scales = (1.5, 2., 1.75, 2.5)
+    else:
+        crop = frame
+        scales = (1., 1.5, 1.25, 2.)
+
+    def probe(scale):
+        boxes = _detect(reader, crop, top=top, bottom=bottom, scale=scale)
+        if crop is frame:
+            return boxes
+        return [[(x1 * (right - left) + left) / width, y1,
+                 (x2 * (right - left) + left) / width, y2] for x1, y1, x2, y2 in boxes]
+
+    raw1, raw2 = probe(scales[0]), probe(scales[1])
     if not raw1 and not raw2:
         return []
     if not anchored:
         raise CaptionGeometryError("Detected text has no verified dialogue-caption band")
     def in_band(box):
+        box_height = box[3] - box[1]
+        if x_bounds is not None and box_height > .055:
+            return False  # The verified compact lane contains small caption rows.
         intersection = max(0., min(box[3], band_bottom) - max(box[1], band_top))
-        return intersection >= .45 * min(box[3] - box[1], band_bottom - band_top)
+        return intersection >= .45 * min(box_height, band_bottom - band_top)
     first = _coalesce_same_line([b for b in raw1 if in_band(b)])
     second = _coalesce_same_line([b for b in raw2 if in_band(b)])
     if not first and not second:
@@ -192,13 +252,34 @@ def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None):
     if agreed is not None:
         return agreed
     if reader is not None:
-        raw_mid = _detect(reader, frame, top=top, bottom=bottom, scale=1.25)
+        raw_mid = probe(scales[2])
         mid = _coalesce_same_line([b for b in raw_mid if in_band(b)])
         for cand_a, cand_b in ((first, mid), (mid, second)):
             agreed_mid = _reconcile_two_scales(cand_a, cand_b, band_top=band_top, band_bottom=band_bottom)
             if agreed_mid is not None:
                 return agreed_mid
-    raise CaptionGeometryError("Caption detector scales disagree; geometry needs review")
+
+        # A larger sample can recover thin strokes missed in lower-resolution
+        # passes. It must corroborate an existing measurement of visible text.
+        raw_large = probe(scales[3])
+        large = _coalesce_same_line([b for b in raw_large if in_band(b)])
+        consensus = []
+        for earlier in (first, mid, second):
+            measured = _reconcile_two_scales(earlier, large, band_top=band_top, band_bottom=band_bottom)
+            if measured:
+                consensus.append(measured)
+        if consensus:
+            agreed = consensus[0]
+            for other in consensus[1:]:
+                agreed = _reconcile_two_scales(agreed, other, band_top=band_top, band_bottom=band_bottom)
+                if not agreed:
+                    break
+            if agreed:
+                return agreed
+
+    raise CaptionGeometryError(
+        f"Caption detector scales disagree; geometry needs review (band {band_top:.3f}–{band_bottom:.3f})"
+    )
 
 
 def _make_box_signature_fn(width: int, height: int):
@@ -291,7 +372,7 @@ def _coalesce_segment_tracking_blocks(rows: list[dict], width: int, height: int)
 
 
 def acquire_caption_geometry(input_video, segments, reader, *, band_top=None, band_bottom=None,
-                             duration, audit_path, sample_step=.35, max_samples=4000,
+                             x_bounds=None, duration, audit_path, sample_step=.35, max_samples=4000,
                              max_extra_frames=2000):
     """Reacquire source geometry across the timeline, including speech gaps.
 
@@ -316,59 +397,75 @@ def acquire_caption_geometry(input_video, segments, reader, *, band_top=None, ba
         width, height, count = int(width), int(height), int(count)
         if min(width, height, count) <= 0:
             raise CaptionGeometryError("Invalid source frame clock")
-        step = max(1, int(fps * sample_step))
-        indices = sorted(set(range(0, count, step)) | {count - 1})
-        if len(indices) > max_samples:
-            raise CaptionGeometryError("Caption geometry exceeds its sampling budget")
-        times = {}
-        can_step = callable(getattr(capture, "grab", None))
-        decoder_next = [None]
-        max_step_grab = max(24, step + 4)
+        def rewind():
+            nonlocal capture
+            capture.release()
+            capture = cv2.VideoCapture(str(input_video))
+            if not capture.isOpened():
+                raise _CaptionFrameClockError("Cannot reopen the source for sequential decoding")
 
-        def observe(index):
-            if (
-                can_step
-                and index > 0
-                and decoder_next[0] is not None
-                and 0 <= (index - decoder_next[0]) <= max_step_grab
-            ):
-                skip = index - decoder_next[0]
-                for _ in range(skip):
-                    if not capture.grab():
-                        decoder_next[0] = None
-                        raise CaptionGeometryError(f"Source frame step failed before {index}")
-            else:
-                decoder_next[0] = None
-                if not capture.set(cv2.CAP_PROP_POS_FRAMES, index):
-                    raise CaptionGeometryError(f"Source frame seek failed at {index}")
-            ok, frame = capture.read()
-            next_frame = float(capture.get(cv2.CAP_PROP_POS_FRAMES))
-            if not math.isfinite(next_frame) or abs(next_frame - (index + 1)) > .01:
-                decoder_next[0] = None
-                raise CaptionGeometryError(f"Decoded frame does not match requested frame {index}")
-            decoder_next[0] = index + 1
-            pts = float(capture.get(cv2.CAP_PROP_POS_MSEC)) / 1000.
-            if not ok or frame is None or not math.isfinite(pts) or not 0 <= pts < duration:
-                decoder_next[0] = None
-                raise CaptionGeometryError(f"Source frame {index} could not be verified")
-            times[index] = pts
-            return observe_caption_boxes(reader, frame, band_top=band_top, band_bottom=band_bottom)
+        def collect_samples(frame_times=None):
+            verified_clock = frame_times is not None
+            frame_count = len(frame_times) if verified_clock else count
+            step = max(1, int(fps * sample_step))
+            indices = sorted(set(range(0, frame_count, step)) | {frame_count - 1})
+            if len(indices) > max_samples:
+                raise CaptionGeometryError("Caption geometry exceeds its sampling budget")
+            times = {}
+            can_step = callable(getattr(capture, "grab", None))
+            next_index = 0 if verified_clock else None
 
-        samples = {index: observe(index) for index in indices}
-        # Pixel-sized jitter should not trigger a full-frame scan; the union of
-        # adjacent observations covers that bounded detector variation.
-        signature = _make_box_signature_fn(width, height)
-        samples, extra = refine_observations(
-            samples,
-            count,
-            observe,
-            signature,
-            max_extra_frames=max_extra_frames,
-            observe_batch=lambda batch: [observe(idx) for idx in sorted(batch)],
-        )
-        ordered = sorted(samples)
-        if any(times[b] <= times[a] for a, b in zip(ordered, ordered[1:])):
-            raise CaptionGeometryError("Decoded caption timestamps are not strictly increasing")
+            def observe(index):
+                nonlocal next_index
+                if verified_clock and index < next_index:
+                    rewind()
+                    next_index = 0
+                if verified_clock or (can_step and next_index is not None and 0 <= index - next_index <= max(24, step + 4)):
+                    for _ in range(index - next_index):
+                        if not capture.grab():
+                            raise _CaptionFrameClockError(f"Source frame step failed before {index}")
+                elif not capture.set(cv2.CAP_PROP_POS_FRAMES, index):
+                    raise _CaptionFrameClockError(f"Source frame seek failed at {index}")
+                ok, frame = capture.read()
+                next_frame = float(capture.get(cv2.CAP_PROP_POS_FRAMES))
+                if not ok or frame is None or not math.isfinite(next_frame) or abs(next_frame - (index + 1)) > .01:
+                    raise _CaptionFrameClockError(f"Decoded frame does not match requested frame {index}")
+                next_index = index + 1
+                pts = frame_times[index] if verified_clock else float(capture.get(cv2.CAP_PROP_POS_MSEC)) / 1000.
+                if not math.isfinite(pts) or not 0 <= pts < duration:
+                    raise _CaptionFrameClockError(f"Source frame {index} could not be verified")
+                times[index] = pts
+                try:
+                    return observe_caption_boxes(reader, frame, band_top=band_top, band_bottom=band_bottom,
+                                                 x_bounds=x_bounds)
+                except CaptionGeometryError as exc:
+                    raise CaptionGeometryError(f"Frame {index} at {pts:.3f}s: {exc}") from exc
+
+            samples = {index: observe(index) for index in indices}
+            if verified_clock and capture.grab():
+                raise _CaptionFrameClockError("Decoded frame count does not match the source timeline")
+            signature = _make_box_signature_fn(width, height)
+            samples, extra = refine_observations(
+                samples, frame_count, observe, signature, max_extra_frames=max_extra_frames,
+                observe_batch=lambda batch: [observe(index) for index in batch],
+            )
+            ordered = sorted(samples)
+            if any(times[b] <= times[a] for a, b in zip(ordered, ordered[1:])):
+                raise _CaptionFrameClockError("Decoded caption timestamps are not strictly increasing")
+            return samples, times, ordered, extra, signature
+
+        if _source_has_variable_frame_rate(input_video):
+            report["frame_clock"] = "source_presentation_timestamps"
+            collected = collect_samples(_verified_frame_times(input_video, duration))
+        else:
+            report["frame_clock"] = "opencv"
+            try:
+                collected = collect_samples()
+            except _CaptionFrameClockError:
+                rewind()
+                report["frame_clock"] = "source_presentation_timestamps"
+                collected = collect_samples(_verified_frame_times(input_video, duration))
+        samples, times, ordered, extra, signature = collected
         blocks = []
         for position, (boxes, start, end) in enumerate(observation_intervals(samples, fps, duration, frame_times=times)):
             neighbour = samples[ordered[position + 1]] if position + 1 < len(ordered) else boxes

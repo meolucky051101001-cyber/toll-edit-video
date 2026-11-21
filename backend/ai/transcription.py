@@ -290,6 +290,11 @@ def _merge_continuous_sentences(segments, max_gap=0.35, max_duration=4.8, max_cj
         # Merge contiguous clauses
         current["end"] = item["end"]
         current["text"] = _join_aligned_tokens(curr_text, next_text)
+        if "avg_logprob" in item:
+            if "avg_logprob" in current:
+                current["avg_logprob"] = min(float(current["avg_logprob"]), float(item["avg_logprob"]))
+            else:
+                current["avg_logprob"] = float(item["avg_logprob"])
 
     if current is not None:
         merged.append(current)
@@ -311,6 +316,7 @@ def _transcribe_raw_segments(model, target_audio):
         text = segment.text.strip()
         if not text:
             continue
+        seg_logprob = float(getattr(segment, "avg_logprob", 0.0) or 0.0)
         words = getattr(segment, "words", None)
         duration = float(segment.end) - float(segment.start)
         if words and duration > 6.0:
@@ -325,17 +331,17 @@ def _transcribe_raw_segments(model, target_audio):
                 if is_end or is_comma:
                     txt = "".join(str(getattr(x, "word", "") or "") for x in cur).strip()
                     if txt:
-                        sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt})
+                        sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt, "avg_logprob": seg_logprob})
                     cur = []
             if cur:
                 txt = "".join(str(getattr(x, "word", "") or "") for x in cur).strip()
                 if txt:
-                    sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt})
+                    sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt, "avg_logprob": seg_logprob})
             if len(sub_chunks) > 1:
                 transcribed_segments.extend(sub_chunks)
                 continue
         start, end = _word_aligned_bounds(segment)
-        transcribed_segments.append({"start": start, "end": end, "text": text})
+        transcribed_segments.append({"start": start, "end": end, "text": text, "avg_logprob": seg_logprob})
     return transcribed_segments
 
 
@@ -468,12 +474,14 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
 
     try:
         from .v1_sensevoice_adapter import (
+            analyze_audio_sensevoice,
             check_sensevoice_readiness,
             refine_whisper_with_sensevoice,
             transcribe_audio_sensevoice,
         )
     except ImportError:
         from ai.v1_sensevoice_adapter import (
+            analyze_audio_sensevoice,
             check_sensevoice_readiness,
             refine_whisper_with_sensevoice,
             transcribe_audio_sensevoice,
@@ -562,30 +570,54 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
     selected_model = None
     whisper_cache = os.path.join(policy.model_cache_directory, "faster_whisper")
     os.makedirs(whisper_cache, exist_ok=True)
-    for model_name in policy.whisper_candidates:
-        print(
-            "Transcribing {} with Faster-Whisper {}...".format(
-                audio_path, model_name
-            )
-        )
-        try:
-            merged_segments = _transcribe_once(
-                audio_path,
-                model_name,
-                num_workers,
-                download_root=whisper_cache,
-                original_audio_path=original_audio_path,
-                chunking=chunking, chunk_size_s=chunk_size_s, overlap_s=overlap_s,
-            )
-            selected_model = model_name
-            break
-        except Exception as exc:
-            failures.append("{}: {}".format(model_name, exc))
+
+    sv_ready_hybrid = False
+    sv_reason_hybrid = ""
+    precomputed_sv_data = None
+    sv_executor = None
+    sv_future = None
+    if model_id == "whisper_sensevoice":
+        sv_ready_hybrid, sv_reason_hybrid = check_sensevoice_readiness(ignore_flag=True)
+        parallel_sv = os.getenv("V1_ASR_PARALLEL_SENSEVOICE", "1").strip().lower() not in ("0", "false", "no")
+        if sv_ready_hybrid and parallel_sv and audio_path and os.path.isfile(str(audio_path)):
+            import concurrent.futures
+            sv_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            sv_future = sv_executor.submit(analyze_audio_sensevoice, audio_path)
+
+    try:
+        for model_name in policy.whisper_candidates:
             print(
-                "⚠️ Faster-Whisper {} không dùng được; thử model dự phòng: {}".format(
-                    model_name, exc
+                "Transcribing {} with Faster-Whisper {}...".format(
+                    audio_path, model_name
                 )
             )
+            try:
+                merged_segments = _transcribe_once(
+                    audio_path,
+                    model_name,
+                    num_workers,
+                    download_root=whisper_cache,
+                    original_audio_path=original_audio_path,
+                    chunking=chunking, chunk_size_s=chunk_size_s, overlap_s=overlap_s,
+                )
+                selected_model = model_name
+                break
+            except Exception as exc:
+                failures.append("{}: {}".format(model_name, exc))
+                print(
+                    "⚠️ Faster-Whisper {} không dùng được; thử model dự phòng: {}".format(
+                        model_name, exc
+                    )
+                )
+    finally:
+        if sv_future is not None:
+            try:
+                precomputed_sv_data = sv_future.result()
+            except Exception as sv_pre_err:
+                logger.debug("Parallel SenseVoice precomputation skipped: %s", sv_pre_err)
+                precomputed_sv_data = None
+        if sv_executor is not None:
+            sv_executor.shutdown(wait=False)
 
     if merged_segments is None:
         raise RuntimeError(
@@ -596,31 +628,56 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
     merged_segments = _merge_continuous_sentences(merged_segments)
 
     if model_id == "whisper_sensevoice":
-        sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
-        if sv_ready:
+        if sv_ready_hybrid:
             try:
                 print("🔗 [Hybrid ASR] Đang chạy SenseVoice-Small CTC (60ms) để nắn mốc thời gian & lọc tạp âm...")
-                merged_segments = refine_whisper_with_sensevoice(
-                    merged_segments,
-                    audio_path=audio_path,
-                    original_audio_path=original_audio_path,
-                )
+                if precomputed_sv_data is not None:
+                    try:
+                        merged_segments = refine_whisper_with_sensevoice(
+                            merged_segments,
+                            audio_path=audio_path,
+                            original_audio_path=original_audio_path,
+                            precomputed_sv_data=precomputed_sv_data,
+                        )
+                    except TypeError:
+                        merged_segments = refine_whisper_with_sensevoice(
+                            merged_segments,
+                            audio_path=audio_path,
+                            original_audio_path=original_audio_path,
+                        )
+                else:
+                    merged_segments = refine_whisper_with_sensevoice(
+                        merged_segments,
+                        audio_path=audio_path,
+                        original_audio_path=original_audio_path,
+                    )
             except Exception as sv_err:
                 logger.warning("Hybrid SenseVoice refinement skipped due to error: %s", sv_err)
                 print(f"⚠️ Bỏ qua bước tinh chỉnh SenseVoice ({sv_err}); giữ nguyên kết quả Faster-Whisper.")
         else:
-            logger.info("SenseVoice not ready for hybrid refinement: %s", sv_reason)
+            logger.info("SenseVoice not ready for hybrid refinement: %s", sv_reason_hybrid)
 
-        try:
+        co_asr_mode = os.getenv("V1_PARAFORMER_CO_ASR", "selective").strip().lower()
+        if co_asr_mode not in ("0", "false", "no", "off"):
             try:
-                from .v1_paraformer_adapter import check_paraformer_readiness, enrich_segments_with_paraformer
-            except ImportError:
-                from ai.v1_paraformer_adapter import check_paraformer_readiness, enrich_segments_with_paraformer
-            pf_ready, _ = check_paraformer_readiness()
-            if pf_ready and merged_segments:
-                merged_segments = enrich_segments_with_paraformer(merged_segments, audio_path=audio_path)
-        except Exception as pf_enrich_err:
-            logger.debug("Paraformer co-recognition enrichment skipped: %s", pf_enrich_err)
+                try:
+                    from .v1_paraformer_adapter import check_paraformer_readiness, enrich_segments_with_paraformer
+                except ImportError:
+                    from ai.v1_paraformer_adapter import check_paraformer_readiness, enrich_segments_with_paraformer
+                pf_ready, _ = check_paraformer_readiness()
+                if pf_ready and merged_segments:
+                    shared_mono_16k = precomputed_sv_data.get("mono_16k") if isinstance(precomputed_sv_data, dict) else None
+                    try:
+                        merged_segments = enrich_segments_with_paraformer(
+                            merged_segments,
+                            audio_path=audio_path,
+                            preloaded_mono_16k=shared_mono_16k,
+                            selective=(co_asr_mode == "selective"),
+                        )
+                    except TypeError:
+                        merged_segments = enrich_segments_with_paraformer(merged_segments, audio_path=audio_path)
+            except Exception as pf_enrich_err:
+                logger.debug("Paraformer co-recognition enrichment skipped: %s", pf_enrich_err)
 
     srt_segments = []
     for i, seg in enumerate(merged_segments, start=1):

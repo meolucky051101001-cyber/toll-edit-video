@@ -287,6 +287,32 @@ def separate_vocals_demucs(
             os.makedirs(roformer_out_dir, exist_ok=True)
             print(f"Bắt đầu tách âm thanh bằng BS-RoFormer ({model_name}) native FP16...")
             try:
+                def _record_roformer_success(data):
+                    v_path = data.get("vocals_path")
+                    bg_path = data.get("background_path")
+                    if v_path and bg_path and os.path.isfile(v_path) and os.path.isfile(bg_path):
+                        print(f"BS-RoFormer tách thành công! Nhạc nền sạch: {bg_path}")
+                        try:
+                            from job_tracker import record_separator_info
+                            record_separator_info({
+                                "engine": "bs_roformer",
+                                "engine_requested": sep_mode,
+                                "model": model_name,
+                                "device": data.get("device", "cuda"),
+                                "device_name": data.get("device_name", ""),
+                                "fp_mode": data.get("fp_mode", "fp32"),
+                                "inference_time_s": data.get("inference_time_s"),
+                                "total_time_s": data.get("total_time_s"),
+                                "peak_vram_mb": data.get("peak_vram_mb"),
+                                "vocals_path": v_path,
+                                "bgm_path": bg_path,
+                                "cache_hit": bool(data.get("warm_reused", False)),
+                            })
+                        except Exception as _phase6_exc:
+                            logger.warning('Suppressed error in video_utils.separate_vocals_demucs (record_separator_info): %s', type(_phase6_exc).__name__, exc_info=False)
+                        return v_path, bg_path
+                    return None
+
                 cmd_roformer = [
                     str(roformer_py),
                     worker_script,
@@ -296,9 +322,59 @@ def separate_vocals_demucs(
                     "--model-name", model_name,
                     "--use-fp16",
                 ]
+                _keep_warm_default = "0" if os.getenv("PYTEST_CURRENT_TEST") else "1"
+                use_warm_sep = (
+                    os.getenv("V1_SEPARATOR_KEEP_WARM", _keep_warm_default).strip().lower() not in ("0", "false", "no")
+                    and isinstance(subprocess.Popen, type)
+                )
                 _check_separator_stop(before_launch=True)
                 with separator_gpu_lock(timeout_seconds=total_timeout):
                     _check_separator_stop(before_launch=True)
+                    if use_warm_sep:
+                        try:
+                            try:
+                                from .ai.v1_separator_session import (
+                                    close_session as _close_warm_sep_session,
+                                    run_separator_request,
+                                )
+                            except ImportError:
+                                from ai.v1_separator_session import (
+                                    close_session as _close_warm_sep_session,
+                                    run_separator_request,
+                                )
+                            warm_data = run_separator_request(
+                                roformer_py,
+                                worker_script,
+                                {
+                                    "input_audio": os.path.abspath(input_audio_path),
+                                    "output_dir": os.path.abspath(roformer_out_dir),
+                                    "model_dir": os.path.abspath(model_dir),
+                                    "model_name": model_name,
+                                },
+                                timeout=total_timeout,
+                                check_stop=lambda: _check_separator_stop(before_launch=False),
+                                creationflags=CREATE_NO_WINDOW,
+                            )
+                            if warm_data.get("success"):
+                                pair = _record_roformer_success(warm_data)
+                                if pair is not None:
+                                    return pair
+                            else:
+                                logger.warning(
+                                    "BS-RoFormer warm worker failed (%s); falling back to one-shot worker",
+                                    warm_data.get("error", "unknown"),
+                                )
+                        except (_SeparatorCancellation, _SeparatorCleanupError, TimeoutError):
+                            raise
+                        except Exception as warm_err:
+                            try:
+                                _close_warm_sep_session()
+                            except Exception:
+                                pass
+                            logger.warning(
+                                "BS-RoFormer warm session unavailable (%s); falling back to one-shot worker",
+                                warm_err,
+                            )
                     ret_code, stdout_str, stderr_str = _run_cancellable_proc(cmd_roformer, total_timeout)
                 if ret_code == 0:
                     for line in reversed(stdout_str.strip().splitlines()):
@@ -307,29 +383,9 @@ def separate_vocals_demucs(
                             try:
                                 data = json.loads(line)
                                 if data.get("success"):
-                                    v_path = data.get("vocals_path")
-                                    bg_path = data.get("background_path")
-                                    if v_path and bg_path and os.path.isfile(v_path) and os.path.isfile(bg_path):
-                                        print(f"BS-RoFormer tách thành công! Nhạc nền sạch: {bg_path}")
-                                        try:
-                                            from job_tracker import record_separator_info
-                                            record_separator_info({
-                                                "engine": "bs_roformer",
-                                                "engine_requested": sep_mode,
-                                                "model": model_name,
-                                                "device": data.get("device", "cuda"),
-                                                "device_name": data.get("device_name", ""),
-                                                "fp_mode": data.get("fp_mode", "fp32"),
-                                                "inference_time_s": data.get("inference_time_s"),
-                                                "total_time_s": data.get("total_time_s"),
-                                                "peak_vram_mb": data.get("peak_vram_mb"),
-                                                "vocals_path": v_path,
-                                                "bgm_path": bg_path,
-                                                "cache_hit": False,
-                                            })
-                                        except Exception as _phase6_exc:
-                                            logger.warning('Suppressed error in video_utils.separate_vocals_demucs (record_separator_info): %s', type(_phase6_exc).__name__, exc_info=False)
-                                        return v_path, bg_path
+                                    pair = _record_roformer_success(data)
+                                    if pair is not None:
+                                        return pair
                             except json.JSONDecodeError as _phase6_exc:
                                 logger.warning('Suppressed error in video_utils.separate_vocals_demucs (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
                 err_detail = stderr_str.strip() or f"exit code {ret_code}"
@@ -937,8 +993,13 @@ def process_video(
         filter_threads = '4' if (w * h <= 1920 * 1080) else '2'
 
         # NVIDIA encoding only. No MediaFoundation/software CPU fallback.
+        nvenc_preset = os.getenv("V1_NVENC_PRESET", "p3").strip().lower() or "p3"
+        primary_nvenc = ['h264_nvenc', '-preset', nvenc_preset]
+        if nvenc_preset in ('p4', 'p5', 'p6', 'p7'):
+            primary_nvenc += ['-tune', 'hq']
+        primary_nvenc += ['-rc', 'vbr', '-cq', '20', '-b:v', b_v, '-maxrate', max_v, '-bufsize', buf_v, '-spatial-aq', '1']
         encoders_to_try = [
-            ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr', '-cq', '20', '-b:v', b_v, '-maxrate', max_v, '-bufsize', buf_v, '-spatial-aq', '1'],
+            primary_nvenc,
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
         ]
         
