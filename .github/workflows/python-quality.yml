@@ -64,6 +64,7 @@ jobs:
           tests/test_narration_source_policy.py
           tests/test_v1_voice_ocr_optimization.py
           tests/test_telegram_progress.py
+          tests/test_telegram_prefetch.py
           tests/test_qc_stage_progress.py
           tests/test_runtime_lock_regressions.py
           tests/test_environment_isolation.py
