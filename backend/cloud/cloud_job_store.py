@@ -1014,6 +1014,7 @@ class CloudJobStore:
                 require_fresh_provider=False,
                 now_ts=now,
                 record_snapshot=False,
+                reuse_gpu_type=row["gpu_type"],
             )
             if not decision.get("allowed", True):
                 self._set_claim_rejection(job_id, decision)
@@ -1491,9 +1492,15 @@ class CloudJobStore:
                 )
 
     def _warm_idle_budget_in_db(
-        self, db: sqlite3.Connection, now_ts: float, win_start: float, win_end: float
+        self, db: sqlite3.Connection, now_ts: float, win_start: float, win_end: float,
+        reuse_gpu_type: Optional[str] = None,
     ) -> Tuple[float, float]:
-        """(spent, reserved) CU of warm sessions: recorded idle intervals plus sessions still parked."""
+        """(spent, reserved) CU of warm sessions: recorded idle intervals plus sessions still parked.
+
+        A job on `reuse_gpu_type` takes over the session parked for that GPU, so
+        that session's remaining standby is not held against the job.
+        """
+        reuse_gpu = str(reuse_gpu_type or "").strip().upper()
         spent = 0.0
         reserved = 0.0
         for r in db.execute(
@@ -1504,7 +1511,8 @@ class CloudJobStore:
         for row in db.execute("SELECT * FROM cloud_warm_sessions").fetchall():
             start, end, rate = self._warm_idle_interval(row, now_ts)
             spent += _allocate_cu_to_window((end - start) * rate / 3600.0, start, end, win_start, win_end)
-            reserved += max(0.0, float(row["expires_at"] or 0.0) - max(float(now_ts), start)) * rate / 3600.0
+            if str(row["gpu_type"] or "T4").upper() != reuse_gpu:
+                reserved += max(0.0, float(row["expires_at"] or 0.0) - max(float(now_ts), start)) * rate / 3600.0
         return spent, reserved
 
     def park_warm_session(
@@ -2598,6 +2606,7 @@ class CloudJobStore:
         db: sqlite3.Connection,
         *,
         now_ts: Optional[float] = None,
+        reuse_gpu_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         check_now = time.time() if now_ts is None else float(now_ts)
         val_row = db.execute(
@@ -2673,7 +2682,9 @@ class CloudJobStore:
                 spent_raw += allocated
                 sources_used.add(CloudCostMeasurementSource.UNVERIFIED_ESTIMATE.value)
 
-        warm_spent, warm_reserved = self._warm_idle_budget_in_db(db, check_now, win_start, win_end)
+        warm_spent, warm_reserved = self._warm_idle_budget_in_db(
+            db, check_now, win_start, win_end, reuse_gpu_type
+        )
         spent_raw += warm_spent
         reserved_raw += warm_reserved
         if warm_spent > 0.0:
@@ -2732,12 +2743,13 @@ class CloudJobStore:
         now_ts: Optional[float] = None,
         record_snapshot: bool = True,
         check_daily_budget: bool = True,
+        reuse_gpu_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         check_now = time.time() if now_ts is None else float(now_ts)
         snap = self._admission_provider_snapshot_in_db(
             db, provider_usage, now=check_now, record_snapshot=record_snapshot,
         )
-        summary = self._compute_budget_summary_in_db(db, now_ts=check_now)
+        summary = self._compute_budget_summary_in_db(db, now_ts=check_now, reuse_gpu_type=reuse_gpu_type)
         if snap is not None:
             summary["provider"] = snap
 
@@ -2888,6 +2900,7 @@ class CloudJobStore:
                     require_fresh_provider=require_fresh_provider,
                     now_ts=now_ts,
                     record_snapshot=(provider_usage is not None),
+                    reuse_gpu_type=gpu_type,
                 )
                 decision["breakdown"] = breakdown
                 db.execute("COMMIT")
