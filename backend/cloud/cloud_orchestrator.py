@@ -7,6 +7,7 @@ Quản lý chu kỳ sống có lease, hủy thực sự và thu hồi session th
 
 from __future__ import annotations
 
+import base64
 import errno
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -314,12 +315,65 @@ def _call_with_cancel(fn: Any, *args: Any, cancel_check: Optional[Callable[[], b
     return fn(*args, **kwargs)
 
 
-_WARM_RESET_SCRIPT = (
-    "import pathlib, shutil; "
-    "keep={'.autodub_venv','.autodub_bootstrap','.autodub_python','.autodub_uv_cache','.autodub_env_state.json','model_cache','fonts'}; "
-    "[shutil.rmtree(p, ignore_errors=True) if p.is_dir() and not p.is_symlink() else p.unlink(missing_ok=True) "
-    "for p in pathlib.Path('/content').iterdir() if p.name not in keep]"
-)
+def _build_warm_reset_script(content_root: str = "/content") -> str:
+    return f"""import os
+from pathlib import Path
+
+root = Path({content_root!r})
+root_resolved = root.resolve()
+keep={{'.autodub_venv', '.autodub_bootstrap', '.autodub_python', '.autodub_uv_cache', '.autodub_env_state.json', 'model_cache', 'fonts', 'drive'}}
+
+def is_mount_or_nested(path):
+    try:
+        if os.path.ismount(path):
+            return True
+        resolved = path.resolve()
+    except OSError:
+        return True
+    if not resolved.is_relative_to(root_resolved):
+        return True
+    current = resolved
+    while current != root_resolved:
+        if os.path.ismount(current):
+            return True
+        current = current.parent
+    return False
+
+def remove(path):
+    if is_mount_or_nested(path):
+        return
+    if path.is_symlink() or not path.is_dir():
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        return
+    for child in children:
+        remove(child)
+    if not is_mount_or_nested(path):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+for path in root.iterdir():
+    if path.name not in keep:
+        remove(path)
+"""
+
+
+_WARM_RESET_SCRIPT = _build_warm_reset_script()
+
+
+def _build_warm_reset_argv() -> List[str]:
+    payload = base64.b64encode(_WARM_RESET_SCRIPT.encode("utf-8")).decode("ascii")
+    command = f"import base64;exec(base64.b64decode({payload!r}).decode())"
+    return ["python3", "-c", command]
+
 
 _GLOBAL_WARM_LOCK = threading.Lock()
 _GLOBAL_WARM_TIMERS: Dict[Tuple[str, str], threading.Timer] = {}
@@ -408,6 +462,9 @@ class _JobRun:
     output_manifest: Dict[str, Any] = field(default_factory=dict)
     cu_spent: float = 0.0
     elapsed_sec: float = 0.0
+    cache_backend: str = "none"
+    cache_mounted: bool = False
+    cache_status: str = "disabled"
 
     @classmethod
     def from_job(
@@ -1070,6 +1127,44 @@ class _JobRun:
                 f"Giải nén mã nguồn trên Colab thất bại: {tar_msg}",
             )
 
+        self.cache_backend = str(DEFAULT_CONFIG.get("cloud_cache_backend", "none")).strip().lower()
+        if self.cache_backend not in {"none", "gdrive"}:
+            self.cache_backend = "none"
+        self.cache_mounted = False
+        self.cache_status = "disabled"
+        if self.cache_backend == "gdrive" and not self.reused_warm_session:
+            mount_drive = getattr(self.orchestrator.adapter, "mount_drive", None)
+            if callable(mount_drive):
+                try:
+                    mount_ok, mount_msg = mount_drive(
+                        self.session_name,
+                        "/content/drive",
+                        timeout=int(DEFAULT_CONFIG.get("cloud_drive_mount_timeout_seconds", 180) or 180),
+                        cancel_check=self._cancel_probe,
+                    )
+                except Exception:
+                    mount_ok, mount_msg = False, ""
+                if mount_ok:
+                    self.cache_mounted = True
+                else:
+                    reason = (
+                        "cần cấp quyền Google Drive một lần trong WSL"
+                        if "authorization needed" in str(mount_msg).lower()
+                        or "ủy quyền" in str(mount_msg).lower()
+                        else "gắn Drive thất bại"
+                    )
+                    logger.warning(
+                        "Không gắn được Google Drive cho session %s (%s); tiếp tục setup không cache.",
+                        self.session_name,
+                        reason,
+                    )
+            else:
+                logger.warning(
+                    "Adapter không hỗ trợ gắn Google Drive cho session %s; tiếp tục setup không cache.",
+                    self.session_name,
+                )
+            self._raise_if_aborted()
+
         setup_timeout = int(DEFAULT_CONFIG.get("setup_timeout_seconds", 600) or 600)
         min_disk_mb = int(DEFAULT_CONFIG.get("min_remote_disk_mb", 4096) or 4096)
         setup_argv = [
@@ -1084,6 +1179,17 @@ class _JobRun:
             "--pip-timeout",
             str(min(300, setup_timeout)),
         ]
+        if self.cache_mounted:
+            cache_root = str(
+                DEFAULT_CONFIG.get(
+                    "cloud_cache_drive_root",
+                    "/content/drive/MyDrive/AutoDubCloudCache",
+                )
+                or "/content/drive/MyDrive/AutoDubCloudCache"
+            )
+            setup_argv.extend(["--cache-dir", cache_root])
+            if not DEFAULT_CONFIG.get("cloud_cache_save_enabled", True):
+                setup_argv.append("--no-cache-save")
         self.use_monitored_exec = isinstance(self.orchestrator.adapter, ColabProviderAdapter)
         if self.use_monitored_exec:
             env_ok, env_msg = self.orchestrator.adapter.run_argv_monitored(
@@ -1106,7 +1212,20 @@ class _JobRun:
         self._raise_if_aborted()
         safe_env_msg = redact_secrets(env_msg, extra_secrets=self.extra_secrets)
         logger.info("Env setup output:\n%s", safe_env_msg)
-        self.setup_phase_seconds = (_parse_setup_env_result(safe_env_msg) or {}).get("phase_seconds") or {}
+        setup_result = _parse_setup_env_result(safe_env_msg) or {}
+        self.setup_phase_seconds = setup_result.get("phase_seconds") or {}
+        reported_cache_status = setup_result.get("cache_status")
+        if reported_cache_status in {
+            "restored",
+            "saved",
+            "miss",
+            "invalid",
+            "disabled",
+            "save_failed",
+        }:
+            self.cache_status = reported_cache_status
+        else:
+            self.cache_status = "miss" if self.cache_mounted else "disabled"
         if not env_ok:
             setup_err_code = _extract_setup_error_code(safe_env_msg)
             setup_result = _parse_setup_env_result(safe_env_msg) or {}
@@ -1181,6 +1300,83 @@ class _JobRun:
                 f"Pipeline Colab thất bại ({pipe_err_code}):\n{pipeline_detail}",
             )
 
+    def _stage_cache_save(self):
+        if (
+            self.cache_backend != "gdrive"
+            or not self.cache_mounted
+            or not DEFAULT_CONFIG.get("cloud_cache_save_enabled", True)
+            or self.cache_status not in {"miss", "invalid"}
+        ):
+            return
+
+        self._mark_stage("cache_save")
+        cache_root = str(
+            DEFAULT_CONFIG.get(
+                "cloud_cache_drive_root",
+                "/content/drive/MyDrive/AutoDubCloudCache",
+            )
+            or "/content/drive/MyDrive/AutoDubCloudCache"
+        )
+        save_argv = [
+            "python3",
+            "setup_env.py",
+            "--cache-save-only",
+            "--cache-dir",
+            cache_root,
+            "--manifest-out",
+            "cache_save_result.json",
+        ]
+        save_timeout = max(
+            1,
+            min(900, int(DEFAULT_CONFIG.get("cloud_cache_save_timeout_seconds", 900) or 900)),
+        )
+        try:
+            if self.use_monitored_exec:
+                save_ok, save_output = self.orchestrator.adapter.run_argv_monitored(
+                    self.session_name,
+                    save_argv,
+                    cwd="/content",
+                    timeout=save_timeout,
+                    cancel_check=self._cancel_probe,
+                    job_tag="cache_save",
+                )
+            else:
+                save_ok, save_output = _call_with_cancel(
+                    self.orchestrator.adapter.exec_argv,
+                    self.session_name,
+                    save_argv,
+                    cwd="/content",
+                    timeout=save_timeout,
+                    cancel_check=self._cancel_probe,
+                )
+        except _JobAborted:
+            raise
+        except Exception:
+            self._raise_if_aborted()
+            self.cache_status = "save_failed"
+            logger.warning(
+                "Không lưu được Google Drive cache cho session %s; tiếp tục công việc.",
+                self.session_name,
+            )
+            return
+
+        self._raise_if_aborted()
+        safe_output = redact_secrets(save_output, extra_secrets=self.extra_secrets)
+        save_result = _parse_setup_env_result(safe_output) or {}
+        save_phases = save_result.get("phase_seconds")
+        if isinstance(save_phases, dict) and "cache_save" in save_phases:
+            self.setup_phase_seconds = dict(self.setup_phase_seconds or {})
+            self.setup_phase_seconds["cache_save"] = save_phases["cache_save"]
+        if save_ok and save_result.get("cache_status") == "saved":
+            self.cache_status = "saved"
+            return
+
+        self.cache_status = "save_failed"
+        logger.warning(
+            "Không lưu được Google Drive cache cho session %s; tiếp tục công việc.",
+            self.session_name,
+        )
+
     def _stage_download(self):
         self._mark_stage("download")
         # 6. Tải video thành phẩm và kết quả về vùng staging riêng theo job/attempt (`downloading`)
@@ -1222,6 +1418,35 @@ class _JobRun:
                 )
         self._raise_if_aborted()
 
+    def _unmount_drive_before_warm_park(self) -> bool:
+        exec_fn = getattr(self.orchestrator.adapter, "exec_argv", None)
+        if not callable(exec_fn):
+            logger.warning("Không tháo được Google Drive khỏi session %s trước khi giữ ấm.", self.session_name)
+            return False
+        try:
+            unmount_ok, unmount_msg = _call_with_cancel(
+                exec_fn,
+                self.session_name,
+                [
+                    "python3",
+                    "-c",
+                    "from google.colab import drive; drive.flush_and_unmount()",
+                ],
+                cwd="/content",
+                timeout=30,
+                cancel_check=self._cancel_probe,
+            )
+        except Exception as exc:
+            unmount_ok, unmount_msg = False, str(exc)
+        if not unmount_ok:
+            logger.warning(
+                "Không tháo được Google Drive khỏi session %s trước khi giữ ấm; session sẽ được thu hồi: %s",
+                self.session_name,
+                redact_secrets(str(unmount_msg), extra_secrets=self.extra_secrets),
+            )
+            return False
+        return True
+
     def _stage_validate(self):
         self._mark_stage("validate")
         # 7. Kiểm tra QC tại vùng staging & xuất thành phẩm atomic an toàn (`validating`)
@@ -1248,7 +1473,12 @@ class _JobRun:
         if (
             self.session_may_exist
             and not self.cleanup_done
-            and self.orchestrator._park_warm_session_on_success(self.session_name, self.gpu_type, source_job_id=self.job_id)
+            and self.orchestrator._park_warm_session_on_success(
+                self.session_name,
+                self.gpu_type,
+                source_job_id=self.job_id,
+                before_park=self._unmount_drive_before_warm_park if self.cache_mounted else None,
+            )
         ):
             self.parked_warm = True
             self.cleanup_done = True
@@ -1341,6 +1571,9 @@ class _JobRun:
                 "qc_report": self.qc_res["qc_report"],
                 "remote_metadata": remote_meta,
                 "setup_phase_seconds": self.setup_phase_seconds,
+                "cache_backend": self.cache_backend,
+                "cache_mounted": self.cache_mounted,
+                "cache_status": self.cache_status,
                 "pipeline_step_seconds": remote_meta.get("step_timings_seconds") or {},
             }
             (self.attempt_res_dir / "output_manifest.json").write_text(
@@ -1777,7 +2010,7 @@ class CloudOrchestrator:
         try:
             ok, _ = exec_fn(
                 session_name,
-                ["python3", "-c", _WARM_RESET_SCRIPT],
+                _build_warm_reset_argv(),
                 cwd="/content",
                 timeout=30,
             )
@@ -1873,6 +2106,7 @@ class CloudOrchestrator:
         gpu_type: str,
         *,
         source_job_id: Optional[str] = None,
+        before_park: Optional[Callable[[], bool]] = None,
     ) -> bool:
         if not self.enable_warm_session_reuse:
             return False
@@ -1889,6 +2123,8 @@ class CloudOrchestrator:
         )
         ttl_s = handoff_s if waiting_next else keepalive_s
         if ttl_s <= 0:
+            return False
+        if before_park is not None and not before_park():
             return False
         if not self._sanitize_warm_workdir(session_name):
             return False
@@ -2571,6 +2807,7 @@ class CloudOrchestrator:
             run._stage_upload()
             run._stage_setup()
             run._stage_pipeline()
+            run._stage_cache_save()
             run._stage_download()
             run._stage_validate()
             return run._stage_cleanup()

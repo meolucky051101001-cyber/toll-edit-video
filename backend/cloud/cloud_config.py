@@ -59,6 +59,10 @@ def _load_environment() -> None:
 
 _load_environment()
 
+_cloud_cache_backend = os.getenv("AUTODUB_CLOUD_CACHE_BACKEND", "none").strip().lower()
+if _cloud_cache_backend not in {"none", "gdrive"}:
+    _cloud_cache_backend = "none"
+
 WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(BACKEND_DIR.parent / "workspace")))
 
 
@@ -100,6 +104,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "warm_session_reuse_enabled": os.getenv("AUTODUB_CLOUD_WARM_REUSE", "1").strip().lower() not in ("0", "false", "no"),
     "cloud_gemini_keys_max": int(os.getenv("AUTODUB_CLOUD_GEMINI_KEYS_MAX", "2")),
     "cloud_asr_engine": os.getenv("AUTODUB_CLOUD_ASR_ENGINE", "openai-whisper").strip().lower() or "openai-whisper",
+    "cloud_cache_backend": _cloud_cache_backend,
+    "cloud_cache_drive_root": os.getenv(
+        "AUTODUB_CLOUD_CACHE_DRIVE_ROOT", "/content/drive/MyDrive/AutoDubCloudCache"
+    ).strip()
+    or "/content/drive/MyDrive/AutoDubCloudCache",
+    "cloud_cache_save_enabled": os.getenv("AUTODUB_CLOUD_CACHE_SAVE", "1").strip().lower()
+    not in ("0", "false", "no"),
+    "cloud_cache_save_timeout_seconds": int(
+        os.getenv("AUTODUB_CLOUD_CACHE_SAVE_TIMEOUT_SECONDS", "900")
+    ),
+    "cloud_drive_mount_timeout_seconds": int(
+        os.getenv("AUTODUB_CLOUD_DRIVE_MOUNT_TIMEOUT_SECONDS", "180")
+    ),
     "cloud_poll_max_interval_seconds": float(os.getenv("AUTODUB_CLOUD_POLL_MAX_INTERVAL_SECONDS", "30")),
     "cloud_upload_retry_delays_seconds": [5, 15],
     "wsl_distro": os.getenv("AUTODUB_CLOUD_WSL_DISTRO", "Ubuntu"),
