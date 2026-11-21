@@ -2083,8 +2083,8 @@ header {
                   <div style="font-size: 10.5px; color: var(--text-muted);">Kiểm tra đầu ra bằng PP-OCRv5 Server</div>
                 </div>
                 <select id="selectQcPolicy" onchange="setQcPolicy(this.value)" style="background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; font-size: 11px; max-width: 170px;">
-                  <option value="OFF" selected>Tắt (Xuất thẳng nhanh nhất)</option>
-                  <option value="WARN">Bật · Cảnh báo</option>
+                  <option value="OFF">Tắt (Xuất thẳng nhanh nhất)</option>
+                  <option value="WARN" selected>Bật · Cảnh báo</option>
                   <option value="BLOCK">Bật · Chặn khi lỗi</option>
                   <option value="REPORT_ONLY">Bật · Chỉ ghi báo cáo</option>
                 </select>
@@ -6189,7 +6189,7 @@ let inputUploading=false;
     }
 
     function syncQcPixelCardVisibility() {
-      const qcVal = (document.getElementById('selectQcPolicy')?.value || 'OFF').toUpperCase();
+      const qcVal = (document.getElementById('selectQcPolicy')?.value || 'WARN').toUpperCase();
       const pixelCard = document.getElementById('qcPixelCheckCard');
       if (pixelCard) {
         pixelCard.style.display = (qcVal === 'OFF') ? 'none' : 'flex';

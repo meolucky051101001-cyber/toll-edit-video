@@ -68,7 +68,7 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         from backend.ai import v1_asr_isolated, v1_voice_isolated, v1_auto_voice, translation
 
         self.orchestrator = V1Orchestrator(self.root)
-        if not getattr(self, "use_default_qc_off", False):
+        if not getattr(self, "use_default_qc_warn", False):
             set_feature_flags({"V1_QC_POLICY": "BLOCK", "V1_QC_VISUAL_PIXEL_CHECK": True}, self.root)
         flags = get_feature_flags(self.root)
         flags["V1_SMART_SKIP_OCR"] = False
@@ -156,7 +156,8 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
 
         def qc(**kwargs):
             self.events.append("qc")
-            self.assertEqual(kwargs["policy"], "BLOCK")
+            expected_policy = "WARN" if getattr(self, "use_default_qc_warn", False) else "BLOCK"
+            self.assertEqual(kwargs["policy"], expected_policy)
             if self.block_qc:
                 raise RuntimeError("Quality Gate BLOCK: fixture")
             kwargs["progress_callback"]({"phase": "decode", "completed": 1, "total": 2})
@@ -404,19 +405,17 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest.stages["quality_gate"]["status"], "failed")
         self.assertNotEqual(manifest.status, "completed")
 
-    async def test_qc_off_default_skips_stage9_and_publishes_directly_in_8_steps(self):
-        self.use_default_qc_off = True
+    async def test_qc_warn_default_runs_stage9_and_publishes_in_9_steps(self):
+        self.use_default_qc_warn = True
         self.harness()
         result = await self.execute()
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["qc_status"], "SKIPPED")
-        self.assertNotIn("qc", self.events)
-        self.assertNotIn("start:quality_gate", self.events)
-        self.assertIn("deliver", self.events)
+        self.assertEqual(result["qc_status"], "PASSED")
+        self.assertEqual(self.events[-4:], ["start:quality_gate", "qc", "deliver", "publish"])
         self.assertTrue(self.delivery.is_file())
         totals = {item[2] for item in self.progress}
-        self.assertEqual(totals, {8})
+        self.assertEqual(totals, {9})
         stages_seen = [item[0] for item in self.progress]
-        self.assertNotIn("quality_gate", stages_seen)
+        self.assertIn("quality_gate", stages_seen)
         self.assertEqual(self.progress[-1][0], "publish")
-        self.assertEqual(self.progress[-1][1], 8)
+        self.assertEqual(self.progress[-1][1], 9)
