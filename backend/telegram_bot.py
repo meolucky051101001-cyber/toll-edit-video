@@ -1830,7 +1830,6 @@ async def _download_job_source(job, status_msg=None, *, reload_downloader=True) 
             raise RuntimeError(error or "Khong tai duoc video.")
         video_path = Path(path)
         await asyncio.to_thread(probe_downloaded_video, video_path)
-        state["title"] = title
     else:
         bot = getattr(job.get("context"), "bot", None) or getattr(GLOBAL_BOT_APP, "bot", None)
         if not bot:
@@ -1852,10 +1851,13 @@ async def _download_job_source(job, status_msg=None, *, reload_downloader=True) 
             partial.unlink(missing_ok=True)
 
     new_sha = await asyncio.to_thread(fingerprint, video_path)
+    state = job.setdefault("resume_state", {})
     if state.get("source_sha256") and state["source_sha256"] != new_sha:
         raise ValueError("Nguon tai lai khac nguon da dong bang.")
     state["source_path"] = str(video_path)
     state["source_sha256"] = new_sha
+    if title is not None:
+        state["title"] = title
     global_queue.publish()
     return video_path
 
