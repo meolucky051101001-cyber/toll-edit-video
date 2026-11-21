@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from backend.cloud import cloud_config, cloud_security
+from backend.cloud import cloud_config, cloud_job_store, cloud_security, cloud_telegram_bot
+from backend.cloud.cloud_contract import admit_and_enqueue_job
 from backend.cloud.cloud_job_store import CloudJobStore
 from backend.cloud.cloud_telegram_bot import (
     TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES,
+    CloudBotQueuedItem,
     CloudBotStateFiles,
     CloudTelegramBotService,
     extract_video_urls,
@@ -111,19 +114,20 @@ def test_commands_gpu_voice_budget_and_tpu_rejection(monkeypatch, tmp_path):
     svc = CloudTelegramBotService(workspace_dir=ws, store=store, adapter_factory=Mock)
 
     assert validate_cloud_bot_gpu("l4") == "L4"
-    with pytest.raises(cloud_security.CloudValidationError):
-        validate_cloud_bot_gpu("V5E1")
+    for accelerator in ("CPU", "V5E1", "V6E1"):
+        with pytest.raises(cloud_security.CloudValidationError, match="CUDA"):
+            validate_cloud_bot_gpu(accelerator)
     assert resolve_voice_choice("nam") == "BV075_streaming"
 
     async def exercise():
         upd, replies, _ = _make_update(user_id=501)
         await svc.cmd_gpu(upd, SimpleNamespace(args=["L4"]))
-        assert svc.state_files.get_prefs()["gpu_type"] == "L4"
+        assert svc.get_status()["default_gpu"] == "L4"
         assert any("NVIDIA L4" in text for text, _ in replies)
 
         upd_tpu, replies_tpu, _ = _make_update(user_id=501)
         await svc.cmd_gpu(upd_tpu, SimpleNamespace(args=["V6E1"]))
-        assert svc.state_files.get_prefs()["gpu_type"] == "L4"
+        assert svc.get_status()["default_gpu"] == "L4"
         assert any("CUDA" in text for text, _ in replies_tpu)
 
         upd_voice, _, _ = _make_update(user_id=501)
@@ -139,10 +143,149 @@ def test_commands_gpu_voice_budget_and_tpu_rejection(monkeypatch, tmp_path):
         assert store.get_cu_budget_info()["budget_daily"] == pytest.approx(14.5)
         assert any("không có quyền" in text for text, _ in stranger_replies)
 
+        concurrency_upd, concurrency_replies, _ = _make_update(user_id=501)
+        await svc.cmd_concurrency(concurrency_upd, SimpleNamespace(args=["3"]))
+        assert store.get_concurrency_limit() == 3
+        assert any("tối đa `3`" in text for text, _ in concurrency_replies)
+
+        invalid_upd, invalid_replies, _ = _make_update(user_id=501)
+        await svc.cmd_concurrency(invalid_upd, SimpleNamespace(args=["5"]))
+        assert store.get_concurrency_limit() == 3
+        assert any("không hợp lệ" in text for text, _ in invalid_replies)
+
     asyncio.run(exercise())
 
 
-def test_url_submission_auto_runs_exports_to_cloud_dir_and_sends_video(monkeypatch, tmp_path):
+def test_telegram_consumer_runs_only_configured_number_of_items(monkeypatch, tmp_path):
+    ws = tmp_path / "ws"
+    store = CloudJobStore(db_path=ws / "cloud_jobs.db", rollout_controlled=False)
+    store.set_concurrency_limit(2)
+    svc = CloudTelegramBotService(workspace_dir=ws, store=store, adapter_factory=Mock)
+    svc._queue = asyncio.Queue()
+    items = [
+        CloudBotQueuedItem(
+            item_id=f"queued-{i}", kind="url", chat_id=777, source_label=f"item-{i}",
+        )
+        for i in range(3)
+    ]
+    for item in items:
+        svc._pending_items.append(item)
+        svc._queue.put_nowait(item)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    max_active = 0
+    processed = []
+
+    async def fake_process(_bot, item):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        processed.append(item.item_id)
+        if len(processed) >= 2:
+            started.set()
+        await release.wait()
+        active -= 1
+
+    monkeypatch.setattr(svc, "_process_item", fake_process)
+
+    async def exercise():
+        stop_ev = asyncio.Event()
+        consumer = asyncio.create_task(
+            svc._queue_consumer_loop(SimpleNamespace(bot=SimpleNamespace()), stop_ev)
+        )
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        assert max_active == 2
+        assert len(processed) == 2
+        release.set()
+        for _ in range(100):
+            if len(processed) == 3:
+                break
+            await asyncio.sleep(0.01)
+        assert len(processed) == 3
+        stop_ev.set()
+        await asyncio.wait_for(consumer, timeout=2.0)
+        assert max_active == 2
+        assert svc._queue._unfinished_tasks == 0
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("miss_precheck", [False, True])
+def test_server_channel_overrides_options_and_blocks_cross_channel_replay(monkeypatch, tmp_path, miss_precheck):
+    store = CloudJobStore(db_path=tmp_path / "cloud_jobs.db", rollout_controlled=False)
+    video = tmp_path / "sample.mp4"
+    video.write_bytes(MP4_HEADER)
+    request = {
+        "video_path": str(video),
+        "allowed_roots": [tmp_path],
+        "idempotency_key": "cloudbot:dashboard-key",
+    }
+    dashboard, contract = admit_and_enqueue_job(
+        store, **request, source_channel="dashboard", options={"source_channel": "cloud_telegram_bot"}
+    )
+    assert dashboard.options["source_channel"] == contract.source_channel == "dashboard"
+    assert contract.options_snapshot.extra_options["source_channel"] == "dashboard"
+    retry, retry_contract = admit_and_enqueue_job(store, **request, source_channel="dashboard")
+    assert retry.job_id == dashboard.job_id and retry_contract.deduplicated
+
+    if miss_precheck:
+        # Another writer can insert the key after the lookup and before enqueue_or_get.
+        monkeypatch.setattr(store, "get_job_by_idempotency_key", Mock(return_value=None))
+    with pytest.raises(cloud_security.CloudValidationError) as exc:
+        admit_and_enqueue_job(store, **request, source_channel="telegram")
+    assert exc.value.http_status == 409
+
+    telegram, contract = admit_and_enqueue_job(
+        store,
+        video_path=str(video),
+        allowed_roots=[tmp_path],
+        source_channel="Telegram",
+        options={"source_channel": "dashboard"},
+    )
+    assert telegram.options["source_channel"] == "cloud_telegram_bot"
+    assert contract.options_snapshot.extra_options["source_channel"] == "cloud_telegram_bot"
+    assert contract.source_channel == "Telegram"  # Keep the pre-existing wire label/alias.
+
+
+@pytest.mark.parametrize("action", ["stop", "restart"])
+def test_telegram_owned_job_filter_preserves_conflicting_dashboard_rows(monkeypatch, tmp_path, action):
+    ws = tmp_path / "ws"
+    store = CloudJobStore(db_path=ws / "cloud_jobs.db", rollout_controlled=False)
+    svc = CloudTelegramBotService(workspace_dir=ws, store=store, adapter_factory=Mock)
+    cancel_worker = Mock()
+    monkeypatch.setattr(svc.worker, "cancel_job", cancel_worker)
+    video = ws / "sample.mp4"
+    video.write_bytes(MP4_HEADER)
+    telegram = store.enqueue(str(video), options={"source_channel": "telegram"})
+    legacy = store.enqueue(str(video), idempotency_key="cloudbot:legacy")
+    queued_dashboard = store.enqueue(
+        str(video), idempotency_key="cloudbot:dashboard-queued", options={"source_channel": "dashboard"}
+    )
+    active_dashboard = store.enqueue(
+        str(video), idempotency_key="cloudbot:dashboard-active", options={"source_channel": "dashboard"}
+    )
+    assert store.claim_job(active_dashboard.job_id, owner_id="dashboard-worker") is not None
+    assert {job.job_id for job in svc._telegram_jobs()} == {telegram.job_id, legacy.job_id}
+
+    if action == "restart":
+        assert svc._cancel_abandoned_queued_jobs_sync() == 2
+    else:
+        update, replies, _ = _make_update(user_id=777, text="/stop")
+        asyncio.run(svc.cmd_stop(update, SimpleNamespace()))
+        assert any("Máy ảo đang dùng bởi tác vụ khác" in text for text, _ in replies)
+
+    assert store.get_job(telegram.job_id).state == "cancelled"
+    assert store.get_job(legacy.job_id).state == "cancelled"
+    assert store.get_job(queued_dashboard.job_id).state == "queued"
+    active = store.get_job(active_dashboard.job_id)
+    assert (active.state, active.owner_id, active.cancel_requested_at) == ("provisioning", "dashboard-worker", None)
+    cancel_worker.assert_not_called()
+
+
+@pytest.mark.parametrize("notice_fails", [False, True])
+def test_url_submission_auto_runs_exports_to_cloud_dir_and_notifies_by_text(monkeypatch, tmp_path, notice_fails):
     monkeypatch.delenv("CLOUD_BOT_ALLOWED_USER_IDS", raising=False)
     ws = tmp_path / "ws"
     cloud_out = tmp_path / "ToolV1_Cloud"
@@ -193,12 +336,11 @@ def test_url_submission_auto_runs_exports_to_cloud_dir_and_sends_video(monkeypat
 
     monkeypatch.setattr(svc.worker, "process_claimed_job", fake_process_claimed)
 
-    sent_videos = []
-
-    async def fake_send_video(*, chat_id, video, caption, **kwargs):
-        sent_videos.append({"chat_id": chat_id, "bytes": video.read(), "caption": caption})
-
-    fake_bot = SimpleNamespace(send_video=AsyncMock(side_effect=fake_send_video))
+    fake_bot = SimpleNamespace(
+        send_message=AsyncMock(side_effect=RuntimeError("Telegram unavailable") if notice_fails else None),
+        send_video=AsyncMock(),
+        send_document=AsyncMock(),
+    )
 
     async def exercise():
         svc._queue = asyncio.Queue()
@@ -211,9 +353,19 @@ def test_url_submission_auto_runs_exports_to_cloud_dir_and_sends_video(monkeypat
         queued_item = await svc._queue.get()
         await svc._process_item(fake_bot, queued_item)
 
-        assert len(sent_videos) == 1
-        assert str(cloud_out) in sent_videos[0]["caption"]
-        assert any("Hoàn tất Cloud GPU" in ed for ed in edits)
+        result = store.get_job(queued_item.cloud_job_id)
+        result_file = cloud_out / f"cloud_result_{result.job_id}.mp4"
+        assert result.result_path == str(result_file)
+        assert result_file.read_bytes() == MP4_HEADER
+        fake_bot.send_message.assert_awaited_once()
+        notice = fake_bot.send_message.await_args.kwargs
+        assert notice["chat_id"] == queued_item.chat_id
+        assert notice["parse_mode"] is None
+        assert "Hoàn tất Cloud GPU" in notice["text"]
+        assert str(result_file) in notice["text"]
+        assert (notice["text"] in edits) == notice_fails
+        fake_bot.send_video.assert_not_called()
+        fake_bot.send_document.assert_not_called()
         # Temporary downloaded source must be cleaned up after completion.
         assert list(svc.state_files.downloads_dir.glob("*.mp4")) == []
 
@@ -429,7 +581,7 @@ def test_stale_provider_snapshot_auto_refreshed_on_telegram_submission(monkeypat
         return True
 
     monkeypatch.setattr(svc.worker, "process_claimed_job", fake_process_claimed)
-    fake_bot = SimpleNamespace(send_video=AsyncMock())
+    fake_bot = SimpleNamespace(send_message=AsyncMock())
 
     async def exercise():
         svc._queue = asyncio.Queue()
@@ -438,11 +590,90 @@ def test_stale_provider_snapshot_auto_refreshed_on_telegram_submission(monkeypat
         item = await svc._queue.get()
         await svc._process_item(fake_bot, item)
         assert not any("Số dư Colab đã cũ" in ed for ed in edits)
-        assert any("Hoàn tất Cloud GPU" in ed for ed in edits)
+        fake_bot.send_message.assert_awaited_once()
+        assert "Hoàn tất Cloud GPU" in fake_bot.send_message.await_args.kwargs["text"]
         fake_adapter.get_usage.assert_called()
         assert store.get_provider_usage_snapshot()["is_stale"] is False
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("update_from_store", [True, False])
+def test_waiting_telegram_claim_uses_latest_usage(monkeypatch, tmp_path, update_from_store):
+    ws = tmp_path / "ws"
+    monkeypatch.setenv("AUTODUB_WORKSPACE", str(ws))
+    monkeypatch.setenv("AUTODUB_CLOUD_OUTPUT_DIR", str(tmp_path / "cloud_output"))
+    monkeypatch.setitem(cloud_config.DEFAULT_CONFIG, "provider_balance_stale_seconds", 300)
+    clock = Mock(wraps=time)
+    clock.time.return_value = time.time()
+    monkeypatch.setattr(cloud_job_store, "time", clock)
+    monkeypatch.setattr(cloud_telegram_bot, "time", clock)
+
+    store = CloudJobStore(db_path=ws / "cloud_jobs.db", rollout_controlled=False)
+    store.set_concurrency_limit(1)
+    dashboard_video = ws / "dashboard.mp4"
+    dashboard_video.write_bytes(MP4_HEADER)
+    dashboard = store.enqueue(str(dashboard_video), options={"source_channel": "dashboard"})
+    assert store.claim_job(dashboard.job_id, "dashboard-worker", lease_seconds=900) is not None
+    store.record_provider_usage_snapshot({"ok": True, "balance": 100.0, "observed_at": clock.time() - 301})
+
+    adapter = Mock()
+    adapter.get_usage.side_effect = [{"ok": True, "balance": 50.0}, {"ok": True, "balance": 0.0}]
+
+    def download(_url, dest_dir, _tag):
+        video = Path(dest_dir) / "sample.mp4"
+        video.write_bytes(MP4_HEADER)
+        return True, str(video), "Test clip", ""
+
+    svc = CloudTelegramBotService(workspace_dir=ws, store=store, downloader_fn=download, adapter_factory=lambda: adapter)
+    process = Mock()
+    monkeypatch.setattr(svc.worker, "process_claimed_job", process)
+
+    async def exercise():
+        waiting = asyncio.Event()
+        edits = []
+
+        async def edit_text(text, **_kwargs):
+            edits.append(text)
+            if "luồng Cloud trống" in text:
+                waiting.set()
+
+        item = CloudBotQueuedItem(
+            item_id="usage-wait",
+            kind="url",
+            chat_id=777,
+            source_label="test video",
+            url="https://example.com/video.mp4",
+            status_message=SimpleNamespace(edit_text=edit_text),
+        )
+        processing = asyncio.create_task(svc._process_item(SimpleNamespace(), item))
+        await asyncio.wait_for(waiting.wait(), timeout=3)
+        assert store.get_job(item.cloud_job_id).state == "queued"
+        assert store.get_provider_usage_snapshot()["balance"] == 50.0
+        if update_from_store:
+            clock.time.return_value += 1
+            store.record_provider_usage_snapshot({"ok": True, "balance": 0.0, "observed_at": clock.time()})
+        else:
+            clock.time.return_value += 301
+            assert store.get_provider_usage_snapshot()["is_stale"]
+        assert store.update_progress(
+            dashboard.job_id,
+            state="failed",
+            owner_id="dashboard-worker",
+            attempt=1,
+            cleanup_status="verified",
+        )
+        await asyncio.wait_for(processing, timeout=3)
+
+        assert any("Số dư tài khoản Colab không đủ" in text for text in edits)
+        assert store.get_job(item.cloud_job_id).state == "cancelled"
+        current = store.get_provider_usage_snapshot()
+        assert (current["balance"], current["observed_at"], current["is_stale"]) == (0.0, clock.time(), False)
+
+    asyncio.run(exercise())
+    assert adapter.get_usage.call_count == (1 if update_from_store else 2)
+    adapter.create_session.assert_not_called()
+    process.assert_not_called()
 
 
 def test_worker_get_current_job_reflects_live_sqlite_progress_and_lease(tmp_path):

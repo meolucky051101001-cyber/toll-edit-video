@@ -946,7 +946,21 @@ def test_setup_env_prefers_bootstrapped_uv_and_falls_back_to_pip(tmp_path: Path,
     assert len(calls) == 2 and calls[0][0] == str(uv_bin) and "-m" in calls[1]
 
 
-def test_orchestrator_warm_session_handoff_across_batch_and_auto_release_on_finish(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize(
+    ("mode", "first_failure", "reset_ok"),
+    [
+        ("disabled", None, True),
+        ("handoff", None, True),
+        ("five_minute_idle", None, True),
+        ("five_minute_idle", "SUBTITLE_BUILD_FAILED", True),
+        ("five_minute_idle", "SUBTITLE_BUILD_FAILED", False),
+        ("five_minute_idle", "EXEC_FAILED", True),
+    ],
+)
+def test_cloud_reuses_gpu_until_the_idle_window_expires(
+    tmp_path: Path, monkeypatch, mode, first_failure, reset_ok,
+):
+    from backend.cloud import cloud_orchestrator
     from backend.cloud.cloud_config import DEFAULT_CONFIG
     from tests.test_cloud_phase5_quality_export import _Phase5Adapter, _make_sample_video
 
@@ -959,7 +973,10 @@ def test_orchestrator_warm_session_handoff_across_batch_and_auto_release_on_fini
     monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestSecretKey_1234567890")
     monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "results"))
     monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_handoff_seconds", 60)
-    monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_seconds", 0)
+    keepalive_seconds = 300 if mode == "five_minute_idle" else 0
+    monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_seconds", keepalive_seconds)
+    reuse_session = mode != "disabled"
+    reuses_first_session = reuse_session and reset_ok and first_failure != "EXEC_FAILED"
 
     class _WarmTrackingAdapter(_Phase5Adapter):
         def __init__(self):
@@ -969,43 +986,83 @@ def test_orchestrator_warm_session_handoff_across_batch_and_auto_release_on_fini
         def exec_argv(self, session_name, argv, *, cwd="/content", env_vars=None, timeout=None):
             if len(argv) >= 3 and argv[0] == "python3" and argv[1] == "-c" and "keep=" in argv[2]:
                 self.reset_calls.append(session_name)
-                return True, "sanitized"
+                return self.reset_ok, "sanitized" if self.reset_ok else "cleanup failed"
             return super().exec_argv(session_name, argv, cwd=cwd, env_vars=env_vars, timeout=timeout)
 
     store = CloudJobStore(db_path=str(tmp_path / "batch.db"), rollout_controlled=False)
     adapter = _WarmTrackingAdapter()
+    adapter.reset_ok = reset_ok
+    if first_failure:
+        payload = json.dumps({"status": "error", "error_code": first_failure, "error": "test failure"})
+        adapter.pipeline_result = (False, f"PIPELINE_RESULT_JSON:{payload}")
+    timers = []
+
+    class FakeTimer:
+        def __init__(self, interval, callback):
+            self.interval = interval
+            self.callback = callback
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(cloud_orchestrator.threading, "Timer", FakeTimer)
     orch = CloudOrchestrator(
-        store=store,
-        adapter=adapter,
-        allowed_roots=[tmp_path],
-        enable_warm_session_reuse=True,
+        store=store, adapter=adapter, allowed_roots=[tmp_path], enable_warm_session_reuse=reuse_session,
     )
 
     j1 = store.enqueue(str(vid1), gpu_type="T4")
-    j2 = store.enqueue(str(vid2), gpu_type="T4")
+    j2 = None if keepalive_seconds else store.enqueue(str(vid2), gpu_type="T4")
 
     c1 = store.claim_job(j1.job_id, owner_id="w_batch", lease_seconds=300)
     assert c1 is not None
-    # While j1 runs, j2 is already queued -> j1 parks the warm T4 session instead of destroying it!
-    assert orch.process_job(c1, owner_id="w_batch") is True
+    assert orch.process_job(c1, owner_id="w_batch") is (first_failure is None)
     s1 = store.get_job(j1.job_id)
-    assert s1 is not None and s1.state == "completed" and s1.cleanup_status == "verified"
+    assert s1 is not None and s1.cleanup_status == "verified"
+    assert s1.state == ("failed" if first_failure else "completed")
+    assert s1.error_code == first_failure
+    if first_failure:
+        assert not s1.result_path
     assert store.get_cu_budget_info()["unreconciled_count"] == 0
-    assert len(adapter.created_sessions) == 1
-    assert adapter.sessions_stopped == []
-    assert len(orch.get_warm_session_names()) == 1
+    assert adapter.created_sessions == [s1.session_name]
+    assert adapter.sessions_stopped == ([] if reuses_first_session else [s1.session_name])
+    assert orch.get_warm_session_names() == ((s1.session_name,) if reuses_first_session else ())
 
+    if j2 is None:
+        if reuses_first_session:
+            assert timers[0].interval == 300
+            assert orch.release_idle_warm_sessions_if_no_work() == 0
+        j2 = store.enqueue(str(vid2), gpu_type="T4")
+    adapter.reset_ok = True
+    adapter.pipeline_result = (True, "PIPELINE_SUCCESS")
     c2 = store.claim_job(j2.job_id, owner_id="w_batch", lease_seconds=300)
     assert c2 is not None
-    # j2 adopts the warm session (0 new create_session calls!) and stops it cleanly because queue is now empty!
     assert orch.process_job(c2, owner_id="w_batch") is True
     s2 = store.get_job(j2.job_id)
     assert s2 is not None and s2.state == "completed" and s2.cleanup_status == "verified"
-    assert s2.session_name == s1.session_name
-    assert len(adapter.created_sessions) == 1
-    assert adapter.sessions_stopped == [s1.session_name]
+    if reuses_first_session:
+        assert s2.session_name == s1.session_name
+        assert adapter.created_sessions == [s1.session_name]
+        assert len(adapter.reset_calls) >= 2
+    else:
+        assert s2.session_name != s1.session_name
+        assert adapter.created_sessions == [s1.session_name, s2.session_name]
+        if not reuse_session:
+            assert adapter.reset_calls == []
+
+    if keepalive_seconds:
+        assert len(timers) == (2 if reuses_first_session else 1)
+        assert timers[-1].interval == 300
+        if reuses_first_session:
+            timers[0].callback()
+            assert adapter.sessions_stopped == []
+        assert orch.get_warm_session_names() == (s2.session_name,)
+        timers[-1].callback()
+    assert adapter.sessions_stopped == adapter.created_sessions
     assert orch.get_warm_session_names() == ()
-    assert len(adapter.reset_calls) >= 2
     assert store.get_cu_budget_info()["unreconciled_count"] == 0
 
 

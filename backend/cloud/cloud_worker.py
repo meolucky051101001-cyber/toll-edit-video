@@ -9,8 +9,9 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from .cloud_contract import stamp_provider_usage_observation
 from .cloud_job_store import CloudJob, CloudJobStore
 from .cloud_orchestrator import CloudOrchestrator
 from .colab_bridge import ColabProviderAdapter, abort_session_processes
@@ -38,13 +39,19 @@ class CloudWorker:
         self.lease_seconds = max(1.0, float(lease_seconds))
         self.heartbeat_interval = max(0.05, float(heartbeat_interval))
         self.store = store or CloudJobStore()
-        self.orchestrator = orchestrator or CloudOrchestrator(self.store, adapter=adapter)
+        self.orchestrator = orchestrator or CloudOrchestrator(
+            self.store, adapter=adapter, enable_warm_session_reuse=adapter is None,
+        )
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
         self._accepting_jobs = True
         self._thread: Optional[threading.Thread] = None
         self._current_job: Optional[CloudJob] = None
         self._current_cancel_event: Optional[threading.Event] = None
+        self._jobs: Dict[str, CloudJob] = {}
+        self._cancel_events: Dict[str, threading.Event] = {}
+        self._job_threads: Dict[str, threading.Thread] = {}
+        self._state_changed = threading.Event()
         self._last_reconcile_at = 0.0
 
     def start(self):
@@ -64,11 +71,14 @@ class CloudWorker:
             self._thread.start()
         logger.info("Cloud GPU Worker %s đã khởi động nền.", self.worker_id)
 
-    def cancel_current_job(self, reason: str = "Worker đang dừng theo yêu cầu.") -> bool:
+    def cancel_job(self, job_id: str, reason: str = "Worker đang dừng theo yêu cầu.") -> bool:
         """Báo hủy job đang chạy hiện tại của worker (nếu có) và ngắt tiến trình con của session đó."""
         with self._state_lock:
-            cur_job = self._current_job
-            cancel_ev = self._current_cancel_event
+            cur_job = self._jobs.get(job_id)
+            cancel_ev = self._cancel_events.get(job_id)
+            if cur_job is None and self._current_job is not None and self._current_job.job_id == job_id:
+                cur_job = self._current_job
+                cancel_ev = self._current_cancel_event
         if cancel_ev is not None:
             cancel_ev.set()
         if cur_job is None:
@@ -90,6 +100,10 @@ class CloudWorker:
                     pass
         return True
 
+    def cancel_current_job(self, reason: str = "Worker đang dừng theo yêu cầu.") -> bool:
+        """Cancel all jobs owned by this worker, preserving the legacy stop API."""
+        return any([self.cancel_job(job.job_id, reason) for job in self.get_current_jobs()])
+
     def stop(self, timeout: float = 10.0, cancel_current: bool = False) -> Dict[str, Any]:
         """Ngừng nhận job mới và đợi luồng worker thoát; trả về trạng thái dừng thực tế."""
         with self._state_lock:
@@ -100,10 +114,14 @@ class CloudWorker:
         if cancel_current:
             self.cancel_current_job()
 
+        deadline = time.monotonic() + max(0.0, float(timeout))
         if thread_ref and thread_ref.is_alive():
-            thread_ref.join(timeout=max(0.0, float(timeout)))
+            thread_ref.join(timeout=max(0.0, deadline - time.monotonic()))
+        while self.get_current_jobs() and time.monotonic() < deadline:
+            self._state_changed.wait(min(0.05, max(0.0, deadline - time.monotonic())))
+            self._state_changed.clear()
 
-        still_alive = bool(thread_ref and thread_ref.is_alive())
+        still_alive = self.is_running()
         if not still_alive:
             release_fn = getattr(self.orchestrator, "release_warm_sessions", None)
             if callable(release_fn):
@@ -130,10 +148,11 @@ class CloudWorker:
         }
 
     def is_running(self) -> bool:
-        return bool(self._thread and self._thread.is_alive())
+        with self._state_lock:
+            return bool((self._thread and self._thread.is_alive()) or self._jobs)
 
     def is_accepting_jobs(self) -> bool:
-        return bool(self.is_running() and self._accepting_jobs and not self._stop_event.is_set())
+        return bool(self._thread and self._thread.is_alive() and self._accepting_jobs and not self._stop_event.is_set())
 
     def get_worker_state(self) -> str:
         if not self.is_running():
@@ -142,18 +161,22 @@ class CloudWorker:
             return "stopping"
         return "running"
 
-    def get_current_job(self) -> Optional[CloudJob]:
+    def get_current_jobs(self) -> List[CloudJob]:
         with self._state_lock:
-            cur = self._current_job
-        if cur is None:
-            return None
-        try:
-            fresh = self.store.get_job(cur.job_id)
-            if isinstance(fresh, CloudJob):
-                return fresh
-        except Exception:
-            pass
-        return cur
+            jobs = list(self._jobs.values())
+            if not jobs and self._current_job is not None:
+                jobs = [self._current_job]
+        result = []
+        for cur in jobs:
+            try:
+                fresh = self.store.get_job(cur.job_id)
+                result.append(fresh if isinstance(fresh, CloudJob) else cur)
+            except Exception:
+                result.append(cur)
+        return result
+
+    def get_current_job(self, job_id: Optional[str] = None) -> Optional[CloudJob]:
+        return next((job for job in self.get_current_jobs() if job_id is None or job.job_id == job_id), None)
 
     def _heartbeat_loop(
         self,
@@ -174,7 +197,8 @@ class CloudWorker:
                         latest = self.store.get_job(job.job_id) or job
                         if latest.session_name:
                             try:
-                                abort_session_processes(latest.session_name)
+                                abort_fn = getattr(self.orchestrator.adapter, "abort_session_processes", abort_session_processes)
+                                abort_fn(latest.session_name)
                             except Exception:
                                 pass
                     return
@@ -204,6 +228,14 @@ class CloudWorker:
                 if self._stop_event.is_set() or not self._accepting_jobs:
                     break
 
+                with self._state_lock:
+                    self._job_threads = {jid: thread for jid, thread in self._job_threads.items() if thread.is_alive()}
+                    occupied = len(self._job_threads)
+                limit = self.store.get_concurrency_limit()
+                if occupied >= limit:
+                    self._stop_event.wait(min(self.poll_interval, 0.25))
+                    continue
+
                 fresh_usage: Optional[Dict[str, Any]] = None
                 snap = self.store.get_provider_usage_snapshot()
                 if snap is not None and (snap.get("is_stale") or not snap.get("ok")):
@@ -212,17 +244,28 @@ class CloudWorker:
                         try:
                             u = get_usage_fn()
                             if isinstance(u, dict):
-                                fresh_usage = u
+                                fresh_usage = stamp_provider_usage_observation(u, observed_at=time.time())
                         except Exception as u_exc:
                             logger.warning("Không làm mới được số dư Colab trước claim_next: %s", u_exc)
 
-                job = self.store.claim_next(
-                    owner_id=self.worker_id,
-                    lease_seconds=self.lease_seconds,
-                    provider_usage=fresh_usage,
-                )
+                with self._state_lock:
+                    if self._stop_event.is_set() or not self._accepting_jobs:
+                        break
+                    job = self.store.claim_next(
+                        owner_id=self.worker_id,
+                        lease_seconds=self.lease_seconds,
+                        provider_usage=fresh_usage,
+                        exclude_source_channel="cloud_telegram_bot",
+                    )
+                    if job:
+                        thread = threading.Thread(target=self._process_background_job, args=(job,),
+                                                  name=f"CloudJob-{job.job_id[-8:]}", daemon=True)
+                        self._jobs[job.job_id] = job
+                        self._cancel_events[job.job_id] = threading.Event()
+                        self._job_threads[job.job_id] = thread
+                        thread.start()
                 if job:
-                    self.process_claimed_job(job)
+                    continue
                 else:
                     idle_rel_fn = getattr(self.orchestrator, "release_idle_warm_sessions_if_no_work", None)
                     if callable(idle_rel_fn):
@@ -235,11 +278,30 @@ class CloudWorker:
                 logger.error("Lỗi trong vòng lặp CloudWorker: %s", exc, exc_info=True)
                 self._stop_event.wait(self.poll_interval)
 
+        # Keep stop(timeout=...) truthful until every admitted lane has drained.
+        with self._state_lock:
+            threads = list(self._job_threads.values())
+        for thread in threads:
+            thread.join()
+        self._state_changed.set()
+
+    def _process_background_job(self, job: CloudJob) -> None:
+        try:
+            self.process_claimed_job(job)
+        except Exception:
+            logger.exception("Lỗi xử lý Cloud job %s", job.job_id)
+        finally:
+            with self._state_lock:
+                self._job_threads.pop(job.job_id, None)
+            self._state_changed.set()
+
     def process_claimed_job(self, job: CloudJob, progress_callback=None) -> bool:
         """Keep the lease alive for both dashboard and Telegram jobs."""
         job_cancel_ev = threading.Event()
         hb_stop_ev = threading.Event()
         with self._state_lock:
+            job_cancel_ev = self._cancel_events.setdefault(job.job_id, job_cancel_ev)
+            self._jobs[job.job_id] = job
             self._current_job = job
             self._current_cancel_event = job_cancel_ev
         hb_thread = threading.Thread(
@@ -258,8 +320,11 @@ class CloudWorker:
             hb_stop_ev.set()
             hb_thread.join(timeout=2.0)
             with self._state_lock:
-                self._current_job = None
-                self._current_cancel_event = None
+                self._jobs.pop(job.job_id, None)
+                self._cancel_events.pop(job.job_id, None)
+                self._current_job = next(iter(self._jobs.values()), None)
+                self._current_cancel_event = self._cancel_events.get(self._current_job.job_id) if self._current_job else None
+            self._state_changed.set()
 
 
 def get_cloud_worker() -> CloudWorker:

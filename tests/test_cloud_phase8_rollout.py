@@ -20,6 +20,44 @@ VIDEO_URL = "https://www.tiktok.com/@sample/video/123456789"
 FAKE_USAGE = {"ok": True, "balance": 10.0, "usage_rate": 0.0, "active_assignments": 0}
 
 
+@pytest.mark.parametrize("probe_returncode", [0, 1])
+def test_windows_runtime_fallback_requires_successful_workspace_and_dependency_probe(tmp_path, monkeypatch, probe_returncode):
+    import run_cloud_node as entrypoint
+    monkeypatch.delenv("AUTODUB_CLOUD_RUNTIME_FALLBACK", raising=False)
+    monkeypatch.setattr(entrypoint, "_workspace_write_available", lambda _path: False)
+    monkeypatch.setattr(entrypoint.shutil, "which", lambda _name: "py.exe")
+    probe = Mock(return_value=SimpleNamespace(returncode=probe_returncode))
+    child = Mock(return_value=0)
+    monkeypatch.setattr(entrypoint.subprocess, "run", probe)
+    monkeypatch.setattr(entrypoint.subprocess, "call", child)
+    result = entrypoint._relaunch_with_writable_runtime(tmp_path)
+    assert probe.call_args.args[0][:3] == ["py.exe", "-3", "-c"]
+    assert probe.call_args.kwargs["env"]["AUTODUB_CLOUD_RUNTIME_FALLBACK"] == "1"
+    if probe_returncode == 0:
+        assert result == 0
+        assert child.call_args.args[0][:2] == ["py.exe", "-3"]
+        assert child.call_args.kwargs["env"]["AUTODUB_CLOUD_RUNTIME_FALLBACK"] == "1"
+    else:
+        assert result is None
+        child.assert_not_called()
+
+
+def test_standalone_cli_help_is_safe_under_windows_cp1252(tmp_path):
+    import os
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONIOENCODING="cp1252:strict",
+               AUTODUB_WORKSPACE=str(tmp_path / "workspace"),
+               AUTODUB_CLOUD_OUTPUT_DIR=str(tmp_path / "output"),
+               AUTODUB_LOCAL_TOKEN="offline-cli-placeholder-only")
+    result = subprocess.run([sys.executable, str(root / "run_cloud_node.py"), "--help"],
+                            cwd=root, env=env, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert "mặc định" in result.stdout.decode("utf-8")
+    assert b"--no-worker" in result.stdout
+    assert b"UnicodeEncodeError" not in result.stderr
+
+
 def test_permit_survives_restart_and_selects_one_job_across_worker_and_telegram(tmp_path):
     db_path = tmp_path / "cloud.db"
     legacy_store = CloudJobStore(db_path, rollout_controlled=False)
@@ -98,6 +136,35 @@ def test_pause_stops_queued_claim_and_stale_permit_and_keeps_idempotency(tmp_pat
     assert reopened.list_rollout_alerts() == [
         {"code": "DUPLICATE_SUBMISSION", "job_id": job.job_id},
     ]
+
+
+def test_sequential_rollout_permits_allow_two_active_jobs_then_stop_at_limit(tmp_path):
+    store = CloudJobStore(tmp_path / "cloud.db")
+    store.set_concurrency_limit(2)
+
+    first_permit = store.set_rollout(arm=True)["permit_id"]
+    first, _ = admit_and_enqueue_job(
+        store, video_path=VIDEO_URL, rollout_permit=first_permit,
+        idempotency_key="dashboard:first",
+    )
+    assert first.state == "queued"
+    with pytest.raises(CloudValidationError):  # a queued permit cannot be replaced
+        store.set_rollout(arm=True)
+    first_claim = store.claim_next(job_id=first.job_id)
+    assert first_claim is not None and first_claim.state == "provisioning"
+
+    second_permit = store.set_rollout(arm=True)["permit_id"]
+    assert second_permit != first_permit
+    second, _ = admit_and_enqueue_job(
+        store, video_path=VIDEO_URL, rollout_permit=second_permit,
+        idempotency_key="dashboard:second",
+    )
+    second_claim = store.claim_next(job_id=second.job_id)
+    assert second_claim is not None and second_claim.state == "provisioning"
+    assert len(store.list_active_jobs()) == 2
+
+    with pytest.raises(CloudValidationError, match="hoàn tất job"):
+        store.set_rollout(arm=True)
 
 
 def test_dashboard_rollback_scopes_cleanup_to_job_and_reports_unverified_resources(tmp_path, monkeypatch):

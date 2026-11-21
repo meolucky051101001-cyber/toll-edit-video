@@ -124,6 +124,41 @@ def test_unscoped_qc_calls_do_not_inherit_source_recognition():
     assert len(recognize.call_args_list[0].args[0]) == 1
 
 
+@pytest.mark.parametrize("height,width", [(401, 240), (401, 720), (401, 401)])
+def test_model_input_reuse_maps_each_box_and_recognizes_one_pixel_change(height, width):
+    from backend import ocr_utils as ocr
+
+    first = np.zeros((height, width, 3), np.uint8)
+    second = np.zeros((height + 1, width, 3), np.uint8)
+    second[0] = 255  # Outside the recognized band.
+    changed = second.copy()
+    changed[301, 0, 0] = 1
+    box = [[0, 0], [10, 0], [10, 5], [0, 5]]
+
+    def recognize(images):
+        assert [image.shape for image in images] == [(77, width, 3)] * 2
+        return [[(box, str(image[0, 0, 0]), 1.0)] for image in images]
+
+    with ocr._ocr_band_roi((.75, .94)), patch.object(ocr, "_recognize_batch", side_effect=recognize):
+        results = ocr._readtext_batch([first, second, changed, second])
+    assert [rows[0][1] for rows in results] == ["0", "0", "1", "0"]
+    assert [rows[0][0][0][1] for rows in results] == [300, 301, 301, 301]
+
+
+@pytest.mark.parametrize("roi,height", [(None, 400), ((.1, .95), 400),
+                                        ((.5, .55), 400), ((.2, .7), 128)])
+def test_full_frame_fallback_includes_changes_anywhere(roi, height):
+    from backend import ocr_utils as ocr
+
+    first = np.zeros((height, 200, 3), np.uint8)
+    second = first.copy()
+    second[0, 0, 0] = 1
+    with ocr._ocr_band_roi(roi), patch.object(ocr, "_recognize_batch", side_effect=identify) as run:
+        results = ocr._readtext_batch([first, second])
+    assert [image.shape for image in run.call_args.args[0]] == [first.shape, second.shape]
+    assert [rows[0]["text"] for rows in results] == ["0", "1"]
+
+
 def test_pipeline_shares_ledger_across_coarse_rescue_and_source_passes(tmp_path):
     from contextlib import ExitStack
     from types import SimpleNamespace

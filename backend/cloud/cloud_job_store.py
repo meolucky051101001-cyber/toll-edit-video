@@ -26,17 +26,20 @@ from zoneinfo import ZoneInfo
 
 from .cloud_config import DEFAULT_CONFIG
 from .cloud_contract import (
+    CHECKABLE_GPUS,
     CloudCleanupStatus,
     CloudCostMeasurementSource,
     CloudErrorCode,
     CloudJobState,
     CloudLedgerStatus,
+    GPU_CHECK_TASK,
     cloud_deadline_seconds,
     GPU_CU_RATES,
     TERMINAL_STATES,
     can_transition,
     get_error_remediation,
     normalize_state,
+    resolve_cloud_source_channel,
     to_legacy_state,
 )
 from .cloud_security import CloudValidationError, redact_secrets
@@ -54,6 +57,9 @@ def _parse_optional_json_dict(raw_val: Optional[str]) -> Optional[Dict[str, Any]
         return None
 
 DEFAULT_LEASE_SECONDS = 60.0
+MAX_CONCURRENT_JOBS = 4
+_CONCURRENCY_SETTING_KEY = "max_concurrent_jobs"
+_GPU_CONCURRENCY_KEY_PREFIX = "max_concurrent_jobs:"
 
 _TERMINAL_DB_STATES = ("completed", "cancelled", "failed", "error", "stopped")
 _ACTIVE_DB_STATES = (
@@ -137,13 +143,13 @@ def _extract_provider_observed_ts(usage: Dict[str, Any], now_ts: float) -> float
             if iso_val.endswith("Z"):
                 iso_val = iso_val[:-1] + "+00:00"
             return dt.datetime.fromisoformat(iso_val).timestamp()
-        except Exception:
-            continue
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Thời điểm quan sát số dư Colab không hợp lệ") from exc
     if usage.get("age_seconds") is not None:
-        try:
-            return now_ts - max(0.0, float(usage["age_seconds"]))
-        except Exception:
-            pass
+        age = float(usage["age_seconds"])
+        if not math.isfinite(age):
+            raise ValueError("Tuổi snapshot số dư Colab không hợp lệ")
+        return now_ts - max(0.0, age)
     return now_ts
 
 
@@ -164,12 +170,25 @@ def _normalize_provider_usage_payload(
         except (TypeError, ValueError):
             balance = None
 
-    observed_at = _extract_provider_observed_ts(usage, now_ts)
+    invalid_observation = False
+    try:
+        observed_at = _extract_provider_observed_ts(usage, now_ts)
+        if not math.isfinite(observed_at) or observed_at > now_ts + 5.0:
+            raise ValueError("Thời điểm snapshot Colab không hợp lệ hoặc ở tương lai")
+    except (TypeError, ValueError, OverflowError):
+        observed_at = 0.0
+        invalid_observation = True
+    invalid_balance = balance is None or not math.isfinite(balance) or balance < 0.0
+    if invalid_balance:
+        balance = None
+    ok = ok and not invalid_balance and not invalid_observation
     age_seconds = max(0.0, now_ts - observed_at)
-    stale_flag = bool(usage.get("stale", False))
+    stale_flag = bool(usage.get("stale", False)) or invalid_observation
     is_stale = stale_flag or (age_seconds > stale_limit)
     raw_err = usage.get("error")
     safe_err = redact_secrets(str(raw_err)) if raw_err else None
+    if not safe_err and (invalid_balance or invalid_observation):
+        safe_err = "Số dư hoặc thời điểm snapshot Colab không hợp lệ"
 
     if not ok:
         status = "disconnected"
@@ -548,9 +567,102 @@ class CloudJobStore:
         ).fetchone() is not None
 
     @staticmethod
+    def _concurrency_limits_in_db(db: sqlite3.Connection) -> tuple[int, dict[str, int]]:
+        rows = db.execute(
+            "SELECT key, value FROM cloud_settings WHERE key = ? OR key LIKE ?",
+            (_CONCURRENCY_SETTING_KEY, f"{_GPU_CONCURRENCY_KEY_PREFIX}%"),
+        )
+        limits = {}
+        for row in rows:
+            try:
+                limits[row["key"]] = min(MAX_CONCURRENT_JOBS, max(1, int(row["value"])))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        fallback = limits.get(_CONCURRENCY_SETTING_KEY, 1)
+        return fallback, {gpu: limits[key] for gpu in CHECKABLE_GPUS
+                          if (key := f"{_GPU_CONCURRENCY_KEY_PREFIX}{gpu}") in limits}
+
+    @classmethod
+    def _concurrency_limit_in_db(cls, db: sqlite3.Connection, gpu_type: Optional[str] = None) -> int:
+        fallback, by_gpu = cls._concurrency_limits_in_db(db)
+        if gpu_type:
+            return by_gpu.get(gpu_type, fallback)
+        return max([fallback, *by_gpu.values()])
+
+    def get_concurrency_limit(self, gpu_type: Optional[str] = None) -> int:
+        """Read the total capacity or the limit for a given GPU."""
+        with self._connect() as db:
+            return self._concurrency_limit_in_db(db, gpu_type)
+
+    def get_gpu_concurrency_limits(self) -> dict[str, int]:
+        with self._connect() as db:
+            fallback, by_gpu = self._concurrency_limits_in_db(db)
+            return {gpu: by_gpu.get(gpu, fallback) for gpu in CHECKABLE_GPUS}
+
+    @staticmethod
+    def _validate_concurrency_limit(limit: int) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_CONCURRENT_JOBS:
+            raise ValueError(f"Số luồng Cloud phải là số nguyên từ 1 đến {MAX_CONCURRENT_JOBS}.")
+
+    def set_concurrency_limit(self, limit: int) -> int:
+        """Persist a limit for future claims without interrupting running jobs."""
+        self._validate_concurrency_limit(limit)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO cloud_settings(key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (_CONCURRENCY_SETTING_KEY, str(limit), time.time()),
+            )
+            db.commit()
+        return limit
+
+    def set_gpu_concurrency_limits(self, limits: dict[str, int]) -> None:
+        """Save GPU limits together without changing already claimed jobs."""
+        for gpu, limit in limits.items():
+            if gpu not in CHECKABLE_GPUS:
+                raise ValueError("Chọn T4, L4, A100 hoặc H100.")
+            self._validate_concurrency_limit(limit)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany(
+                "INSERT INTO cloud_settings(key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                [(f"{_GPU_CONCURRENCY_KEY_PREFIX}{gpu}", str(limit), time.time()) for gpu, limit in limits.items()],
+            )
+            db.commit()
+
+    @staticmethod
     def _has_pending_cleanup_in_db(db: sqlite3.Connection) -> bool:
+        # Registration records a future cleanup obligation before VM creation.
+        # A matching, healthy live lease owns that obligation; it is not an orphan.
+        # Every mismatch, expired lease, cancellation or failed cleanup stays blocking.
+        now = time.time()
         return db.execute(
-            "SELECT 1 FROM cloud_cleanup_events WHERE status != 'verified' LIMIT 1"
+            f"""
+            SELECT 1 FROM cloud_cleanup_events AS event
+            WHERE event.status != 'verified'
+              AND NOT EXISTS (
+                SELECT 1 FROM cloud_jobs AS job
+                WHERE job.job_id = event.job_id
+                  AND job.attempt = event.attempt
+                  AND job.session_name = event.session_name
+                  AND job.owner_id = event.owner_id
+                  AND job.owner_id IS NOT NULL
+                  AND length(trim(job.owner_id)) > 0
+                  AND job.state IN ({_ACTIVE_STATES_SQL})
+                  AND job.state NOT IN ('cancel_requested', 'cancelling')
+                  AND job.cancel_requested_at IS NULL
+                  AND job.cleanup_status = 'pending'
+                  AND job.lease_expires_at > ?
+                  AND (job.deadline_at IS NULL OR job.deadline_at > ?)
+                  AND event.status = 'pending'
+                  AND event.attempts = 0
+                  AND event.last_error IS NULL
+              )
+            LIMIT 1
+            """,
+            (*_ACTIVE_DB_STATES, now, now),
         ).fetchone() is not None or db.execute(
             "SELECT 1 FROM cloud_cost_ledger WHERE status IN ('pending_cleanup', 'unreconciled') LIMIT 1"
         ).fetchone() is not None
@@ -599,9 +711,23 @@ class CloudJobStore:
                 previous_job = db.execute(
                     "SELECT state FROM cloud_jobs WHERE job_id = ?", (rollout.get("job_id"),)
                 ).fetchone()
-                if (previous_job and not self._is_terminal_db_state(previous_job["state"])) or (
-                    self._has_active_job_in_db(db) or self._has_pending_cleanup_in_db(db)
-                ):
+                active_count = db.execute(
+                    f"SELECT COUNT(*) FROM cloud_jobs WHERE state IN ({_ACTIVE_STATES_SQL})",
+                    _ACTIVE_DB_STATES,
+                ).fetchone()[0]
+                previous_state = str(previous_job["state"] or "") if previous_job else ""
+                previous_is_active = previous_state in _ACTIVE_DB_STATES
+                previous_is_queued = previous_state == "queued"
+                busy_previous = previous_is_queued or (
+                    previous_job is not None
+                    and not self._is_terminal_db_state(previous_state)
+                    and not previous_is_active
+                )
+                # A Telegram lane may be active while Dashboard rollout is paused
+                # or references a completed job. Capacity, not previous origin,
+                # decides whether another Dashboard permit can be opened.
+                may_rearm_while_active = active_count < self._concurrency_limit_in_db(db)
+                if busy_previous or (active_count > 0 and not may_rearm_while_active) or self._has_pending_cleanup_in_db(db):
                     raise CloudValidationError(
                         "Hãy hoàn tất job Cloud và đối soát tài nguyên, chi phí trước khi mở lượt mới.",
                         code=CloudErrorCode.ROLLOUT_BUSY.value, http_status=409,
@@ -783,10 +909,39 @@ class CloudJobStore:
             ).fetchone()
             return self._row_to_job(row) if row else None
 
+    def list_active_jobs(self) -> List[CloudJob]:
+        """List every leased/running/cancelling job across all Cloud workers."""
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM cloud_jobs WHERE state IN ({_ACTIVE_STATES_SQL}) ORDER BY id ASC",
+                _ACTIVE_DB_STATES,
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+
+    def list_live_jobs(self) -> List[CloudJob]:
+        """Read every running and waiting job in one query, independent of history limits."""
+        with self._connect() as db:
+            rows = db.execute(
+                f"""SELECT * FROM cloud_jobs WHERE state IN ({_ACTIVE_STATES_SQL}, 'queued')
+                     ORDER BY state = 'queued', id""",
+                _ACTIVE_DB_STATES,
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+
     def get_job_by_row_id(self, row_id: int) -> Optional[CloudJob]:
         with self._connect() as db:
             row = db.execute("SELECT * FROM cloud_jobs WHERE id = ?", (row_id,)).fetchone()
             return self._row_to_job(row) if row else None
+
+    def _claim_capacity_in_db(self, db: sqlite3.Connection) -> tuple[bool, set[str]]:
+        fallback, limits = self._concurrency_limits_in_db(db)
+        active = db.execute(
+            f"SELECT gpu_type, COUNT(*) AS count FROM cloud_jobs WHERE state IN ({_ACTIVE_STATES_SQL}) GROUP BY gpu_type",
+            _ACTIVE_DB_STATES,
+        ).fetchall()
+        total_limit = max([fallback, *limits.values()])
+        full_gpus = {row["gpu_type"] for row in active if row["count"] >= limits.get(row["gpu_type"], fallback)}
+        return sum(row["count"] for row in active) < total_limit, full_gpus
 
     def _claim_row(
         self,
@@ -799,10 +954,11 @@ class CloudJobStore:
         enforce_budget: bool = True,
         provider_usage: Optional[Dict[str, Any]] = None,
     ) -> Optional[CloudJob]:
-        if self.rollout_controlled and (
-            self._rollout_in_db(db).get("job_id") != job_id
-            or self._has_active_job_in_db(db)
-            or self._has_pending_cleanup_in_db(db)
+        has_capacity, full_gpus = self._claim_capacity_in_db(db)
+        if not has_capacity:
+            return None
+        if self._has_pending_cleanup_in_db(db) or (
+            self.rollout_controlled and self._rollout_in_db(db).get("job_id") != job_id
         ):
             return None
         row = db.execute(
@@ -814,7 +970,7 @@ class CloudJobStore:
             """,
             (job_id,),
         ).fetchone()
-        if not row:
+        if not row or row["gpu_type"] in full_gpus:
             return None
 
         has_stored_res = row["cu_reserved"] is not None and float(row["cu_reserved"]) > 0.0
@@ -831,21 +987,14 @@ class CloudJobStore:
             cu_buf = breakdown["cu_buffer"]
             cu_res = breakdown["cu_reserved"]
 
-        prov_bal_before: Optional[float] = None
-        if provider_usage is not None:
-            snap = _normalize_provider_usage_payload(provider_usage, now=now)
-            self._save_provider_snapshot_in_db(db, snap, now)
-            prov_bal_before = snap.get("balance")
-        else:
-            existing_snap = self._get_provider_snapshot_in_db(db, now_ts=now)
-            if existing_snap:
-                prov_bal_before = existing_snap.get("balance")
+        snap = self._admission_provider_snapshot_in_db(db, provider_usage, now=now)
+        prov_bal_before = snap.get("balance") if snap else None
 
         if enforce_budget:
             decision = self._evaluate_admission_in_db(
                 db,
                 cu_needed=cu_res,
-                provider_usage=provider_usage,
+                provider_usage=None,
                 require_fresh_provider=False,
                 now_ts=now,
                 record_snapshot=False,
@@ -912,6 +1061,8 @@ class CloudJobStore:
         *,
         enforce_budget: bool = True,
         provider_usage: Optional[Dict[str, Any]] = None,
+        job_id: Optional[str] = None,
+        exclude_source_channel: Optional[str] = None,
     ) -> Optional[CloudJob]:
         """Lấy job kế tiếp ở trạng thái queued và cấp lease + giữ chỗ ngân sách nguyên tử."""
         claim_owner = owner_id or f"worker-{uuid.uuid4().hex[:8]}"
@@ -923,14 +1074,30 @@ class CloudJobStore:
                 if self.rollout_controlled and not rollout_job_id:
                     db.commit()
                     return None
-                row = db.execute(
+                has_capacity, full_gpus = self._claim_capacity_in_db(db)
+                if not has_capacity:
+                    db.commit()
+                    return None
+                rows = db.execute(
                     """
-                    SELECT job_id FROM cloud_jobs
+                    SELECT job_id, gpu_type, options_json, idempotency_key FROM cloud_jobs
                     WHERE state = 'queued' AND cancel_requested_at IS NULL
                       AND (? IS NULL OR job_id = ?)
-                    ORDER BY id ASC LIMIT 1
-                    """, (rollout_job_id, rollout_job_id),
-                ).fetchone()
+                      AND (? IS NULL OR job_id = ?)
+                    ORDER BY id ASC
+                    """, (rollout_job_id, rollout_job_id, job_id, job_id),
+                ).fetchall()
+                row = None
+                for candidate in rows:
+                    if candidate["gpu_type"] in full_gpus:
+                        continue
+                    channel = resolve_cloud_source_channel(
+                        _parse_optional_json_dict(candidate["options_json"]), candidate["idempotency_key"],
+                    )
+                    if exclude_source_channel and channel == exclude_source_channel:
+                        continue
+                    row = candidate
+                    break
                 if not row:
                     db.execute("COMMIT")
                     return None
@@ -1161,7 +1328,15 @@ class CloudJobStore:
 
                 if target_state is not None:
                     target_enum = normalize_state(target_state)
-                    if target_enum != current_norm and not can_transition(current_norm, target_enum):
+                    probe_finished = (
+                        row["task_type"] == GPU_CHECK_TASK
+                        and current_norm == CloudJobState.PROVISIONING
+                        and target_enum == CloudJobState.COMPLETED
+                        and row["cleanup_status"] == CloudCleanupStatus.VERIFIED.value
+                    )
+                    if target_enum != current_norm and not (
+                        probe_finished or can_transition(current_norm, target_enum)
+                    ):
                         db.execute("COMMIT")
                         return False
 
@@ -1372,13 +1547,17 @@ class CloudJobStore:
                 db.execute("ROLLBACK")
                 raise
 
-    def remove_warm_session(self, session_name: str) -> bool:
+    def remove_warm_session(self, session_name: str, *, expires_at: Optional[float] = None) -> bool:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                sql = "DELETE FROM cloud_warm_sessions WHERE session_name = ?"
+                args: tuple = (session_name,)
+                if expires_at is not None:
+                    sql += " AND expires_at = ?"
+                    args = (session_name, expires_at)
                 cur = db.execute(
-                    "DELETE FROM cloud_warm_sessions WHERE session_name = ?",
-                    (session_name,),
+                    sql, args,
                 )
                 db.execute("COMMIT")
                 return cur.rowcount > 0
@@ -1893,6 +2072,30 @@ class CloudJobStore:
             row = db.execute("SELECT value FROM cloud_settings WHERE key = ?", (key,)).fetchone()
             return row["value"] if row else default
 
+    def list_gpu_evidence(self) -> List[Dict[str, Any]]:
+        """Latest actual test or completed production render for each accelerator."""
+        placeholders = ", ".join("?" for _ in CHECKABLE_GPUS)
+        with self._connect() as db:
+            rows = db.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT gpu_type, task_type, state, error_code, cleanup_status,
+                           completed_at, cu_actual, job_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY gpu_type
+                               ORDER BY completed_at IS NOT NULL, updated_at DESC, id DESC
+                           ) AS rank
+                    FROM cloud_jobs
+                    WHERE gpu_type IN ({placeholders}) AND
+                        (task_type = ? OR (task_type = 'full_pipeline' AND state = 'completed'))
+                )
+                SELECT gpu_type, task_type, state, error_code, cleanup_status,
+                       completed_at, cu_actual, job_id
+                FROM ranked WHERE rank = 1
+                """, (*CHECKABLE_GPUS, GPU_CHECK_TASK),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def set_setting(self, key: str, value: Any) -> None:
         now = time.time()
         val_str = str(value)
@@ -2181,12 +2384,76 @@ class CloudJobStore:
         snap: Dict[str, Any],
         now: float,
     ) -> None:
+        current = self._get_provider_snapshot_in_db(db, now_ts=now)
+        if current and current.get("observed_at") is not None:
+            previous_time = float(current["observed_at"])
+            incoming_time = float(snap.get("observed_at") or 0.0)
+            if incoming_time < previous_time:
+                return
+            if incoming_time == previous_time:
+                # Equally dated observations cannot increase spending authority.
+                old_balance, new_balance = current.get("balance"), snap.get("balance")
+                if (not current.get("ok") and snap.get("ok")) or (
+                    current.get("is_stale") and not snap.get("is_stale")
+                ) or (
+                    old_balance is not None and new_balance is not None
+                    and float(new_balance) > float(old_balance)
+                ):
+                    return
         payload = json.dumps(snap, ensure_ascii=False)
         db.execute(
             "INSERT INTO cloud_settings (key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             ("provider_usage_snapshot", payload, now),
         )
+
+    def _admission_provider_snapshot_in_db(
+        self,
+        db: sqlite3.Connection,
+        usage: Optional[Dict[str, Any]],
+        *,
+        now: float,
+        record_snapshot: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve claims against the newest observation, never re-date a cached payload."""
+        current = self._get_provider_snapshot_in_db(db, now_ts=now)
+        if usage is None:
+            return current
+        incoming = _normalize_provider_usage_payload(usage, now=now)
+        has_observed_time = any(usage.get(key) not in (None, "") for key in ("observed_at", "as_of", "timestamp"))
+        if current and not has_observed_time:
+            # A raw dict may have waited in another lane. It can reduce authority,
+            # but cannot raise balance, recover connectivity or refresh cache age.
+            old_balance, new_balance = current.get("balance"), incoming.get("balance")
+            lowers_balance = (old_balance is not None and new_balance is not None
+                              and float(new_balance) < float(old_balance))
+            worsens_health = (not incoming.get("ok")) or incoming.get("is_stale")
+            if not lowers_balance and not worsens_health:
+                return current
+            incoming["observed_at"] = current.get("observed_at") or 0.0
+            incoming["stale_flag"] = bool(current.get("stale_flag") or incoming.get("stale_flag"))
+            incoming["ok"] = bool(current.get("ok") and incoming.get("ok"))
+            incoming["age_seconds"] = current.get("age_seconds")
+            incoming["is_stale"] = bool(current.get("is_stale") or incoming.get("is_stale"))
+            incoming["status"] = ("disconnected" if not incoming["ok"] else
+                                  "stale" if incoming["is_stale"] else "ok")
+        if current and current.get("observed_at") is not None:
+            incoming_time, previous_time = float(incoming.get("observed_at") or 0.0), float(current["observed_at"])
+            if incoming_time < previous_time:
+                return current
+            if incoming_time == previous_time:
+                old_balance, new_balance = current.get("balance"), incoming.get("balance")
+                if (not current.get("ok") and incoming.get("ok")) or (
+                    current.get("is_stale") and not incoming.get("is_stale")
+                ) or (
+                    old_balance is not None and new_balance is not None
+                    and float(new_balance) > float(old_balance)
+                ):
+                    return current
+        if record_snapshot:
+            self._save_provider_snapshot_in_db(db, incoming, now)
+            return self._get_provider_snapshot_in_db(db, now_ts=now)
+        return incoming
 
     def _get_provider_snapshot_in_db(
         self,
@@ -2201,6 +2468,8 @@ class CloudJobStore:
             return None
         try:
             raw = json.loads(row["value"])
+            if not isinstance(raw, dict):
+                raise ValueError("Invalid snapshot object")
         except Exception:
             return {
                 "status": "disconnected",
@@ -2213,13 +2482,27 @@ class CloudJobStore:
             }
         check_now = time.time() if now_ts is None else float(now_ts)
         stale_limit = float(DEFAULT_CONFIG.get("provider_balance_stale_seconds", 300))
-        observed_at = raw.get("observed_at")
-        age_seconds = max(0.0, check_now - float(observed_at)) if observed_at is not None else stale_limit + 1.0
-        is_stale = bool(raw.get("stale_flag")) or (age_seconds > stale_limit)
         ok = bool(raw.get("ok"))
+        try:
+            observed_at = float(raw["observed_at"])
+            balance = float(raw["balance"]) if raw.get("balance") is not None else None
+            if not math.isfinite(observed_at) or observed_at > check_now + 5.0 or (
+                ok and (balance is None or not math.isfinite(balance) or balance < 0.0)
+            ):
+                raise ValueError("Invalid persisted snapshot")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {
+                "status": "disconnected", "ok": False, "balance": None,
+                "observed_at": None, "age_seconds": None, "is_stale": True,
+                "error": "Snapshot số dư Colab đã lưu không hợp lệ; cần lấy mẫu mới.",
+            }
+        age_seconds = max(0.0, check_now - observed_at)
+        is_stale = bool(raw.get("stale_flag")) or (age_seconds > stale_limit)
         status = "disconnected" if not ok else ("stale" if is_stale else "ok")
         return {
             **raw,
+            "observed_at": observed_at,
+            "balance": balance,
             "age_seconds": round(age_seconds, 2),
             "is_stale": is_stale,
             "status": status,
@@ -2238,11 +2521,12 @@ class CloudJobStore:
             db.execute("BEGIN IMMEDIATE")
             try:
                 self._save_provider_snapshot_in_db(db, snap, now_ts)
+                recorded = self._get_provider_snapshot_in_db(db, now_ts=now_ts)
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
                 raise
-        return snap
+        return recorded or snap
 
     def get_provider_usage_snapshot(self, *, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
         with self._connect() as db:
@@ -2380,18 +2664,14 @@ class CloudJobStore:
         require_fresh_provider: bool = False,
         now_ts: Optional[float] = None,
         record_snapshot: bool = True,
+        check_daily_budget: bool = True,
     ) -> Dict[str, Any]:
         check_now = time.time() if now_ts is None else float(now_ts)
-        snap: Optional[Dict[str, Any]] = None
-        if provider_usage is not None:
-            snap = _normalize_provider_usage_payload(provider_usage, now=check_now)
-            if record_snapshot:
-                self._save_provider_snapshot_in_db(db, snap, check_now)
-        else:
-            snap = self._get_provider_snapshot_in_db(db, now_ts=check_now)
-
+        snap = self._admission_provider_snapshot_in_db(
+            db, provider_usage, now=check_now, record_snapshot=record_snapshot,
+        )
         summary = self._compute_budget_summary_in_db(db, now_ts=check_now)
-        if snap is not None and provider_usage is not None and not record_snapshot:
+        if snap is not None:
             summary["provider"] = snap
 
         if summary["unreconciled_count"] > 0:
@@ -2436,7 +2716,9 @@ class CloudJobStore:
                 }
             bal = snap.get("balance")
             min_bal = float(DEFAULT_CONFIG.get("min_provider_balance_cu", 0.0))
-            required_bal = max(min_bal, float(cu_needed))
+            # Provider balance is account-wide: concurrent jobs must not each
+            # spend the same available CU before the next usage refresh.
+            required_bal = max(min_bal, float(summary["reserved_today"]) + float(cu_needed))
             if bal is not None and float(bal) < required_bal - 1e-6:
                 return {
                     "allowed": False,
@@ -2446,7 +2728,7 @@ class CloudJobStore:
                     "budget": summary,
                 }
 
-        if cu_needed > 0.0:
+        if check_daily_budget and cu_needed > 0.0:
             if summary["committed_today"] + float(cu_needed) > summary["budget_daily"] + 1e-6:
                 return {
                     "allowed": False,
@@ -2458,7 +2740,7 @@ class CloudJobStore:
                     ),
                     "budget": summary,
                 }
-        elif summary["is_exceeded"]:
+        elif check_daily_budget and summary["is_exceeded"]:
             return {
                 "allowed": False,
                 "code": CloudErrorCode.BUDGET_EXCEEDED.value,
@@ -2476,6 +2758,29 @@ class CloudJobStore:
             "reason": "ok",
             "budget": summary,
         }
+
+    def check_reserved_provider_balance(self) -> Dict[str, Any]:
+        """Recheck account-wide holds after claim, without reserving this job twice."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if self._has_pending_cleanup_in_db(db):
+                    decision = {
+                        "allowed": False,
+                        "code": CloudErrorCode.BUDGET_UNCERTAIN.value,
+                        "http_status": 503,
+                        "reason": "Còn tài nguyên Cloud chưa xác nhận thu hồi; tạm chặn mở session mới.",
+                    }
+                else:
+                    decision = self._evaluate_admission_in_db(
+                        db, cu_needed=0.0, require_fresh_provider=True,
+                        check_daily_budget=False,
+                    )
+                db.commit()
+                return decision
+            except Exception:
+                db.rollback()
+                raise
 
     def check_admission_allowed(
         self,

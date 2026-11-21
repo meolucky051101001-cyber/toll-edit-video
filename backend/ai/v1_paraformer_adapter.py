@@ -276,22 +276,48 @@ def transcribe_audio_paraformer(
 def enrich_segments_with_paraformer(
     segments: Sequence[Dict[str, Any]],
     audio_path: str | Path,
+    *,
+    preloaded_mono_16k: Optional[np.ndarray] = None,
+    selective: bool = False,
 ) -> List[Dict[str, Any]]:
     """Attach Paraformer-large-zh co-recognition & rescue missed whispered Chinese cues."""
     ready, _ = check_paraformer_readiness()
     if not ready or not segments:
         return [dict(s) for s in segments]
 
+    out = [dict(s) for s in segments]
+    if selective:
+        target_indices = [
+            idx
+            for idx, seg in enumerate(out)
+            if (
+                ("avg_logprob" in seg and float(seg.get("avg_logprob", 0.0)) < -0.35)
+                or ("confidence" in seg and float(seg.get("confidence", 1.0)) < 0.85)
+                or (0 < len(_cjk_chars(seg.get("text", ""))) <= 4)
+            )
+        ]
+        if not target_indices:
+            logger.info(
+                "[PARAFORMER_CO_ASR] Selective mode: all %d segments high-confidence; skipping Paraformer.",
+                len(out),
+            )
+            return out
+    else:
+        target_indices = list(range(len(out)))
+
     t0 = time.monotonic()
     try:
-        mono = _load_mono_16k(audio_path)
+        if preloaded_mono_16k is not None and len(preloaded_mono_16k) > 0:
+            mono = np.asarray(preloaded_mono_16k, dtype=np.float32)
+        else:
+            mono = _load_mono_16k(audio_path)
         if mono.size < 1600:
-            return [dict(s) for s in segments]
+            return out
 
-        out = [dict(s) for s in segments]
-        spans = [(float(s["start"]), float(s["end"])) for s in out]
+        spans = [(float(out[idx]["start"]), float(out[idx]["end"])) for idx in target_indices]
         pf_texts = _decode_spans_paraformer(mono, spans, use_punct=False)
-        for item, pf_txt in zip(out, pf_texts):
+        for idx, pf_txt in zip(target_indices, pf_texts):
+            item = out[idx]
             w_cjk = _cjk_chars(item.get("text", ""))
             p_cjk = _cjk_chars(pf_txt)
             if p_cjk and p_cjk != w_cjk:
@@ -300,11 +326,12 @@ def enrich_segments_with_paraformer(
                     item["paraformer_alt"] = pf_txt
 
         logger.info(
-            "[PARAFORMER_CO_ASR] Enriched %d segments in %.2fs.",
+            "[PARAFORMER_CO_ASR] Enriched %d/%d segments in %.2fs.",
+            len(target_indices),
             len(out),
             time.monotonic() - t0,
         )
         return out
     except Exception as exc:
         logger.debug("[PARAFORMER_CO_ASR] Skipped enrichment on error: %s", exc)
-        return [dict(s) for s in segments]
+        return out

@@ -10,12 +10,14 @@ from pathlib import Path
 _lock = threading.RLock()
 _process = None
 _key = None
+_last_used_at = 0.0
 
 def close_session():
-    global _process, _key
+    global _process, _key, _last_used_at
     import os
     with _lock:
         process, _process, _key = _process, None, None
+        _last_used_at = 0.0
         if process is not None:
             if process.stdin:
                 try:
@@ -42,8 +44,23 @@ def close_session():
                 process.kill()
                 process.wait(timeout=5)
 
+def close_if_idle(max_idle_s: float = 180.0) -> bool:
+    """Close warm OCR worker if it has been idle for at least ``max_idle_s``."""
+    if not _lock.acquire(blocking=False):
+        return False
+    try:
+        if _process is None:
+            return False
+        if _last_used_at > 0 and (time.monotonic() - _last_used_at) < float(max_idle_s):
+            return False
+        close_session()
+        return True
+    finally:
+        _lock.release()
+
+
 def run_request(args, *, timeout, env, creationflags=0, **kwargs):
-    global _process, _key
+    global _process, _key, _last_used_at
     from batch_control import stop_check
     predicate = stop_check.get()
     if predicate and predicate():
@@ -86,10 +103,11 @@ def run_request(args, *, timeout, env, creationflags=0, **kwargs):
             while True:
                 remaining = check_budget()
                 if response.is_file():
+                    _last_used_at = time.monotonic()
                     return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
                 if _process.poll() is not None:
                     raise RuntimeError("V1 OCR worker exited before returning results")
-                time.sleep(min(.025, remaining))
+                time.sleep(min(.005, remaining))
         except BaseException:
             close_session()
             raise

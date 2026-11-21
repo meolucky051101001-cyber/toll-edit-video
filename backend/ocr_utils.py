@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from bisect import bisect_left
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -80,6 +80,38 @@ def _close_ocr_session():
         close_session()
 
 
+def _should_close_warm_ocr_session():
+    """Close warm OCR worker only under real VRAM/RAM pressure."""
+    min_vram_mb = float(os.getenv("V1_OCR_KEEP_WARM_MIN_VRAM_MB", "1800"))
+    try:
+        try:
+            from .v1_vram_monitor import get_vram_stats
+        except ImportError:
+            from v1_vram_monitor import get_vram_stats
+        vstats = get_vram_stats(force_refresh=True)
+        if vstats.get("available") and float(vstats.get("free_mb", 9999.0)) < min_vram_mb:
+            logger.info(
+                "[OCR] Free VRAM %.0f MB < %.0f MB; closing warm OCR session",
+                float(vstats.get("free_mb", 0.0)), min_vram_mb,
+            )
+            return True
+    except Exception:
+        pass
+    min_ram_mb = float(os.getenv("V1_OCR_KEEP_WARM_MIN_RAM_MB", "1500"))
+    try:
+        import psutil
+        avail_mb = psutil.virtual_memory().available / (1024.0 * 1024.0)
+        if avail_mb < min_ram_mb:
+            logger.info(
+                "[OCR] Available RAM %.0f MB < %.0f MB; closing warm OCR session",
+                avail_mb, min_ram_mb,
+            )
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def release_ocr_reader(force_close_session: bool = False):
     global reader, _paddle_failed
     was_failed = _paddle_failed
@@ -88,7 +120,7 @@ def release_ocr_reader(force_close_session: bool = False):
     if ledger is not None:
         ledger.clear()
     keep_warm = os.getenv("V1_OCR_KEEP_WARM", "1").strip().lower() not in ("0", "false", "no")
-    if force_close_session or was_failed or not keep_warm:
+    if force_close_session or was_failed or not keep_warm or _should_close_warm_ocr_session():
         _close_ocr_session()
     if reader is not None:
         logger.info("🧹 Đang giải phóng bộ nhớ RAM/VRAM của EasyOCR...")
@@ -138,6 +170,7 @@ except ImportError:
 
 
 _active_ocr_roi = ContextVar("v1_ocr_band_roi", default=None)
+_active_ocr_rec_model = ContextVar("v1_ocr_rec_model", default=None)
 
 
 @contextmanager
@@ -149,21 +182,72 @@ def _ocr_band_roi(bounds):
         _active_ocr_roi.reset(token)
 
 
+@contextmanager
+def _ocr_rec_model(model_name):
+    token = _active_ocr_rec_model.set(model_name)
+    try:
+        yield
+    finally:
+        _active_ocr_rec_model.reset(token)
+
+
+def _resolve_timeline_fast_rec_model(policy):
+    """Use cached PP-OCRv6_tiny_rec for high-volume Pass 2 box timing if available."""
+    if os.getenv("V1_OCR_TIMELINE_FAST_REC", "1").strip().lower() in ("0", "false", "no"):
+        return None
+    current_rec = str(getattr(policy, "paddle_recognition_model", "") or "").strip()
+    if current_rec == "PP-OCRv6_tiny_rec":
+        return None
+    cache_dir = getattr(policy, "model_cache_directory", "") or ""
+    if not cache_dir:
+        return None
+    tiny_dir = Path(cache_dir) / "paddlex" / "official_models" / "PP-OCRv6_tiny_rec_onnx"
+    if tiny_dir.is_dir():
+        return "PP-OCRv6_tiny_rec"
+    return None
+
+
+def _ocr_model_input(frame, roi):
+    """Return the pixels supplied to recognition and their vertical offset."""
+    if roi is None or len(frame.shape) < 2 or frame.shape[0] < 160:
+        return frame, 0
+    top, bottom = map(float, roi)
+    if 0.0 <= top < bottom <= 1.0 and bottom - top < 0.75:
+        height = frame.shape[0]
+        y0, y1 = int(height * top), math.ceil(height * bottom)
+        if y1 - y0 >= 64:
+            return frame[y0:y1, :], y0
+    return frame, 0
+
+
 def _readtext_batch(frames):
     if not all(hasattr(frame, "tobytes") and hasattr(frame, "dtype") for frame in frames):
         return _recognize_batch(frames)
     policy = current_v1_model_policy()
     roi = _active_ocr_roi.get()
+    rec_override = _active_ocr_rec_model.get()
     policy_key = tuple(str(getattr(policy, name, "")) for name in (
         "ocr_backend", "paddle_detection_model", "paddle_recognition_model", "paddle_engine",
         "runtime_python", "model_cache_directory")) + ("bgr-native-v1",)
+    if rec_override is not None:
+        policy_key += (("rec", str(rec_override)),)
     if roi is not None:
         policy_key += (("roi", round(float(roi[0]), 3), round(float(roi[1]), 3)),)
     # Unscoped consumers (including rendered-pixel QC) only deduplicate within
     # this batch. They can never inherit recognition evidence from source OCR.
     ledger = active_ledger() or OCRObservationLedger("batch")
     before = ledger.metrics.get("ocr_unique_inputs", 0)
-    result = ledger.recognize(frames, _recognize_batch, policy_key, current_occurrences())
+    inputs = [_ocr_model_input(frame, roi) for frame in frames]
+    result = ledger.recognize([image for image, _ in inputs], _recognize_batch,
+                              policy_key, current_occurrences())
+    # Cached boxes are local to the model input. Map each occurrence back to
+    # its own frame, even when two equal crops came from different heights.
+    for index, (_, y0) in enumerate(inputs):
+        if y0:
+            result[index] = [
+                ([[float(x), float(y) + y0] for x, y in bbox], text, score)
+                for bbox, text, score in result[index]
+            ]
     unique = ledger.metrics.get("ocr_unique_inputs", 0) - before
     logger.info("V1 OCR frames=%d unique_work=%d reused=%d",
                 len(frames), unique, len(frames) - unique)
@@ -177,7 +261,6 @@ def _recognize_batch(frames):
     global _paddle_failed
     policy = current_v1_model_policy()
     ocr_backend = getattr(policy, "ocr_backend", "auto")
-    roi = _active_ocr_roi.get()
     if not _paddle_failed and ocr_backend in {"auto", "paddle"} and runtime_module_available(
         "paddleocr", policy
     ):
@@ -185,29 +268,11 @@ def _recognize_batch(frames):
             with tempfile.TemporaryDirectory(prefix="autodub-v1-ocr-frames-") as temporary:
                 started = time.monotonic()
                 paths = []
-                y_offsets = {}
                 for index, frame in enumerate(frames):
-                    write_frame = frame
-                    y_offset = 0
-                    if (
-                        roi is not None
-                        and hasattr(frame, "shape")
-                        and len(frame.shape) >= 2
-                        and frame.shape[0] >= 160
-                        and 0.0 <= float(roi[0]) < float(roi[1]) <= 1.0
-                        and (float(roi[1]) - float(roi[0])) < 0.75
-                    ):
-                        fh = int(frame.shape[0])
-                        y0 = max(0, int(fh * float(roi[0])))
-                        y1 = min(fh, math.ceil(fh * float(roi[1])))
-                        if y1 - y0 >= 64:
-                            write_frame = frame[y0:y1, :]
-                            y_offset = y0
                     path = Path(temporary) / "frame_{:04d}.bmp".format(index)
-                    if not cv2.imwrite(str(path), write_frame):
+                    if not cv2.imwrite(str(path), frame):
                         raise OSError("Could not write OCR frame {}".format(path))
                     paths.append(str(path))
-                    y_offsets[str(path)] = y_offset
 
                 ledger = active_ledger()
                 if ledger is not None:
@@ -218,7 +283,7 @@ def _recognize_batch(frames):
                     {
                         "images": paths,
                         "detection_model": getattr(policy, "paddle_detection_model", "PP-OCRv5_mobile_det"),
-                        "recognition_model": getattr(policy, "paddle_recognition_model", "PP-OCRv5_mobile_rec"),
+                        "recognition_model": _active_ocr_rec_model.get() or getattr(policy, "paddle_recognition_model", "PP-OCRv5_mobile_rec"),
                         "engine": getattr(policy, "paddle_engine", "onnx"),
                     },
                     timeout_seconds=float(
@@ -238,14 +303,11 @@ def _recognize_batch(frames):
                 output = []
                 for path in paths:
                     rows = []
-                    y_off = y_offsets.get(path, 0)
                     for item in by_path.get(path, []):
                         bbox = item.get("bbox", [])
                         text = str(item.get("text", "") or "")
                         score = float(item.get("score", 0.0) or 0.0)
                         if len(bbox) >= 4 and text.strip():
-                            if y_off:
-                                bbox = [[float(pt[0]), float(pt[1]) + y_off] for pt in bbox]
                             rows.append((bbox, text, score))
                     output.append(rows)
                 if len(output) != len(frames):
@@ -669,7 +731,14 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     max_vfr_pts = header_duration + max(2.0, header_duration * 0.10)
     clock_warnings = 0
     duration_extended_logged = False
-    batch_size = 8
+    batch_size = max(1, int(os.getenv("V1_OCR_VISUAL_BATCH_SIZE", "8")))
+    timeline_rec_model = (
+        _resolve_timeline_fast_rec_model(current_v1_model_policy())
+        if source_only
+        else None
+    )
+    if timeline_rec_model:
+        metrics["timeline_recognition_model"] = timeline_rec_model
     scale = min(1.0, 960.0 / max(width, 1))
     scaled_size = (max(1, round(width * scale)), max(1, round(height * scale)))
     last_decoded_index = None
@@ -838,8 +907,10 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         occ_tag = "full" if roi_bounds is None else f"roi:{roi_bounds[0]:.3f}:{roi_bounds[1]:.3f}"
         with observation_occurrences([(0, item[0], item[1], occ_tag, scaled_size)
                                       for item in samples]):
-            with _ocr_band_roi(roi_bounds):
-                recognized = _readtext_batch(images)
+            rec_ctx = _ocr_rec_model(timeline_rec_model) if timeline_rec_model else nullcontext()
+            with rec_ctx:
+                with _ocr_band_roi(roi_bounds):
+                    recognized = _readtext_batch(images)
         metrics["visual_ocr_calls"] = metrics.get("visual_ocr_calls", 0) + 1
         metrics["visual_requested_frames"] = metrics.get("visual_requested_frames", 0) + len(samples)
         if len(recognized or []) != len(samples):
@@ -847,6 +918,74 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         for item, rows in zip(samples, recognized):
             prescaled = len(item) > 3 and item[3]
             append_rows(rows, item[0], item[1], item[2], frame_scale=scale if prescaled else 1.0)
+
+    roi_diff_enabled = bool(
+        source_only
+        and source_roi is not None
+        and os.getenv("V1_OCR_ROI_DIFF_SKIP", "1").strip().lower() not in ("0", "false", "no")
+    )
+    last_real_sig = None
+    consecutive_roi_skips = 0
+    pending_roi_clones = []
+
+    def _compute_roi_sig(frame_bgr):
+        if not roi_diff_enabled or frame_bgr is None or not hasattr(frame_bgr, "shape"):
+            return None
+        fh, fw = frame_bgr.shape[:2]
+        y0 = max(0, int(fh * float(source_roi[0])))
+        y1 = min(fh, math.ceil(fh * float(source_roi[1])))
+        if y1 - y0 < 16 or fw < 16:
+            return None
+        crop = frame_bgr[y0:y1, :]
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+        tw = min(360, fw)
+        th = max(12, round(crop.shape[0] * tw / max(fw, 1)))
+        if gray.shape[1] != tw or gray.shape[0] != th:
+            gray = cv2.resize(gray, (tw, th), interpolation=cv2.INTER_AREA)
+        # Never skip uniform/synthetic test frames (std < 2.0)
+        if float(gray.std()) < 2.0:
+            return None
+        edges = cv2.Canny(gray, 60, 160) > 0
+        return gray, edges
+
+    def _can_reuse_roi_frame(cur_sig, cur_time):
+        if cur_sig is None or last_real_sig is None or consecutive_roi_skips >= 2:
+            return False
+        prev_gray, prev_edges, prev_time, _ = last_real_sig
+        if (cur_time - prev_time) > 1.05 or cur_sig[0].shape != prev_gray.shape:
+            return False
+        diff = cv2.absdiff(cur_sig[0], prev_gray)
+        if float(diff.mean()) >= 1.0:
+            return False
+        if int(cv2.blur(diff, (5, 5)).max()) >= 5:
+            return False
+        union = int(np.logical_or(cur_sig[1], prev_edges).sum())
+        if union > 0:
+            changed = int(np.logical_xor(cur_sig[1], prev_edges).sum())
+            if (changed / union) >= 0.025:
+                return False
+        return True
+
+    def _flush_roi_clones():
+        if not pending_roi_clones:
+            return
+        remaining_clones = []
+        for clone_idx, clone_time, template_idx in pending_roi_clones:
+            tpl_blocks = observations.get(template_idx)
+            if tpl_blocks is None:
+                remaining_clones.append((clone_idx, clone_time, template_idx))
+                continue
+            cloned_list = []
+            for blk in tpl_blocks:
+                nb = copy.copy(blk)
+                nb.start = clone_time - 1.2
+                nb.end = clone_time + 1.2
+                nb.sample_time = clone_time
+                all_blocks.append(nb)
+                cloned_list.append(nb)
+            observations[clone_idx] = cloned_list
+            metrics["visual_roi_diff_skips"] = metrics.get("visual_roi_diff_skips", 0) + 1
+        pending_roi_clones[:] = remaining_clones
 
     logger.info("Visual OCR-to-TTS: scanning %d dense timeline samples (step=0.35s)", len(times))
     samples = []
@@ -878,18 +1017,32 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             if samples:
                 recognize_samples(samples, roi_bounds=source_roi)
                 samples.clear()
+            _flush_roi_clones()
             break
         coarse_sample = source_image(coarse_sample)
         frame_index, current_time, frame = coarse_sample
-        samples.append((frame_index, current_time, frame))
-        if len(samples) == batch_size or position + 1 == len(times):
-            recognize_samples(samples, roi_bounds=source_roi)
-            samples.clear()
+        cur_sig = _compute_roi_sig(frame)
+        if last_real_sig is not None and frame_index != last_real_sig[3] and _can_reuse_roi_frame(cur_sig, current_time):
+            pending_roi_clones.append((frame_index, current_time, last_real_sig[3]))
+            consecutive_roi_skips += 1
+        else:
+            samples.append((frame_index, current_time, frame))
+            if cur_sig is not None:
+                last_real_sig = (cur_sig[0], cur_sig[1], current_time, frame_index)
+            else:
+                last_real_sig = None
+            consecutive_roi_skips = 0
+        if len(samples) >= batch_size or position + 1 == len(times):
+            if samples:
+                recognize_samples(samples, roi_bounds=source_roi)
+                samples.clear()
+            _flush_roi_clones()
         if (position + 1) % 100 == 0:
             logger.info(
                 "Visual OCR progress: %d/%d decoded samples, OCR batches=%d",
                 position + 1, len(times), metrics.get("visual_ocr_calls", 0),
             )
+    _flush_roi_clones()
 
     if not all_blocks:
         return [], 0.85
@@ -1047,6 +1200,20 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         if _visual_chinese_count(s.text) >= 4 and float(s.max_x_pct - s.x_pct) > 0.02
     )
     median_seed_char_w = seed_char_widths[len(seed_char_widths) // 2] if seed_char_widths else 0.0
+    seed_rows = {(s.y_pct + s.max_y_pct) / 2: set() for s in source_seeds}
+    seed_vertical = set()
+    for seed in source_seeds:
+        cy = (seed.y_pct + seed.max_y_pct) / 2
+        seed_vertical.add((cy, seed.max_y_pct - seed.y_pct))
+        seed_rows[cy].add((seed.x_pct + seed.max_x_pct) / 2)
+
+    @lru_cache(maxsize=1024)
+    def in_seed_row(center, height):
+        return any(abs(center - y) <= min(height, h * 1.30) * .52 + .004 for y, h in seed_vertical)
+
+    @lru_cache(maxsize=512)
+    def horizontal_anchors(center):
+        return sorted({x for y, values in seed_rows.items() if abs(center - y) <= .03 for x in values})
 
     def _rescue_split_single_cjk_blocks(raw_blocks):
         if len(raw_blocks) <= 1:
@@ -1104,11 +1271,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             if source_only and source_seeds:
                 in_band = (
                     (median_seed_h <= 0.0 or (median_seed_h * 0.56 <= block_h <= max_allowed_block_h))
-                    and any(
-                        abs(center - (seed.y_pct + seed.max_y_pct) / 2)
-                        <= min(block_h, (seed.max_y_pct - seed.y_pct) * 1.30) * .52 + .004
-                        for seed in source_seeds
-                    )
+                    and in_seed_row(center, block_h)
                 )
             english = getattr(band, 'mode', '') == 'english_match'
             readable = (cjk_n >= 2 or
@@ -1131,15 +1294,10 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             anchor_cx = seed_anchor_cx if (source_only and source_seeds) else .5
             dx = abs(cx - anchor_cx)
             if source_only and source_seeds:
-                row_dx = min(
-                    (
-                        abs(cx - (s.x_pct + s.max_x_pct) * 0.5)
-                        for s in source_seeds
-                        if abs(center - (s.y_pct + s.max_y_pct) * 0.5) <= 0.03
-                    ),
-                    default=dx,
-                )
-                dx = min(dx, row_dx)
+                xs = horizontal_anchors(center)
+                pos = bisect_left(xs, cx)
+                for x in xs[max(0, pos - 1):pos + 1]:
+                    dx = min(dx, abs(cx - x))
             if not matches_speech and (
                 dx > (.145 if (source_only and seeds_centered) else .25)
                 or (block.max_x_pct - block.x_pct < .25 and dx > .15)
@@ -1147,6 +1305,13 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                 continue
             selected.append(block)
         return _merge_colinear_frame_blocks(selected)
+
+    speech_intervals = sorted(
+        (seg.start.total_seconds(), seg.end.total_seconds(), _visual_caption_key(seg.content))
+        for seg in (source_segments or []) if hasattr(getattr(seg, "start", None), "total_seconds")
+        and hasattr(getattr(seg, "end", None), "total_seconds") and getattr(seg, "content", None)
+    )
+    speech_starts = [start for start, _, _ in speech_intervals]
 
     def caption_signature(blocks):
         rows = []
@@ -1158,22 +1323,55 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                 sig_text = "".join(c for c in raw_text if "\u3400" <= c <= "\u9fff")
             else:
                 sig_text = _visual_caption_key(raw_text)
+            t = block.sample_time
+            cue = bisect_left(speech_starts, t) - 1 if t is not None else -1
+            # Relax tiny box jitter only on a complete, confidently matched
+            # spoken line. Split lines in one utterance need every transition.
+            if (cue < 0 or not (speech_intervals[cue][0] + .18 <= t <= speech_intervals[cue][1] - .18)
+                    or block.prob < .93 or _visual_caption_key(raw_text) != speech_intervals[cue][2]):
+                cue = -1
             rows.append((sig_text,
                          round(block.x_pct * 20), round(block.max_x_pct * 20),
-                         round(block.y_pct * 25), round(block.max_y_pct * 25)))
+                         round(block.y_pct * 25), round(block.max_y_pct * 25),
+                         block.x_pct, block.max_x_pct, block.y_pct, block.max_y_pct, cue))
         return tuple(sorted(rows))
+
+    def same_caption(left, right):
+        if len(left) != len(right):
+            return False
+        for a, b in zip(left, right):
+            if a[:5] == b[:5]:
+                continue
+            if (not source_only or a[9] < 0 or a[9] != b[9] or a[0] != b[0]
+                    or max(abs(a[5] - b[5]), abs(a[6] - b[6])) * width > 2
+                    or max(abs(a[7] - b[7]), abs(a[8] - b[8])) * height > 2):
+                return False
+        return True
 
     eff_fps = frame_count / max(float(duration or 0.0), 0.1)
     stable_gap = max(12, int(round(eff_fps * 0.42))) if source_only else None
     transition_cache = {}
     unsettled_targets = None
     max_transition_cache = 384
+    cache_bytes = 96 * 1024**2
     try:
         import psutil
         if psutil.virtual_memory().available >= int(2.5 * 1024 * 1024 * 1024):
             max_transition_cache = 768
+            cache_bytes *= 2
     except Exception:
         pass
+    # Retain the exact OCR band and the neighbouring pixels used for colour
+    # sampling. A 4K portrait input must not reserve hundreds of full frames.
+    sw, sh = scaled_size
+    cache_y0, cache_y1 = 0, sh
+    if source_only and refine_roi is not None and sh >= 160:
+        top, bottom = refine_roi
+        y0, y1 = int(sh * top), math.ceil(sh * bottom)
+        if bottom - top < .75 and y1 - y0 >= 64:
+            pad = math.ceil(.005 * sh) + 12
+            cache_y0, cache_y1 = max(0, y0 - pad), min(sh, y1 + pad)
+    max_transition_cache = min(max_transition_cache, cache_bytes // max(1, 3 * sw * (cache_y1 - cache_y0)))
 
     def _ensure_unsettled_targets():
         nonlocal unsettled_targets
@@ -1187,19 +1385,26 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             gap = r_idx - l_idx
             if gap <= 1:
                 continue
-            if caption_signature(observations[l_idx]) == caption_signature(observations[r_idx]):
+            if same_caption(caption_signature(observations[l_idx]), caption_signature(observations[r_idx])):
                 if stable_gap is None or gap <= stable_gap:
                     continue
                 if active_windows and not active_frame_interval(l_idx, r_idx):
                     continue
-            cand.extend(range(l_idx + 1, r_idx))
-        unsettled_targets = set(cand[:max_transition_cache])
+            cand.extend(range(l_idx + 1, min(r_idx, l_idx + 1 + max_transition_cache - len(cand))))
+            if len(cand) >= max_transition_cache:
+                break
+        unsettled_targets = set(cand)
 
     def _fetch_transition_sample(target_index):
         nonlocal timeline_duration, clock_warnings
         cached = transition_cache.pop(target_index, None)
         if cached is not None:
-            return (target_index, cached[0], cached[1], True)
+            image = cached[1]
+            if (cache_y0 or cache_y1 != sh) and isinstance(image, np.ndarray):
+                full = np.zeros((sh, *image.shape[1:]), dtype=image.dtype)
+                full[cache_y0:cache_y1] = image
+                image = full
+            return (target_index, cached[0], image, True)
         _ensure_unsettled_targets()
         if last_decoded_index is not None and target_index <= last_decoded_index:
             reset_source_decoder()
@@ -1236,8 +1441,10 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                 c_scaled = (
                     cv2.resize(c_raw, scaled_size, interpolation=cv2.INTER_AREA)
                     if scale < 1
-                    else (c_raw.copy() if hasattr(c_raw, "copy") else c_raw)
+                    else c_raw
                 )
+                if isinstance(c_scaled, np.ndarray):
+                    c_scaled = c_scaled[cache_y0:cache_y1].copy()
                 transition_cache[cur_idx] = (c_pts, c_scaled)
         f_idx, f_pts, f_raw = source_image(sample)
         return (f_idx, f_pts, f_raw)
@@ -1252,13 +1459,24 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             recognize_samples(samples, roi_bounds=refine_roi)
         return [observations[index] for index in indices]
 
+    refine_min_gap = (
+        max(1, int(os.getenv("V1_OCR_SOURCE_MIN_GAP_FRAMES", "2")))
+        if (source_only and frame_count >= 60)
+        else 1
+    )
+    refine_kwargs = dict(
+        max_extra_frames=frame_count if source_only else 4000,
+        max_stable_gap_frames=stable_gap,
+        observe_batch=observe_frames,
+        active_interval=active_frame_interval if active_windows else None,
+    )
+    if refine_min_gap > 1:
+        refine_kwargs["min_gap_frames"] = refine_min_gap
+    refine_kwargs["equivalent"] = same_caption
     try:
         refined, extra = refine_observations(observations, frame_count, None,
                                              caption_signature, stopped,
-                                             max_extra_frames=frame_count if source_only else 4000,
-                                             max_stable_gap_frames=stable_gap,
-                                             observe_batch=observe_frames,
-                                             active_interval=active_frame_interval if active_windows else None)
+                                             **refine_kwargs)
     finally:
         transition_cache.clear()
     metrics["visual_boundary_frames"] = extra
@@ -1278,8 +1496,24 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                 # mute visual_sub_to_speech cues lock dialogue timing to OCR.
                 track.visual_locked = False
                 tracks.append(track)
+        if refine_min_gap > 1 and frame_times:
+            ordered_ref = sorted(refined)
+            for idx_l, idx_r in zip(ordered_ref, ordered_ref[1:]):
+                if not (1 < (idx_r - idx_l) <= refine_min_gap):
+                    continue
+                if same_caption(caption_signature(refined[idx_l]), caption_signature(refined[idx_r])):
+                    continue
+                t_l = float(frame_times.get(idx_l, 0.0))
+                t_r = float(frame_times.get(idx_r, t_l))
+                if t_r > t_l:
+                    for block in caption_blocks(refined[idx_r]):
+                        track = _tracking_ocr_block(block, t_l, t_r, block)
+                        track.geometry_verified = True
+                        track.visual_locked = False
+                        tracks.append(track)
         metrics['source_timeline'] = dict(observed_frames=len(refined), track_count=len(tracks),
-                                          duration=timeline_duration, max_stable_gap_frames=stable_gap)
+                                          duration=timeline_duration, max_stable_gap_frames=stable_gap,
+                                          min_gap_frames=refine_min_gap)
         return tracks, float(band.top)
 
     recovered = recover_missing_subtitles_from_ocr(
@@ -1353,16 +1587,81 @@ class _OcrFrameBatch:
     def __post_init__(self):
         self.crop_y_end = self.height
 
+    def _read_coarse_batch(self):
+        """Spend server-recognizer samples on cues whose endpoints disagree."""
+        frames = self.captured_frames
+        by_cue = {}
+        if self.ocr_strategy == "full" and not self.is_adaptive:
+            for i, sample in enumerate(frames):
+                by_cue.setdefault(sample[4], []).append(i)
+        interiors = set()
+        for indices in by_cue.values():
+            if len(indices) < 3:
+                continue
+            # Inspect the entire picture cheaply before splitting a model batch.
+            # Cuts, moving captions and new lines keep the original dense batch.
+            previews = [cv2.resize(frames[i][2], (160, 160), interpolation=cv2.INTER_AREA)
+                        for i in indices]
+            for offset, i in enumerate(indices[1:-1], 1):
+                if all(cv2.norm(previews[offset], edge, cv2.NORM_INF) <= 12
+                       for edge in (previews[0], previews[-1])):
+                    interiors.add(i)
+        rows = [None] * len(frames)
+
+        def recognize(indices):
+            if not indices:
+                return
+            with observation_occurrences([self.captured_occurrences[i] for i in indices]):
+                results = _readtext_batch([frames[i][2] for i in indices])
+            if len(results) != len(indices):
+                raise RuntimeError("OCR returned incomplete frame results")
+            for i, result in zip(indices, results):
+                rows[i] = result
+
+        recognize([i for i in range(len(frames)) if i not in interiors])
+        retry = []
+        for indices in by_cue.values():
+            skipped = [i for i in indices[1:-1] if i in interiors]
+            if not skipped:
+                continue
+            first, last = indices[0], indices[-1]
+            text = _visual_caption_key(frames[first][3].content)
+            def confirmed_box(index):
+                # Logos, a second line or an uncertain reading require all
+                # scheduled samples. The dense pass still measures lifetimes.
+                found = rows[index]
+                if len(found) == 1 and len(text) >= 4:
+                    box, value, prob = found[0]
+                    if prob >= .94 and _visual_caption_key(value) == text:
+                        return np.asarray(box, dtype=float)
+                return None
+            a, b = confirmed_box(first), confirmed_box(last)
+            if a is None or b is None or a.shape != (4, 2) or b.shape != a.shape or np.max(np.abs(a - b)) > 3:
+                retry.extend(skipped)
+                continue
+            # Confirm at native resolution inside the recognized box. A
+            # one-character edit must not disappear in the small preview.
+            x0, y0 = np.floor(np.minimum(a, b).min(axis=0)).astype(int)
+            x1, y1 = np.ceil(np.maximum(a, b).max(axis=0)).astype(int) + 1
+            region = np.s_[max(0, y0):y1, max(0, x0):x1]
+            for i in skipped:
+                roi = frames[i][2][region]
+                if roi.size and all(cv2.norm(roi, frames[j][2][region], cv2.NORM_INF) <= 10 for j in (first, last)):
+                    self.metrics["coarse_interior_skips"] = self.metrics.get("coarse_interior_skips", 0) + 1
+                else:
+                    retry.append(i)
+        recognize(sorted(retry))
+        return rows
+
     def flush_frames(self):
         if not self.captured_frames:
             return
         if _ocr_stopped():
             raise RuntimeError('OCR stop requested')
-        with observation_occurrences(self.captured_occurrences):
-            results = _readtext_batch([item[2] for item in self.captured_frames])
-        if len(results) != len(self.captured_frames):
-            raise RuntimeError("OCR returned incomplete frame results")
+        results = self._read_coarse_batch()
         for item, rows in zip(self.captured_frames, results):
+            if rows is None:
+                continue
             current_time, scale_ratio, proc_frame, target_seg, seg_idx, crop_offset = item
             try:
                 sample_id = _ocr_segment_id(target_seg, seg_idx)

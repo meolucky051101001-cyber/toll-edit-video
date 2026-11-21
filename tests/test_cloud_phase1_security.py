@@ -174,13 +174,9 @@ def test_gpu_task_voice_and_session_allowlists():
 
 
 def test_exec_argv_uses_shell_false_and_ephemeral_env(tmp_path: Path):
-    captured_scripts: list[str] = []
     captured_subprocess_calls: list[dict] = []
     uploaded_env_payloads: list[dict] = []
     fake_secret = "AIzaSyFakeSecretTestKey9876543210"
-
-    def fake_write_wsl(wsl_path: str, content: str):
-        captured_scripts.append(content)
 
     def fake_upload(session_name: str, local_path: str | Path, remote_filename=None):
         p = Path(local_path)
@@ -193,9 +189,7 @@ def test_exec_argv_uses_shell_false_and_ephemeral_env(tmp_path: Path):
         return SimpleNamespace(returncode=0, stdout=b"ok", stderr=b"")
 
     with (
-        patch.object(colab_bridge, "_write_wsl_temp_script", side_effect=fake_write_wsl),
         patch.object(colab_bridge, "upload_file", side_effect=fake_upload),
-        patch.object(colab_bridge, "_remove_wsl_temp_file"),
         patch.object(colab_bridge.subprocess, "run", side_effect=fake_run),
     ):
         ok, _ = colab_bridge.exec_argv(
@@ -203,11 +197,15 @@ def test_exec_argv_uses_shell_false_and_ephemeral_env(tmp_path: Path):
             ["python3", "full_pipeline.py", "--input", "/content/a'b & c.mp4", "--voice", "BV562_streaming"],
             cwd="/content",
             env_vars={"GEMINI_API_KEY": fake_secret},
+            timeout=90,
         )
 
     assert ok is True
-    assert len(captured_scripts) == 1
-    runner_code = captured_scripts[0]
+    assert len(captured_subprocess_calls) == 1
+    [execution] = captured_subprocess_calls
+    assert execution["cmd"][-5:] == ["exec", "-s", "cjob1234", "--timeout", "90"]
+    assert execution["timeout"] == 95
+    runner_code = execution["input"].decode("utf-8")
     assert "shell=False" in runner_code
     assert "shell=True" not in runner_code
     assert fake_secret not in runner_code
