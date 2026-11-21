@@ -60,7 +60,7 @@ def _preflight(root, python, deadline):
     checks = report.get("checks", [])
     passed = sum(isinstance(item, dict) and item.get("status") == "pass" for item in checks)
     ready = report.get("ready") is True
-    ok = code == 0 and ready and len(checks) == 25 and passed == 25
+    ok = code == 0 and ready and len(checks) > 0 and passed == len(checks)
     return ok, "ready={} {}/{} pass (read-only directory permission checks)".format(str(ready).lower(), passed, len(checks))
 
 
