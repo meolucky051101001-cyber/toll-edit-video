@@ -525,11 +525,12 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
     import torch
     import whisper
 
-    device = "cuda" if engine == "faster-whisper" or torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"  -> Whisper sử dụng thiết bị: {device}", flush=True)
     audio, audit = _asr_speech_audio(audio_path, reference_audio_path)
     audit["model"] = WHISPER_MODEL
     audit["engine"] = engine
+    audit["device"] = device
     # Exhausted temperature fallback returned mixed-language gibberish at T=1.0
     # on a real clip. Use beam search and retain confidence failures for retry.
     decode_options = {"verbose": False, "word_timestamps": True,
@@ -553,7 +554,8 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
         if engine == "faster-whisper":
             from faster_whisper import WhisperModel
 
-            model = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="int8_float16")
+            compute_type = "int8_float16" if device == "cuda" else "int8"
+            model = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
         else:
             # Match Local V1's model family. Large-v3 dropped real speech on the
             # long Canary even after an original-track retry with valid clip bounds.

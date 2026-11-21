@@ -156,7 +156,17 @@ def test_faster_whisper_result_conversion_preserves_segment_and_word_fields():
     }
 
 
-def test_faster_whisper_engine_uses_cloud_decode_policy_and_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    ("cuda_available", "expected_device", "expected_compute_type"),
+    [(True, "cuda", "int8_float16"), (False, "cpu", "int8")],
+)
+def test_faster_whisper_engine_uses_cloud_decode_policy_and_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cuda_available: bool,
+    expected_device: str,
+    expected_compute_type: str,
+):
     calls = {}
     audio = [0.0] * 16000
     original_audio = [1.0] * 16000
@@ -164,7 +174,7 @@ def test_faster_whisper_engine_uses_cloud_decode_policy_and_retry(tmp_path: Path
     word = SimpleNamespace(word="hello", start=0.2, end=0.8, probability=0.95)
 
     torch_module = ModuleType("torch")
-    torch_module.cuda = SimpleNamespace(is_available=lambda: True)
+    torch_module.cuda = SimpleNamespace(is_available=lambda: cuda_available)
     whisper_module = ModuleType("whisper")
     whisper_module.load_audio = lambda _path: original_audio
 
@@ -219,7 +229,7 @@ def test_faster_whisper_engine_uses_cloud_decode_policy_and_retry(tmp_path: Path
 
     assert calls["model"] == (
         "large-v3-turbo",
-        {"device": "cuda", "compute_type": "int8_float16"},
+        {"device": expected_device, "compute_type": expected_compute_type},
     )
     assert len(calls["transcribe"]) == 2
     assert calls["transcribe"][0][0] is original_audio
@@ -234,5 +244,6 @@ def test_faster_whisper_engine_uses_cloud_decode_policy_and_retry(tmp_path: Path
     assert segments == [{"id": 1, "start": 0.2, "end": 0.8, "text": "hello"}]
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     assert audit["engine"] == "faster-whisper"
+    assert audit["device"] == expected_device
     assert audit["recognition_track"] == "vocals_retry"
     assert "hello" in output_path.read_text(encoding="utf-8")
