@@ -787,6 +787,67 @@ def validate_asr_source_timeline(input_video: str, segments: list[dict]) -> floa
     return duration
 
 
+def _probe_compact_caption_band(reader, read_frame, samples, segment_texts, *, width, height, duration):
+    """Find small, centered captions for a Latin transcript using enlarged source pixels."""
+    import cv2
+    from ocr_subtitle_locator import select_chinese_subtitle_band
+
+    blocks = []
+    for segment, times in samples:
+        for timestamp in times:
+            ok, frame = read_frame(timestamp)
+            if not ok or frame is None:
+                continue
+            frame_height, frame_width = frame.shape[:2]
+            offset = int(frame_height * 0.82)
+            crop = cv2.resize(frame[offset:], None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            for points, value, score in reader.readtext(crop, min_size=8):
+                if not value.strip() or len(points) < 4:
+                    continue
+                xs, ys = zip(*points)
+                left = max(0.0, min(xs) / (2 * frame_width))
+                right = min(1.0, max(xs) / (2 * frame_width))
+                if not 0.25 <= (left + right) / 2 <= 0.75:
+                    continue
+                blocks.append(SimpleNamespace(
+                    text=value.strip(), prob=float(score), sample_segment_id=segment["id"],
+                    sample_time=timestamp, start=segment["start"], end=segment["end"],
+                    x_pct=left, max_x_pct=right,
+                    y_pct=max(0.0, (min(ys) / 2 + offset) / frame_height),
+                    max_y_pct=min(1.0, (max(ys) / 2 + offset) / frame_height),
+                ))
+
+    # Require the on-screen Latin text to match speech in multiple cues before
+    # using the narrow lane. Scene text in the original scan can vary by shot.
+    band = select_chinese_subtitle_band(
+        [block for block in blocks if len(_cjk_only_cloud(block.text)) < 2],
+        segment_texts, frame_width=width, frame_height=height, duration=duration,
+    )
+    if band.mode != "english_match" or len(band.selected_by_segment) < 2:
+        return None
+
+    anchors_by_time = {
+        row["sample_time"]: row for rows in band.selected_by_sample.values() for row in rows
+    }
+    anchors = list(anchors_by_time.values())
+    adjacent_rows = []
+    for block in blocks:
+        anchor = anchors_by_time.get(block.sample_time)
+        if anchor is None or block.max_y_pct - block.y_pct > 0.035:
+            continue
+        overlap = min(block.max_x_pct, anchor["max_x_pct"]) - max(block.x_pct, anchor["x_pct"])
+        gap = max(block.y_pct - anchor["max_y_pct"], anchor["y_pct"] - block.max_y_pct)
+        if overlap > 0 and gap <= 0.05:
+            adjacent_rows.append(block)
+    left = min([row["x_pct"] for row in anchors] + [row.x_pct for row in adjacent_rows])
+    right = max([row["max_x_pct"] for row in anchors] + [row.max_x_pct for row in adjacent_rows])
+    if right - left > 0.55:
+        return None
+    top = min([band.top] + [row.y_pct for row in adjacent_rows])
+    bottom = max([band.bottom] + [row.max_y_pct for row in adjacent_rows])
+    return band, (top, bottom), (max(0.0, left - 0.055), min(1.0, right + 0.055))
+
+
 def step3b_ocr_and_fix_subtitles(
     input_video: str,
     segments: list[dict],
@@ -853,6 +914,7 @@ def step3b_ocr_and_fix_subtitles(
             return cap.read()
 
         all_blocks = []
+        sample_specs = []
         roi_bounds: tuple[float, float] | None = None
         anchor_probe_limit = 10
 
@@ -868,6 +930,7 @@ def step3b_ocr_and_fix_subtitles(
             else:
                 n_samp = min(4, max(2, int(dur / 0.8)))
                 sample_times = [st + (i + 0.5) * dur / n_samp for i in range(n_samp)]
+            sample_specs.append((s, sample_times))
 
             if seg_idx == anchor_probe_limit and len(segments) > 12 and all_blocks:
                 probe_band = select_chinese_subtitle_band(
@@ -934,8 +997,6 @@ def step3b_ocr_and_fix_subtitles(
                         is_subtitle=True,
                         is_packaging=False,
                     ))
-        cap.release()
-
         seg_texts = {s["id"]: s["text"] for s in segments}
         band = select_chinese_subtitle_band(
             all_blocks,
@@ -945,8 +1006,22 @@ def step3b_ocr_and_fix_subtitles(
             duration=video_duration,
         )
 
-        main_y_pct = float(band.top) if getattr(band, "support", 0) >= 1 else 0.78
-        band_bottom = float(band.bottom) if getattr(band, "support", 0) >= 1 else min(0.95, main_y_pct + 0.06)
+        anchored = band.support >= 1
+        main_y_pct = float(band.top) if anchored else 0.78
+        band_bottom = float(band.bottom) if anchored else min(0.95, main_y_pct + 0.06)
+        caption_x_bounds = None
+        transcript = " ".join(seg_texts.values())
+        uncertain_band = band.mode == "default" or band.top < 0.65
+        if uncertain_band and re.search(r"[A-Za-z]{3}", transcript) and not _cjk_only_cloud(transcript):
+            compact = _probe_compact_caption_band(
+                reader, _read_frame_at_sec, sample_specs, seg_texts,
+                width=video_w, height=video_h, duration=video_duration,
+            )
+            if compact and (band.mode != "english_match" or compact[0].support >= band.support):
+                band, (main_y_pct, band_bottom), caption_x_bounds = compact
+                anchored = True
+                print(f"  -> Đã xác minh dải phụ đề nhỏ sát đáy (Y={main_y_pct:.3f}–{band_bottom:.3f}).", flush=True)
+        cap.release()
         band_h_limit = max(0.08, (band_bottom - main_y_pct) * 1.8)
         ocr_fixed = 0
         located_count = 0
@@ -1074,8 +1149,9 @@ def step3b_ocr_and_fix_subtitles(
         from caption_geometry import acquire_caption_geometry, validate_caption_evidence
         evidence = acquire_caption_geometry(
             input_video, segments, reader,
-            band_top=main_y_pct if getattr(band, "support", 0) >= 1 else None,
-            band_bottom=band_bottom if getattr(band, "support", 0) >= 1 else None,
+            band_top=main_y_pct if anchored else None,
+            band_bottom=band_bottom if anchored else None,
+            x_bounds=caption_x_bounds,
             duration=video_duration,
             audit_path=Path(output_srt).with_name("caption_geometry.json"),
         )
@@ -1938,12 +2014,13 @@ def generate_capcut_tts_single(
     out_file: str,
     *,
     max_retries: int = 3,
-    poll_timeout: float = 12.0,
+    poll_timeout: float = 30.0,
 ) -> bool:
     """Gọi CapCut TTS SDK với retry có giới hạn và kiểm tra decode file audio trước khi chấp nhận."""
     tmp_out = f"{out_file}.part"
     attempts = max(1, int(max_retries))
     for attempt in range(1, attempts + 1):
+        phase = "create"
         try:
             if os.path.exists(tmp_out):
                 os.remove(tmp_out)
@@ -1957,37 +2034,42 @@ def generate_capcut_tts_single(
             task_id = tasks[0]["id"]
             token = tasks[0]["token"]
 
+            phase = "poll"
             deadline = time.monotonic() + max(1.0, float(poll_timeout))
-            downloaded = False
-            poll_round = 0
+            poll_delay = 0.4
             while time.monotonic() < deadline:
-                time.sleep(0.20 if poll_round == 0 else 0.30)
-                poll_round += 1
+                time.sleep(min(poll_delay, max(0.0, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    break
+                poll_delay = min(1.5, poll_delay * 1.5)
                 query_res = client.query_tts_task(task_id, token)
                 q_tasks = query_res.get("data", {}).get("tasks", [])
                 if not q_tasks:
-                    break
+                    continue
                 status = q_tasks[0].get("status")
                 if status in ("success", "succeed"):
                     payload = json.loads(q_tasks[0].get("payload", "{}"))
                     speech_url = payload.get("audio_subtitles", [{}])[0].get("speech_url")
                     if speech_url:
+                        phase = "download"
                         r = client.session.get(speech_url, timeout=15)
                         r.raise_for_status()
-                        if len(r.content) > 128:
-                            with open(tmp_out, "wb") as f:
-                                f.write(r.content)
-                            validate_tts_audio_file(tmp_out)
-                            os.replace(tmp_out, out_file)
-                            downloaded = True
-                            break
+                        with open(tmp_out, "wb") as f:
+                            f.write(r.content)
+                        phase = "validate"
+                        validate_tts_audio_file(tmp_out)
+                        os.replace(tmp_out, out_file)
+                        return True
                 elif status == "failed":
                     raise RuntimeError("CapCut TTS task trả về status=failed.")
-            if downloaded:
-                return True
-            raise RuntimeError("Hết thời gian chờ hoặc âm thanh CapCut TTS không hợp lệ.")
+            raise TimeoutError("Hết thời gian chờ CapCut TTS.")
         except Exception as exc:
-            print(f"    [CapCut TTS Warn attempt {attempt}/{attempts}] {exc}", flush=True)
+            http_status = getattr(getattr(exc, "response", None), "status_code", None)
+            http_detail = f", HTTP {http_status}" if isinstance(http_status, int) else ""
+            print(
+                f"    [CapCut TTS Warn attempt {attempt}/{attempts}] {phase}: {type(exc).__name__}{http_detail}",
+                flush=True,
+            )
             if os.path.exists(tmp_out):
                 try:
                     os.remove(tmp_out)
@@ -2189,8 +2271,15 @@ def step5_generate_tts(
         sem = asyncio.Semaphore(tts_concurrency)
         done_count = 0
 
-        async def _synth_one(s: dict) -> None:
-            nonlocal fallback_used, done_count
+        def _report_synthesized() -> None:
+            nonlocal done_count
+            done_count += 1
+            if done_count == total_segs or done_count % progress_stride == 0:
+                pct = min(80, 71 + int(9 * done_count / max(1, total_segs)))
+                _write_pipeline_progress(pct, 5, 8, f"Tổng hợp giọng đọc {engine_name} ({done_count}/{total_segs} câu)...")
+
+        async def _synth_one(s: dict) -> bool:
+            nonlocal fallback_used
             t_text = str(s.get("translated_text") or "").strip()
             out_path = os.path.join(tts_dir, f"seg_{int(s['id']):04d}.mp3")
             s["tts_path"] = out_path
@@ -2221,17 +2310,30 @@ def step5_generate_tts(
                         except Exception as e:
                             print(f"  [WARN] Edge TTS lần {edge_try} đoạn {s['id']}: {e}", flush=True)
 
-                if not success:
-                    raise PipelineStageError(
-                        "TTS_GENERATION_FAILED",
-                        f"Tổng hợp giọng đọc TTS thất bại cho câu #{s['id']} (engine={engine_name}).",
-                    )
-                done_count += 1
-                if done_count == total_segs or done_count % progress_stride == 0:
-                    pct = min(80, 71 + int(9 * done_count / max(1, total_segs)))
-                    _write_pipeline_progress(pct, 5, 8, f"Tổng hợp giọng đọc {engine_name} ({done_count}/{total_segs} câu)...")
+                if success:
+                    _report_synthesized()
+                return success
 
-        await asyncio.gather(*(_synth_one(seg_item) for seg_item in segments))
+        results = await asyncio.gather(*(_synth_one(seg_item) for seg_item in segments))
+        for segment, success in zip(segments, results):
+            if success:
+                continue
+            if is_capcut and done_count:
+                print(f"  [WARN] Thử lại CapCut riêng cho câu #{segment['id']}.", flush=True)
+                if await asyncio.to_thread(
+                    generate_capcut_tts_single,
+                    str(segment["translated_text"]).strip(),
+                    capcut_voice,
+                    segment["tts_path"],
+                    max_retries=1,
+                ):
+                    segment["tts_engine_used"] = "capcut_tts"
+                    _report_synthesized()
+                    continue
+            raise PipelineStageError(
+                "TTS_GENERATION_FAILED",
+                f"Tổng hợp giọng đọc TTS thất bại cho câu #{segment['id']} (engine={engine_name}).",
+            )
 
     asyncio.run(_run_all())
     _write_pipeline_progress(81, 5, 8, "Căn chỉnh thời lượng giọng đọc chống đè lời chuẩn Tool V1...")

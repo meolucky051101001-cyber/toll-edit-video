@@ -34,8 +34,8 @@ Tổng: 202 biến.
 | `AUTODUB_CLOUD_STOP_LATENCY_BUFFER_SECONDS` | `60` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_STOP_TIMEOUT` | `60` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_UPLOAD_TIMEOUT` | `1800` | `backend/cloud/cloud_config.py` |
-| `AUTODUB_CLOUD_WARM_HANDOFF_SECONDS` | `180` | `backend/cloud/cloud_config.py` |
-| `AUTODUB_CLOUD_WARM_KEEPALIVE_SECONDS` | `0` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_WARM_HANDOFF_SECONDS` | `300` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_WARM_KEEPALIVE_SECONDS` | `300` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_WSL_DISTRO` | `Ubuntu` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_WSL_USER` | `root` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CONTROL_DIR` | `(tính lúc chạy)` | `backend/service_control.py`, `backend/tool_control_runtime.py` |
@@ -96,7 +96,7 @@ Tổng: 202 biến.
 | `GPU_LOCK_TIMEOUT_SECONDS` | `1800.0` | `backend/pipeline_v2/config.py` |
 | `HF_HOME` | — | `backend/ai/v1_ocr_session.py` |
 | `LLM_PROVIDER` | `auto` | `backend/ai/translation.py`, `backend/pipeline_v2/video_pipeline.py`, `backend/telegram_bot.py` |
-| `LOCALAPPDATA` | — | `backend/config/paths.py`, `backend/subtitle_layout.py` |
+| `LOCALAPPDATA` | — | `backend/config/paths.py`, `backend/subtitle_layout.py`, `run_cloud_node.py` |
 | `META_API_BASE_URL` | `(tính lúc chạy)` | `backend/ai/muse_spark_service.py` |
 | `META_API_KEY` | — | `backend/ai/muse_spark_service.py` |
 | `MIXER_CHUNK_SECONDS` | `300.0` | `backend/pipeline_v2/config.py` |

@@ -208,13 +208,10 @@ def test_p7_01_input_and_command_matrix(tmp_path: Path, monkeypatch):
             colab_bridge.exec_cmd("cjobp7input1", evil_cmd)
 
     # exec_argv preserves special chars without shell=True
-    seen_scripts: list[str] = []
     seen_runs: list[dict] = []
     fake_key = "AIzaSyPhase7FakeSecretKey_0123456789"
     with (
-        patch.object(colab_bridge, "_write_wsl_temp_script", side_effect=lambda _p, txt: seen_scripts.append(txt)),
         patch.object(colab_bridge, "upload_file", return_value=(True, "ok")),
-        patch.object(colab_bridge, "_remove_wsl_temp_file"),
         patch.object(
             colab_bridge.subprocess,
             "run",
@@ -227,9 +224,11 @@ def test_p7_01_input_and_command_matrix(tmp_path: Path, monkeypatch):
             env_vars={"GEMINI_API_KEY": fake_key},
         )
     assert ok is True
-    assert seen_scripts and "shell=False" in seen_scripts[0] and "shell=True" not in seen_scripts[0]
+    assert len(seen_runs) == 1
+    runner_code = seen_runs[0]["input"].decode("utf-8")
+    assert "shell=False" in runner_code and "shell=True" not in runner_code
     assert all(call.get("shell") is False for call in seen_runs)
-    assert fake_key not in seen_scripts[0]
+    assert fake_key not in runner_code
 
     # End-to-end orchestrator preserves source file and delivers atomic output for special name
     store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
@@ -495,6 +494,7 @@ def test_p7_03b_cancel_cleanup_failure_never_marks_cancelled(tmp_path: Path, mon
 
 def test_p7_04_recovery_crash_before_after_vm_lease_expiry_and_provider_offline(tmp_path: Path):
     store = CloudJobStore(db_path=tmp_path / "recover.db", rollout_controlled=False)
+    store.set_concurrency_limit(3)
     video = _make_sample_video(tmp_path)
 
     # 1. Crash BEFORE VM creation (no session on provider)
@@ -569,6 +569,10 @@ def test_p7_05_cost_ledger_error_cancel_delete_retry_midnight_matrix(tmp_path: P
     c_can = store.claim_next(owner_id="w1")
     assert store.register_session(c_can.job_id, c_can.attempt, "w1", "cjobcan1a1") is True
     store.request_cancel(c_can.job_id)
+    store.record_cleanup_result(
+        c_can.job_id, c_can.attempt, "cjobcan1a1",
+        verified_stopped=True, cleanup_status="verified", attempts=1,
+    )
     store.update_progress(
         c_can.job_id,
         state="cancelled",

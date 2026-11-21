@@ -183,22 +183,22 @@ USER_AGENTS = {
 # Do not shorten this list: the same originVideoKey is not available from every
 # XHS CDN/ISP combination. Ordering keeps the long-standing clean-origin patch.
 XHS_ORIGIN_CDN_DOMAINS = (
-    'http://sns-video-qn.xhscdn.com',
     'https://sns-video-qn.xhscdn.com',
-    'http://sns-video-bd.xhscdn.com',
+    'http://sns-video-qn.xhscdn.com',
     'https://sns-video-bd.xhscdn.com',
-    'http://sns-video-qc.xhscdn.com',
+    'http://sns-video-bd.xhscdn.com',
     'https://sns-video-qc.xhscdn.com',
-    'http://sns-video-hw.xhscdn.com',
+    'http://sns-video-qc.xhscdn.com',
     'https://sns-video-hw.xhscdn.com',
-    'http://sns-video-al.xhscdn.com',
+    'http://sns-video-hw.xhscdn.com',
     'https://sns-video-al.xhscdn.com',
-    'http://sns-video-ws.xhscdn.com',
+    'http://sns-video-al.xhscdn.com',
     'https://sns-video-ws.xhscdn.com',
-    'http://sns-video-ct.xhscdn.com',
+    'http://sns-video-ws.xhscdn.com',
     'https://sns-video-ct.xhscdn.com',
-    'http://sns-video-tx.xhscdn.com',
+    'http://sns-video-ct.xhscdn.com',
     'https://sns-video-tx.xhscdn.com',
+    'http://sns-video-tx.xhscdn.com',
     'http://sns-video-v27.xhscdn.com',
     'http://sns-video-v26.xhscdn.com',
     'http://sns-video-v25.xhscdn.com',
@@ -561,6 +561,8 @@ def download_parallel_range(
     max_retries: int = 8,
     headers: dict = None,
     max_transfer_seconds: float = None,
+    *,
+    max_range_bytes: int = None,
 ) -> bool:
     """
     Tải file bằng đa luồng HTTP Range song song với cơ chế tự động resume khi rớt mạng.
@@ -630,19 +632,20 @@ def download_parallel_range(
                     if getattr(shared_state, 'stop_requested', False) or (deadline and (time.monotonic() - transfer_start > deadline)):
                         return part_name, False
                     try:
+                        request_end = min(end, current_start + max_range_bytes - 1) if max_range_bytes else end
                         p_req = urllib.request.Request(url)
                         p_req.add_header('User-Agent', USER_AGENTS["desktop"])
                         if headers:
                             for hk, hv in headers.items():
                                 if hk.lower() != 'user-agent':
                                     p_req.add_header(hk, str(hv))
-                        p_req.add_header('Range', f'bytes={current_start}-{end}')
+                        p_req.add_header('Range', f'bytes={current_start}-{request_end}')
                         with urllib.request.urlopen(p_req, timeout=12) as p_resp:
                             require_partial_content(
                                 getattr(p_resp, "status", p_resp.getcode()),
                                 p_resp.headers,
                                 current_start,
-                                end,
+                                request_end,
                                 total_size,
                             )
                             with open(part_name, 'ab') as f:
@@ -765,7 +768,7 @@ def _extract_xhs_note_data(state: dict) -> dict:
     return note_data
 
 
-def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
+def download_xiaohongshu(url: str, output_dir: str, prefix: str, *, retry_page_transport: bool = False) -> tuple:
     """
     Tải video Xiaohongshu (Tiểu Hồng Thư) không logo chất lượng cao.
     Triệt tiêu 100% watermark:
@@ -791,32 +794,50 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
         headers_used = None
         parsed_state = None
         raw_state = ""
-        for attempt, (ua_name, current_ua) in enumerate(uas_to_try):
+        transport_error = None
+        for attempt in range(3 if retry_page_transport else 2):
+            if attempt == 2:
+                failed_transport = last_res is None and transport_error is not None
+                retryable_status = last_res is not None and last_res.status_code in (408, 500, 502, 503, 504)
+                if res is not None or not (failed_transport or retryable_status):
+                    break
+                if _download_stopped():
+                    return False, "", "", "Đã dừng tải video Tiểu Hồng Thư."
+                time.sleep(1)
+            ua_name, current_ua = uas_to_try[attempt % len(uas_to_try)]
             headers = {
                 'User-Agent': current_ua,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
             }
             try:
-                temp_res = requests.get(target_fetch_url, headers=headers, allow_redirects=True, timeout=(15, 25))
-                last_res = temp_res
-                if temp_res.status_code != 200:
-                    continue
-                if _is_xhs_blocked_url(temp_res.url):
-                    blocked_path = urlsplit(temp_res.url).path or "/"
-                    logger.info(f"{ua_name} UA bị chuyển hướng đến {blocked_path} (explore/login/404), thử UA tiếp theo...")
-                    continue
-                current_state, current_raw = _parse_xhs_initial_state(temp_res.text)
-                note_data = _extract_xhs_note_data(current_state) if current_state else {}
-                res = temp_res
-                headers_used = headers
-                parsed_state = current_state
-                raw_state = current_raw
-                if note_data.get("video") or note_data.get("imageList"):
-                    break
-                logger.info(f"{ua_name} UA không chứa dữ liệu bài viết, thử UA tiếp theo...")
-            except Exception as req_err:
-                logger.warning(f"Lần thử {attempt + 1} ({ua_name} UA) tải trang XHS thất bại ({req_err})")
+                temp_res = requests.get(target_fetch_url, headers=headers, allow_redirects=True,
+                                        timeout=(8, 15) if attempt == 2 else (15, 25))
+            except requests.exceptions.RequestException as req_err:
+                if isinstance(req_err, requests.exceptions.Timeout):
+                    transport_error = "timeout"
+                elif isinstance(req_err, requests.exceptions.ConnectionError) and not isinstance(
+                    req_err, requests.exceptions.SSLError
+                ):
+                    transport_error = "connection"
+                logger.warning("Lần thử %d (%s UA) tải trang XHS thất bại (%s)",
+                               attempt + 1, ua_name, type(req_err).__name__)
+                continue
+            last_res = temp_res
+            if temp_res.status_code != 200:
+                continue
+            if _is_xhs_blocked_url(temp_res.url):
+                logger.info("%s UA bị chuyển hướng khỏi bài viết Tiểu Hồng Thư.", ua_name)
+                continue
+            current_state, current_raw = _parse_xhs_initial_state(temp_res.text)
+            note_data = _extract_xhs_note_data(current_state) if current_state else {}
+            res = temp_res
+            headers_used = headers
+            parsed_state = current_state
+            raw_state = current_raw
+            if note_data.get("video") or note_data.get("imageList"):
+                break
+            logger.info("%s UA không chứa dữ liệu bài viết, thử UA tiếp theo.", ua_name)
 
         if res is None and last_res is not None:
             res = last_res
@@ -828,7 +849,9 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                 }
 
         if res is None:
-            return False, "", "", "Không thể kết nối đến máy chủ Tiểu Hồng Thư (Hết thời gian chờ hoặc bị chặn)"
+            if transport_error == "timeout":
+                return False, "", "", "Hết thời gian chờ phản hồi từ Tiểu Hồng Thư."
+            return False, "", "", "Không thể kết nối đến máy chủ Tiểu Hồng Thư."
         if res.status_code != 200:
             return (
                 False,
@@ -848,6 +871,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             return False, "", "", "Bài viết trên Tiểu Hồng Thư này đã bị tác giả xóa (Trang không tồn tại)"
 
         origin_video_urls = []
+        origin_hosts = set()
         p1_clean = []  # Stream 258: X264 web desktop sạch 100%
         p2_clean = []  # Stream 114/115/120/520: WEB H.265 sạch 100%
         p3_clean = []  # Các stream web sạch khác
@@ -876,20 +900,22 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                         if origin_key.startswith("pre_post/"):
                             keys_to_test.append(origin_key.replace("pre_post/", ""))
                         for dom in XHS_ORIGIN_CDN_DOMAINS:
-                            found_cdn = False
+                            host = urlsplit(dom).hostname
+                            if host in origin_hosts:
+                                continue
                             for k_test in keys_to_test:
                                 test_origin_url = f"{dom}/{k_test}"
                                 try:
                                     h_res = requests.head(test_origin_url, headers=headers_used, timeout=2.5)
-                                    if h_res.status_code == 200 and int(h_res.headers.get("Content-Length", 0)) > 10000:
-                                        if test_origin_url not in origin_video_urls:
-                                            origin_video_urls.append(test_origin_url)
-                                            logger.info(f"Đã tìm thấy CDN luồng gốc XHS sạch: {sanitize_url(test_origin_url)}")
-                                        found_cdn = True
+                                    size = int(h_res.headers.get("Content-Length", 0))
+                                    if h_res.status_code == 200 and size > 10000:
+                                        origin_hosts.add(host)
+                                        origin_video_urls.append((test_origin_url, size))
+                                        logger.info(f"Đã tìm thấy CDN luồng gốc XHS sạch: {sanitize_url(test_origin_url)}")
                                         break
                                 except Exception:
                                     pass
-                            if found_cdn and len(origin_video_urls) >= 2:
+                            if len(origin_video_urls) >= 3:
                                 break
 
                     # 2. Phân loại luồng media stream (Tách luồng sạch vs luồng dính watermark)
@@ -952,11 +978,18 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                 return True, target_path, title, ""
 
         # 4. ƯU TIÊN SỐ 2: TẢI VIDEO GỐC SẠCH (originVideoKey) VỚI CƠ CHẾ THỬ ĐA CDN DỰ PHÒNG
-        for orig_url in origin_video_urls:
+        for orig_url, size in origin_video_urls:
             logger.info(f"Đang tải video XHS GỐC SẠCH KHÔNG WATERMARK: {sanitize_url(orig_url)}")
-            if download_parallel_range(orig_url, target_path, workers=6):
+            range_options = {}
+            if size >= 64 * 1024 * 1024:
+                # Small requests avoid long stalls on large XHS origin ranges.
+                range_options["max_range_bytes"] = 2 * 1024 * 1024
+                if "SOCIAL_STREAM_TIMEOUT_SECONDS" not in os.environ:
+                    range_options["max_transfer_seconds"] = max(180, min(1200, size / (512 * 1024)))
+            if download_parallel_range(orig_url, target_path, workers=6, headers=headers_used, **range_options):
                 logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK (Range): {target_path}")
                 return True, target_path, title, ""
+        for orig_url, _ in origin_video_urls:
             if download_file_stream(orig_url, target_path, headers=headers_used, timeout=(10, 60)):
                 logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK (Stream): {target_path}")
                 return True, target_path, title, ""
@@ -972,8 +1005,11 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                 logger.info(f"Tải thành công video XHS SẠCH KHÔNG WATERMARK (Stream): {target_path}")
                 return True, target_path, title, ""
 
+        if p1_clean or origin_video_urls or remaining_clean:
+            return False, "", "", "Đã tìm thấy luồng sạch Tiểu Hồng Thư nhưng tải video từ CDN thất bại."
+
         # 6. TUYỆT ĐỐI CẤM TẢI STREAM 259 / WATERMARK
-        if fallback_watermarked_urls and not (p1_clean or origin_video_urls or remaining_clean):
+        if fallback_watermarked_urls:
             logger.error("CẢNH BÁO: Chỉ tìm thấy luồng stream 259 có logo watermark; từ chối tải để bảo vệ chất lượng.")
             return False, "", "", "Video Tiểu Hồng Thư này chỉ có luồng dính logo watermark (Đã chặn tải để tránh video có logo)"
 
@@ -992,7 +1028,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
 # =========================================================================
 # 3. BỘ ĐIỀU PHỐI ĐA NỀN TẢNG (ROUTER)
 # =========================================================================
-def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
+def download_social_video(url: str, output_dir: str, prefix: str, *, retry_xhs_page_transport: bool = False) -> tuple:
     """
     Hàm tổng quản lý tải video đa nền tảng không logo:
     - Douyin / TikTok / Kuaishou / Xiaohongshu / Facebook / YouTube / X...
@@ -1016,6 +1052,8 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
 
     # 2. Nhánh Xiaohongshu / Rednote (rednote.com là tên miền quốc tế của XHS)
     elif any(k in lower_url for k in ["xiaohongshu.com", "xhslink.com", "rednote.com"]):
+        if retry_xhs_page_transport:
+            return download_xiaohongshu(url, output_dir, prefix, retry_page_transport=True)
         return download_xiaohongshu(url, output_dir, prefix)
 
     # 3. Chuẩn hóa URL cho yt-dlp fallback

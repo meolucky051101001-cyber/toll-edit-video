@@ -31,8 +31,8 @@ from .cloud_config import DEFAULT_CONFIG
 from .cloud_security import (
     CloudValidationError,
     sanitize_remote_filename,
-    validate_gpu_type,
     validate_task_type,
+    validate_video_gpu_type,
     validate_video_input,
     validate_voice,
 )
@@ -203,6 +203,7 @@ class CloudErrorCode(str, Enum):
     CONFLICT_ALREADY_CLAIMED = "CONFLICT_ALREADY_CLAIMED"
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
     SESSION_CREATE_FAILED = "SESSION_CREATE_FAILED"
+    GPU_ALLOCATION_REFUSED = "GPU_ALLOCATION_REFUSED"
     UPLOAD_FAILED = "UPLOAD_FAILED"
     EXEC_FAILED = "EXEC_FAILED"
     DOWNLOAD_FAILED = "DOWNLOAD_FAILED"
@@ -232,6 +233,10 @@ class CloudErrorCode(str, Enum):
     EXPORT_FAILED = "EXPORT_FAILED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
+
+GPU_CHECK_TASK = "gpu_check"
+CHECKABLE_GPUS = ("T4", "L4", "A100", "H100")
+DASHBOARD_GPU_SETTING = "dashboard_default_gpu"
 
 # Reference hourly CU estimates only (NOT confirmed provider billing rates).
 GPU_CU_RATES: Dict[str, float] = {
@@ -430,13 +435,28 @@ def _default_sessions_callable() -> Callable[[], Any]:
     return _resolve_patched_colab_attr("get_sessions")
 
 
+def stamp_provider_usage_observation(usage: Dict[str, Any], *, observed_at: float) -> Dict[str, Any]:
+    """Attach the acquisition time to a newly queried usage payload with no provider timestamp."""
+    sample = dict(usage)
+    if any(sample.get(key) not in (None, "") for key in ("observed_at", "as_of", "timestamp")):
+        return sample
+    try:
+        age = float(sample.get("age_seconds") or 0.0)
+    except (TypeError, ValueError):
+        return sample  # Preserve invalid age for the store's fail-closed validation.
+    if not math.isfinite(age):
+        return sample
+    sample["observed_at"] = observed_at - max(0.0, age)
+    return sample
+
+
 def _run_usage_probe_task(fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
     try:
         raw = fn()
         if not isinstance(raw, dict):
             res: Dict[str, Any] = {"ok": False, "error": "Invalid usage payload"}
         else:
-            res = dict(raw)
+            res = stamp_provider_usage_observation(raw, observed_at=time.time())
     except Exception as exc:
         res = {"ok": False, "error": str(exc)}
 
@@ -706,16 +726,25 @@ def get_cloud_status_snapshot(
         force_refresh=force_refresh,
         include_sessions=include_sessions,
     )
-    worker_job = worker.get_current_job() if worker is not None else None
-    db_active_job = store.get_active_job()
+    worker_jobs_fn = getattr(worker, "get_current_jobs", None) if worker is not None else None
+    try:
+        worker_jobs = worker_jobs_fn() if callable(worker_jobs_fn) else []
+    except Exception:
+        worker_jobs = []
+    worker_job = worker_jobs[0] if worker_jobs else (worker.get_current_job() if worker is not None else None)
+    list_active_fn = getattr(store, "list_active_jobs", None)
+    db_active_jobs = list_active_fn() if callable(list_active_fn) else []
+    if not db_active_jobs:
+        fallback_active = store.get_active_job()
+        db_active_jobs = [fallback_active] if fallback_active is not None else []
     if (
         worker_job is not None
-        and db_active_job is not None
-        and getattr(worker_job, "job_id", None) == getattr(db_active_job, "job_id", None)
+        and db_active_jobs
+        and any(getattr(worker_job, "job_id", None) == getattr(job, "job_id", None) for job in db_active_jobs)
     ):
-        current_job = db_active_job
+        current_job = next(job for job in db_active_jobs if job.job_id == worker_job.job_id)
     else:
-        current_job = worker_job or db_active_job
+        current_job = worker_job or (db_active_jobs[0] if db_active_jobs else None)
     budget = store.get_cu_budget_info()
     pending_cleanup = (
         store.list_pending_cleanup_events()
@@ -730,6 +759,12 @@ def get_cloud_status_snapshot(
     active_job_dict = current_job.to_dict() if current_job is not None else None
     if active_job_dict is not None and "error_remediation" not in active_job_dict:
         active_job_dict["error_remediation"] = get_error_remediation(active_job_dict.get("error_code"))
+    active_jobs_dict = []
+    for active_job in db_active_jobs:
+        active_dict = active_job.to_dict()
+        if "error_remediation" not in active_dict:
+            active_dict["error_remediation"] = get_error_remediation(active_dict.get("error_code"))
+        active_jobs_dict.append(active_dict)
     rollout = store.get_rollout() if hasattr(store, "get_rollout") else {"phase": "paused"}
     alerts = store.list_rollout_alerts() if hasattr(store, "list_rollout_alerts") else []
     status_latency_ms = round((time.monotonic() - started) * 1000)
@@ -745,6 +780,11 @@ def get_cloud_status_snapshot(
         "worker_state": worker.get_worker_state() if worker is not None else "idle",
         "accepting_jobs": bool(worker.is_accepting_jobs()) if worker is not None else False,
         "active_job": active_job_dict,
+        "active_jobs": active_jobs_dict,
+        "active_job_count": len(active_jobs_dict),
+        "max_concurrent_jobs": (
+            store.get_concurrency_limit() if hasattr(store, "get_concurrency_limit") else 1
+        ),
         "budget": budget,
         "pending_cleanup_events": pending_cleanup,
         "warm_sessions": warm_sessions,
@@ -827,9 +867,19 @@ def request_job_cancellation(
             timeout_seconds=min(0.4, remote_timeout_seconds),
         )
 
-    cur_job = worker.get_current_job() if worker is not None else None
-    if worker is not None and cur_job is not None and cur_job.job_id == job_id and worker.is_running():
-        worker.cancel_current_job(reason=reason)
+    cur_job = None
+    if worker is not None:
+        try:
+            cur_job = worker.get_current_job(job_id)
+        except TypeError:
+            candidate = worker.get_current_job()
+            cur_job = candidate if getattr(candidate, "job_id", None) == job_id else None
+    if worker is not None and cur_job is not None and worker.is_running():
+        cancel_job = getattr(worker, "cancel_job", None)
+        if callable(cancel_job):
+            cancel_job(job_id, reason=reason)
+        else:
+            worker.cancel_current_job(reason=reason)
         latest = store.get_job(job_id)
         final_state = latest.state if latest else str(req.get("state") or "cancel_requested")
         is_cancelled = final_state == CloudJobState.CANCELLED.value
@@ -1450,6 +1500,7 @@ def _build_contract_from_job(
         getattr(job, "created_at", now_epoch) + cloud_deadline_seconds(deadline_seconds)
     )
     job_opts = dict(getattr(job, "options", None) or opts_dict or {})
+    job_opts["source_channel"] = normalize_cloud_source_channel(source_channel) or "dashboard"
     known_snapshot_keys = {
         "gpu_type",
         "task_type",
@@ -1510,6 +1561,37 @@ def _build_contract_from_job(
     )
 
 
+TELEGRAM_SOURCE_CHANNEL = "cloud_telegram_bot"
+
+
+def normalize_cloud_source_channel(source_channel: Any) -> str:
+    """Normalize trusted source channels and legacy Telegram aliases."""
+    channel = str(source_channel).strip().lower().replace("-", "_") if source_channel is not None else ""
+    if channel in {"telegram", "telegram_bot", "cloud_telegram", TELEGRAM_SOURCE_CHANNEL}:
+        return TELEGRAM_SOURCE_CHANNEL
+    return channel
+
+
+def resolve_cloud_source_channel(options: Optional[Dict[str, Any]], idempotency_key: Optional[str]) -> str:
+    """Use stored provenance, falling back to the legacy key only if no channel was recorded."""
+    channel = normalize_cloud_source_channel((options or {}).get("source_channel"))
+    if channel:
+        return channel
+    if str(idempotency_key or "").startswith("cloudbot:"):
+        return TELEGRAM_SOURCE_CHANNEL
+    return "dashboard"
+
+
+def _check_idempotent_source(job: Any, idempotency_key: str, source_channel: str) -> None:
+    existing_source = resolve_cloud_source_channel(getattr(job, "options", None), idempotency_key)
+    if existing_source != source_channel:
+        raise CloudValidationError(
+            "idempotency_key đã được sử dụng bởi một kênh Cloud khác.",
+            code=CloudErrorCode.CONFLICT_ALREADY_CLAIMED.value,
+            http_status=409,
+        )
+
+
 def admit_and_enqueue_job(
     store: Any,
     *,
@@ -1540,6 +1622,8 @@ def admit_and_enqueue_job(
     snapshot, checks daily CU budget policy, constructs the Phase 0/6 CloudJobContract
     snapshot, enqueues into CloudJobStore, and optionally claims atomically.
     """
+    contract_source_channel = source_channel  # Preserve the existing contract's source label/alias.
+    source_channel = normalize_cloud_source_channel(source_channel) or "dashboard"
     clean_idem_key = validate_idempotency_key(idempotency_key)
     if options is not None and not isinstance(options, dict):
         raise CloudValidationError(
@@ -1561,7 +1645,7 @@ def admit_and_enqueue_job(
         allowed_roots=allowed_roots,
         require_exists=require_exists,
     )
-    validated_gpu = validate_gpu_type(gpu_type)
+    validated_gpu = validate_video_gpu_type(gpu_type)
     validated_task = validate_task_type(task_type)
     validated_voice = validate_voice(voice)
 
@@ -1575,6 +1659,7 @@ def admit_and_enqueue_job(
         "task_type": validated_task,
         "voice": validated_voice,
         "execution_mode": exec_mode,
+        "source_channel": source_channel,
         "allow_no_speech": bool(raw_opts.get("allow_no_speech", False)),
         "output_prefix": str(
             raw_opts.get("output_prefix") or DEFAULT_CONFIG.get("output_prefix", "cloud_")
@@ -1588,6 +1673,7 @@ def admit_and_enqueue_job(
     if clean_idem_key and hasattr(store, "get_job_by_idempotency_key"):
         existing_job = store.get_job_by_idempotency_key(clean_idem_key)
         if existing_job is not None:
+            _check_idempotent_source(existing_job, clean_idem_key, source_channel)
             budget_info = store.get_cu_budget_info()
             fingerprint = build_input_fingerprint(
                 validated_input.normalized_value,
@@ -1598,7 +1684,7 @@ def admit_and_enqueue_job(
                 validated_input=validated_input,
                 remote_name=remote_name,
                 fingerprint=fingerprint,
-                source_channel=source_channel,
+                source_channel=contract_source_channel,
                 source_job_id=source_job_id,
                 budget_daily=float(budget_info.get("budget_daily", DEFAULT_CONFIG["cu_budget_daily"])),
                 opts_dict=opts_snapshot_dict,
@@ -1685,12 +1771,13 @@ def admit_and_enqueue_job(
 
     # Detect race where concurrent caller inserted same idempotency_key just before us
     if clean_idem_key and (was_deduplicated or (not atomic_claim and job.state != "queued")):
+        _check_idempotent_source(job, clean_idem_key, source_channel)
         contract = _build_contract_from_job(
             job,
             validated_input=validated_input,
             remote_name=remote_name,
             fingerprint=fingerprint,
-            source_channel=source_channel,
+            source_channel=contract_source_channel,
             source_job_id=source_job_id,
             budget_daily=float(budget_info.get("budget_daily", DEFAULT_CONFIG["cu_budget_daily"])),
             opts_dict=opts_snapshot_dict,
@@ -1750,7 +1837,7 @@ def admit_and_enqueue_job(
         validated_input=validated_input,
         remote_name=remote_name,
         fingerprint=fingerprint,
-        source_channel=source_channel,
+        source_channel=contract_source_channel,
         source_job_id=source_job_id,
         budget_daily=float(budget_info.get("budget_daily", DEFAULT_CONFIG["cu_budget_daily"])),
         opts_dict=opts_snapshot_dict,

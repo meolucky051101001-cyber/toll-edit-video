@@ -908,6 +908,17 @@ def translate_with_gemini(
                 logger.warning("Gemini chunk %d..%d không thành công; giữ cache những chunk hợp lệ, không dùng nguyên văn thay bản dịch", i, i + len(chunk_texts))
                 return None
             all_translated.extend(chunk_res)
+            ready = kwargs.get("_on_ready_texts")
+            if (ready and end < len(texts) and has_valid_meta
+                    and validate_translation_batch_quality(chunk_texts, chunk_res, glossary=kwargs.get("glossary"),
+                                                           target_lang=target_lang)[0]):
+                accepted = []
+                for src, dst, meta in zip(chunk_texts, chunk_res, cue_meta[i:end]):
+                    if (isinstance(dst, str) and dst.strip() and not _contains_cjk(dst)
+                            and 0 < len(dst.split()) <= (meta.get("max_words") or 0)
+                            and not translation_meaning_issues(src, dst)):
+                        accepted.append(normalize_subtitle_text(dst))
+                ready(accepted)
             if has_valid_meta:
                 for pos, translated in enumerate(chunk_res, start=i):
                     speaker = cue_meta[pos].get("speaker")
@@ -1513,7 +1524,8 @@ def _repair_cue_meta(source, translated, metadata, indexes, reasons):
     return result
 
 
-def _fit_translation_cues(source, translated, metadata, *, api_key, script_mode, max_speed, stop_checker, deadline):
+def _fit_translation_cues(source, translated, metadata, *, api_key, script_mode, max_speed, stop_checker, deadline,
+                          on_ready_texts=None):
     """Give likely overlong translations one optional, bounded rewrite before TTS."""
     from v1_speech_guard import VI_SECONDS_PER_WORD, natural_speed_limit, vietnamese_spoken_seconds
 
@@ -1540,6 +1552,10 @@ def _fit_translation_cues(source, translated, metadata, *, api_key, script_mode,
     until = min(time.monotonic() + 15, deadline) if deadline is not None else time.monotonic() + 15
     if not items or until - time.monotonic() <= 1:
         return translated
+
+    if on_ready_texts:
+        pending = {item["index"] for item in items}
+        on_ready_texts([text for idx, text in enumerate(translated) if idx not in pending])
 
     candidates = condense_vietnamese_subtitles_batch(
         items, api_key=api_key, deadline=until, stop_checker=stop_checker,
@@ -1827,6 +1843,7 @@ def translate_subtitles(
                 texts, translated_texts, kwargs["cue_meta"], api_key=g_key_for_domain,
                 script_mode=script_mode, max_speed=kwargs.get("max_speech_speed"),
                 stop_checker=kwargs.get("stop_checker"), deadline=kwargs.get("overall_deadline"),
+                on_ready_texts=kwargs.get("_on_ready_texts"),
             )
         try:
             from mojibake_repair import repair_vietnamese_mojibake

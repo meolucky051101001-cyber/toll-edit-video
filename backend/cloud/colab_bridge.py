@@ -13,6 +13,7 @@ Phase 1 & 2 guarantees:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 
 from .cloud_config import DEFAULT_CONFIG, to_wsl_path
 from .cloud_security import (
+    ALLOWED_VIDEO_EXTENSIONS,
     CloudValidationError,
     has_control_chars,
     redact_secrets,
@@ -60,6 +62,33 @@ _TRANSIENT_TRANSPORT_MARKERS = (
 )
 _AUTODUB_LAUNCH_MARKER = "AUTODUB_LAUNCH_JSON:"
 _AUTODUB_POLL_MARKER = "AUTODUB_POLL_JSON:"
+_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+_UPLOAD_BODY_REJECTED = re.compile(r"\b(?:400 Client Error|413 Client Error|413 (?:Payload|Content) Too Large)\b", re.I)
+_ASSEMBLE_VIDEO = """
+import hashlib
+from pathlib import Path
+import shutil
+import sys
+
+target = Path(sys.argv[1])
+prefix, part_count, size, digest = sys.argv[2:]
+parts = [Path(f"{prefix}_{index}") for index in range(int(part_count))]
+pending = Path(f"{prefix}.part")
+try:
+    with pending.open("xb") as out:
+        for part in parts:
+            with part.open("rb") as source:
+                shutil.copyfileobj(source, out)
+    with pending.open("rb") as assembled:
+        checksum = hashlib.file_digest(assembled, "sha256").hexdigest()
+    if pending.stat().st_size != int(size) or checksum != digest:
+        raise ValueError("Transferred video size or SHA256 does not match the original")
+    pending.replace(target)
+finally:
+    pending.unlink(missing_ok=True)
+    for part in parts:
+        part.unlink(missing_ok=True)
+"""
 
 
 def _is_transient_transport_error(text: str) -> bool:
@@ -192,7 +221,7 @@ def _run_wsl_argv(
         str(target_user),
         "--",
         str(program),
-        *[str(a) for a in args],
+        *[shlex.quote(str(a)) for a in args],
     ]
 
     use_popen = (cancel_check is not None) or (
@@ -372,6 +401,7 @@ def _run_wsl_colab_argv(
     timeout: int = 300,
     distro: Optional[str] = None,
     user: Optional[str] = None,
+    stdin_text: Optional[str] = None,
     extra_secrets: Sequence[str] = (),
     cancel_check: Optional[Callable[[], bool]] = None,
     session_name: Optional[str] = None,
@@ -391,41 +421,11 @@ def _run_wsl_colab_argv(
         timeout=timeout,
         distro=distro,
         user=user,
+        stdin_text=stdin_text,
         extra_secrets=extra_secrets,
         cancel_check=cancel_check,
         session_name=session_name,
     )
-
-
-def _write_wsl_temp_script(wsl_path: str, content: str) -> None:
-    """Write a temporary helper script inside WSL using stdin with 0600 mode (no command-line payload)."""
-    writer_code = (
-        "import os, sys\n"
-        "path = sys.argv[1]\n"
-        "data = sys.stdin.buffer.read()\n"
-        "flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC\n"
-        "fd = os.open(path, flags, 0o600)\n"
-        "try:\n"
-        "    os.chmod(path, 0o600)\n"
-        "    os.write(fd, data)\n"
-        "finally:\n"
-        "    os.close(fd)\n"
-    )
-    rc, _, stderr = _run_wsl_argv(
-        "python3",
-        ["-c", writer_code, wsl_path],
-        timeout=15,
-        stdin_text=content,
-    )
-    if rc != 0:
-        raise RuntimeError(f"Không thể ghi script tạm trong WSL ({wsl_path}): {stderr}")
-
-
-def _remove_wsl_temp_file(wsl_path: str) -> None:
-    try:
-        _run_wsl_argv("rm", ["-f", wsl_path], timeout=10)
-    except Exception:
-        pass
 
 
 def get_usage() -> Dict[str, Any]:
@@ -557,6 +557,85 @@ def create_session(
     return False, combined or "Không thể tạo session."
 
 
+def _upload_with_retry(
+    session_name: str,
+    local_path: Path,
+    remote_dest: str,
+    *,
+    timeout: int,
+    cancel_check: Optional[Callable[[], bool]],
+) -> Tuple[bool, str]:
+    combined = ""
+    for attempt_idx in range(1, 3):
+        rc, stdout, stderr = _run_wsl_colab_argv(
+            ["upload", "-s", session_name, to_wsl_path(local_path), remote_dest],
+            timeout=timeout,
+            cancel_check=cancel_check,
+            session_name=session_name,
+        )
+        combined = redact_secrets(f"{stdout}\n{stderr}".strip())
+        if rc == 0:
+            return True, "Upload thành công."
+        if rc == -3 or _is_session_aborted(session_name):
+            return False, "Tác vụ đã bị hủy bởi yêu cầu dừng."
+        if attempt_idx == 2 or not _is_transient_transport_error(combined):
+            break
+        logger.warning("Upload %s gặp rớt kết nối tạm; tự thử lại.", local_path.name)
+        if _wait_interruptible(1.5, session_name=session_name, cancel_check=cancel_check):
+            return False, "Tác vụ đã bị hủy bởi yêu cầu dừng."
+    return False, combined or "Lỗi upload."
+
+
+def _upload_video_in_parts(
+    session_name: str,
+    local_path: Path,
+    filename: str,
+    *,
+    size: int,
+    timeout: int,
+    cancel_check: Optional[Callable[[], bool]],
+) -> Tuple[bool, str]:
+    prefix = f".autodub_upload_{uuid.uuid4().hex}"
+    digest = hashlib.sha256()
+    sent_bytes = part_count = 0
+    chunk_size = min(_UPLOAD_CHUNK_BYTES, (size + 1) // 2)
+    deadline = time.monotonic() + timeout
+    try:
+        with tempfile.TemporaryDirectory(prefix="autodub_upload_") as scratch, local_path.open("rb") as source:
+            part_file = Path(scratch) / "upload.bin"
+            for chunk in iter(lambda: source.read(chunk_size), b""):
+                if _is_session_aborted(session_name) or (cancel_check and cancel_check()):
+                    return False, "Tác vụ đã bị hủy trong lúc tải từng phần."
+                remaining = int(deadline - time.monotonic())
+                if remaining <= 0:
+                    return False, "Hết thời gian tải video theo từng phần."
+                sent_bytes += len(chunk)
+                if sent_bytes > size:
+                    return False, "Kích thước video nguồn đã thay đổi khi đang tải."
+                digest.update(chunk)
+                part_file.write_bytes(chunk)
+                ok, detail = _upload_with_retry(
+                    session_name, part_file, f"content/{prefix}_{part_count}",
+                    timeout=remaining, cancel_check=cancel_check,
+                )
+                if not ok:
+                    return False, f"Tải phần {part_count + 1} thất bại: {detail}"
+                part_count += 1
+    except OSError as exc:
+        return False, f"Không đọc được dữ liệu video để tải từng phần: {redact_secrets(str(exc))}"
+    if sent_bytes != size:
+        return False, "Kích thước video nguồn đã thay đổi khi đang tải."
+    remaining = int(deadline - time.monotonic())
+    if remaining <= 0:
+        return False, "Hết thời gian tải video theo từng phần."
+    return exec_argv(
+        session_name,
+        ["python3", "-c", f"exec({_ASSEMBLE_VIDEO!r})",
+         filename, prefix, str(part_count), str(size), digest.hexdigest()],
+        cwd="/content", timeout=remaining, cancel_check=cancel_check,
+    )
+
+
 def upload_file(
     session_name: str,
     local_path: str | Path,
@@ -573,7 +652,6 @@ def upload_file(
     if not path_obj.is_file():
         return False, f"File không tồn tại trên máy: {local_path}"
 
-    wsl_file = to_wsl_path(path_obj)
     remote_base = remote_filename or path_obj.name
     if has_control_chars(remote_base) or ".." in Path(remote_base).parts:
         raise CloudValidationError("Tên file đích trên Colab không hợp lệ.", code="INVALID_INPUT")
@@ -581,28 +659,28 @@ def upload_file(
     timeout = int(DEFAULT_CONFIG["upload_timeout_seconds"])
 
     logger.info("Đang upload %s lên session %s (remote: %s)...", path_obj.name, safe_session, remote_dest)
-    combined = ""
-    for attempt_idx in range(1, 3):
-        rc, stdout, stderr = _run_wsl_colab_argv(
-            ["upload", "-s", safe_session, wsl_file, remote_dest],
-            timeout=timeout,
-            cancel_check=cancel_check,
-            session_name=safe_session,
-        )
-        combined = redact_secrets(f"{stdout}\n{stderr}".strip())
-        if rc == 0:
-            logger.info("Upload %s thành công.", path_obj.name)
-            return True, "Upload thành công."
-        if rc == -3:
-            return False, f"Tác vụ đã bị hủy bởi yêu cầu dừng. {combined}".strip() if combined else "Tác vụ đã bị hủy bởi yêu cầu dừng."
-        if attempt_idx < 2 and _is_transient_transport_error(combined):
-            logger.warning("Upload %s gặp rớt kết nối tạm (lần %d), tự thử lại...", path_obj.name, attempt_idx)
-            if _wait_interruptible(1.5, session_name=safe_session, cancel_check=cancel_check):
-                return False, "Tác vụ đã bị hủy bởi yêu cầu dừng."
-            continue
-        break
-
-    return False, combined or "Lỗi upload."
+    filename = remote_dest.removeprefix("content/")
+    ok, detail = _upload_with_retry(
+        safe_session, path_obj, remote_dest, timeout=timeout, cancel_check=cancel_check,
+    )
+    if (
+        not ok
+        and _UPLOAD_BODY_REJECTED.search(detail)
+        and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", filename)
+        and Path(filename).suffix.lower() in ALLOWED_VIDEO_EXTENSIONS
+    ):
+        size = path_obj.stat().st_size
+        if size > 1:
+            logger.warning("Colab từ chối tải trọn video (%d bytes); thử chuyển từng phần.", size)
+            ok, part_detail = _upload_video_in_parts(
+                safe_session, path_obj, filename, size=size, timeout=timeout, cancel_check=cancel_check,
+            )
+            if not ok:
+                return False, f"{detail}\nTải video theo từng phần ({size} bytes) thất bại: {part_detail}"
+            detail = "Đã tải từng phần và xác minh SHA256 của video."
+    if ok:
+        logger.info("Upload %s thành công.", path_obj.name)
+    return ok, detail
 
 
 def exec_script(
@@ -738,16 +816,14 @@ def exec_argv(
         return False, "Tác vụ đã bị hủy trước khi thực thi lệnh."
 
     wait_time = int(timeout or DEFAULT_CONFIG["exec_timeout_seconds"])
-    run_id = uuid.uuid4().hex[:10]
-    clean_s = re.sub(r"[^A-Za-z0-9_.-]", "", safe_session)
-    wsl_tmp_script = f"/tmp/colab_cmd_{clean_s}_{run_id}.py"
-
     local_env_file: Optional[Path] = None
     remote_env_path: Optional[str] = None
     secret_values = list(safe_env.values())
 
     try:
         if safe_env:
+            run_id = uuid.uuid4().hex[:10]
+            clean_s = re.sub(r"[^A-Za-z0-9_.-]", "", safe_session)
             env_name = f".colab_env_{clean_s}_{run_id}.json"
             fd, raw_tmp = tempfile.mkstemp(prefix=f"colab_env_{clean_s}_", suffix=".json")
             local_env_file = Path(raw_tmp)
@@ -778,12 +854,11 @@ def exec_argv(
             cwd=cwd,
             remote_env_path=remote_env_path,
         )
-        _write_wsl_temp_script(wsl_tmp_script, py_wrapper)
-
         logger.info("Đang thực thi argv trên session %s: %s (args=%d)...", safe_session, safe_argv[0], len(safe_argv) - 1)
         rc, stdout, stderr = _run_wsl_colab_argv(
-            ["exec", "-s", safe_session, "-f", wsl_tmp_script, "--timeout", "0"],
-            timeout=wait_time,
+            ["exec", "-s", safe_session, "--timeout", str(wait_time)],
+            timeout=wait_time + 5,
+            stdin_text=py_wrapper,
             extra_secrets=secret_values,
             cancel_check=cancel_check,
             session_name=safe_session,
@@ -800,7 +875,6 @@ def exec_argv(
                 local_env_file.unlink(missing_ok=True)
             except Exception:
                 pass
-        _remove_wsl_temp_file(wsl_tmp_script)
 
 
 def _build_detached_launcher_script(
@@ -1057,8 +1131,6 @@ def _build_detached_poller_script(
 
 def _kill_remote_monitored_job(session_name: str, pid_file: str) -> None:
     """Best-effort terminate a detached remote supervisor & process group upon job cancellation."""
-    clean_s = re.sub(r"[^A-Za-z0-9_.-]", "", session_name)
-    wsl_kill_script = f"/tmp/colab_kill_{clean_s}_{uuid.uuid4().hex[:8]}.py"
     kill_code = "\n".join(
         [
             "import json, os, signal",
@@ -1082,12 +1154,13 @@ def _kill_remote_monitored_job(session_name: str, pid_file: str) -> None:
         ]
     )
     try:
-        _write_wsl_temp_script(wsl_kill_script, kill_code)
-        _run_wsl_colab_argv(["exec", "-s", session_name, "-f", wsl_kill_script, "--timeout", "6"], timeout=8)
+        _run_wsl_colab_argv(
+            ["exec", "-s", session_name, "--timeout", "6"],
+            timeout=8,
+            stdin_text=kill_code,
+        )
     except Exception:
         pass
-    finally:
-        _remove_wsl_temp_file(wsl_kill_script)
 
 
 def run_argv_monitored(
@@ -1126,9 +1199,6 @@ def run_argv_monitored(
     status_file = f"/content/.autodub_{safe_tag}.status.json"
     log_file = f"/content/.autodub_{safe_tag}.run.log"
     progress_file = f"{cwd.rstrip('/')}/.pipeline_progress.json"
-
-    wsl_launch_script = f"/tmp/colab_launch_{clean_s}_{run_id}.py"
-    wsl_poll_script = f"/tmp/colab_poll_{clean_s}_{run_id}.py"
 
     local_env_file: Optional[Path] = None
     remote_env_path: Optional[str] = None
@@ -1181,9 +1251,6 @@ def run_argv_monitored(
             log_file=log_file,
             progress_file=progress_file,
         )
-        _write_wsl_temp_script(wsl_launch_script, launcher_py)
-        _write_wsl_temp_script(wsl_poll_script, poller_py)
-
         logger.info(
             "Khởi chạy tách nền (%s) trên session %s: %s (args=%d)...",
             safe_tag,
@@ -1195,8 +1262,9 @@ def run_argv_monitored(
         launch_combined = ""
         for launch_try in range(1, 4):
             rc_l, out_l, err_l = _run_wsl_colab_argv(
-                ["exec", "-s", safe_session, "-f", wsl_launch_script, "--timeout", "30"],
+                ["exec", "-s", safe_session, "--timeout", "30"],
                 timeout=40,
+                stdin_text=launcher_py,
                 extra_secrets=secret_values,
                 cancel_check=cancel_check,
                 session_name=safe_session,
@@ -1236,8 +1304,9 @@ def run_argv_monitored(
                 return False, "Tác vụ đã bị hủy bởi yêu cầu dừng."
 
             rc_p, out_p, err_p = _run_wsl_colab_argv(
-                ["exec", "-s", safe_session, "-f", wsl_poll_script, "--timeout", "20"],
+                ["exec", "-s", safe_session, "--timeout", "20"],
                 timeout=25,
+                stdin_text=poller_py,
                 extra_secrets=secret_values,
                 cancel_check=cancel_check,
                 session_name=safe_session,
@@ -1308,8 +1377,6 @@ def run_argv_monitored(
                 local_env_file.unlink(missing_ok=True)
             except Exception:
                 pass
-        _remove_wsl_temp_file(wsl_launch_script)
-        _remove_wsl_temp_file(wsl_poll_script)
 
 
 def _parse_legacy_command_to_argv(command: str) -> Tuple[str, List[str]]:

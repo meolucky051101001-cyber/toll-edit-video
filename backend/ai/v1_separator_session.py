@@ -142,7 +142,7 @@ def _below_ram_threshold() -> bool:
         avail_bytes = psutil.virtual_memory().available
         if avail_bytes < min_ram_mb * 1024 * 1024:
             logger.info(
-                "[SEPARATOR_WORKER] RAM khả dụng %.0f MB < ngưỡng %d MB; đóng worker giữ ấm.",
+                "[SEPARATOR_WORKER] RAM khả dụng %.0f MB < ngưỡng giữ ấm %d MB.",
                 avail_bytes / (1024.0 * 1024.0),
                 min_ram_mb,
             )
@@ -245,7 +245,11 @@ def run_separator_request(
                 raise
             finally:
                 if _process is not None and _below_ram_threshold():
-                    close_session()
+                    # The previous video's idle OCR process can still own two
+                    # model sessions. Release it before dropping reusable weights.
+                    from . import v1_ocr_session
+                    if not v1_ocr_session.close_if_idle(0) or _below_ram_threshold():
+                        close_session()
 
 
 atexit.register(close_session)

@@ -1,6 +1,7 @@
 """Retain the local safety regressions against the phase-8 Cloud lifecycle."""
 import sys
 import sqlite3
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -91,6 +92,50 @@ def test_stopping_one_session_does_not_stop_other_assignments(monkeypatch):
     monkeypatch.setattr(colab_bridge, '_run_wsl_argv', unrelated)
     assert colab_bridge.stop_session('one')[0] is False
     unrelated.assert_not_called()
+
+
+@pytest.mark.parametrize("corrupt_part", [False, True])
+def test_colab_rejected_mp4_recovers_by_verified_parts(tmp_path, monkeypatch, corrupt_part):
+    source = tmp_path / "source.mp4"
+    original = bytes(range(37))
+    source.write_bytes(original)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    destination = runtime / "clip.mp4"
+    uploads = []
+
+    def upload(argv, **kwargs):
+        name = argv[-1].removeprefix("content/")
+        data = Path(argv[-2]).read_bytes()
+        uploads.append((name, len(data)))
+        if name == destination.name:
+            return 1, "", "400 Client Error: Bad Request"
+        if corrupt_part and len(uploads) == 3:
+            data = bytes([data[0] ^ 1]) + data[1:]
+        (runtime / name).write_bytes(data)
+        return 0, "", ""
+
+    def assemble(session_name, argv, **kwargs):
+        checked = colab_bridge._validate_argv(argv)
+        result = subprocess.run([sys.executable, *checked[1:]], cwd=runtime,
+                                capture_output=True, text=True, timeout=10)
+        return result.returncode == 0, result.stderr
+
+    monkeypatch.setattr(colab_bridge, "_UPLOAD_CHUNK_BYTES", 8)
+    monkeypatch.setattr(colab_bridge, "to_wsl_path", str)
+    monkeypatch.setattr(colab_bridge, "_run_wsl_colab_argv", upload)
+    monkeypatch.setattr(colab_bridge, "exec_argv", assemble)
+    ok, detail = colab_bridge.upload_file("cjob_upload", source, destination.name)
+
+    assert uploads[0] == (destination.name, len(original))
+    assert [size for _, size in uploads[1:]] == [8, 8, 8, 8, 5]
+    assert not list(runtime.glob(".autodub_upload_*"))
+    assert ok is not corrupt_part
+    if corrupt_part:
+        assert "SHA256 does not match" in detail
+        assert not destination.exists()
+    else:
+        assert destination.read_bytes() == original
 
 
 @pytest.mark.parametrize('state', ['cancelled', 'failed', 'completed'])

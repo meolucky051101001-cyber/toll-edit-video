@@ -88,3 +88,6 @@ backend/app.log.*
 fixes_for_v1/
 export_giam_sat_a2ui/
 backend/cloud/results/
+
+# Local Cloud validation runs (large artefacts)
+.cloud_validation_*/

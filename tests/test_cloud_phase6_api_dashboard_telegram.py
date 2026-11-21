@@ -388,7 +388,8 @@ def test_execution_mode_and_options_snapshot_isolated_from_flag_toggles(tmp_path
 
     async def fake_local(video_path, job, status_msg):
         calls["local"] += 1
-        raise RuntimeError("local pipeline test error")
+        # Use a terminal validation failure; this test covers routing, not Local retries.
+        raise ValueError("local pipeline test error")
 
     async def fake_cloud(video_path, job, status_msg):
         calls["cloud"] += 1
@@ -450,14 +451,15 @@ def test_api_validation_auth_remediation_and_dashboard_surface(tmp_path, monkeyp
         assert dash.status_code == 200
         html = dash.text
         for marker in (
-            "header-provider-cache-badge",
+            'id="session-note"',
+            'data-filter="failed"',
             "cleanup-alert-container",
             "hero-alert-banner",
             "chk-allow-no-speech",
             "X-Idempotency-Key",
-            "pendingEnqueueIdempotencyKey",
+            "rollout_permit",
             "error_remediation",
-            "QC Đạt",
+            "Kiểm tra đầu ra đạt",
             "Chờ thu hồi",
         ):
             assert marker in html, f"Dashboard HTML missing Phase 6 marker: {marker}"

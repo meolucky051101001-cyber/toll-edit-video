@@ -221,6 +221,9 @@ def _offload_separator_to_cpu(sep: Any, torch_mod: Any = None) -> None:
     try:
         mi = getattr(sep, "model_instance", None)
         if mi is not None:
+            clear_sources = getattr(mi, "cached_sources_clear", None)
+            if callable(clear_sources):
+                clear_sources()
             if hasattr(mi, "primary_source"):
                 mi.primary_source = None
             if hasattr(mi, "secondary_source"):

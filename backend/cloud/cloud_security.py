@@ -27,6 +27,7 @@ logger = logging.getLogger("cloud.security")
 ALLOWED_GPU_TYPES: frozenset[str] = frozenset(
     {"T4", "L4", "A100", "H100", "G4", "V5E1", "V6E1", "CPU"}
 )
+CUDA_GPU_TYPES: frozenset[str] = frozenset({"T4", "L4", "A100", "H100", "G4"})
 ALLOWED_TASK_TYPES: frozenset[str] = frozenset({"full_pipeline"})
 ALLOWED_VOICES: frozenset[str] = frozenset(
     {
@@ -164,6 +165,17 @@ def validate_gpu_type(gpu_type: Optional[str]) -> str:
             http_status=400,
         )
     return val
+
+
+def validate_video_gpu_type(gpu_type: Optional[str]) -> str:
+    """Require an NVIDIA CUDA accelerator on new video submissions."""
+    gpu = validate_gpu_type(gpu_type)
+    if gpu not in CUDA_GPU_TYPES:
+        raise CloudValidationError(
+            f"Pipeline edit video cần GPU NVIDIA CUDA. {gpu} không khả dụng để gửi video.",
+            code="UNSUPPORTED_GPU",
+        )
+    return gpu
 
 
 def validate_task_type(task_type: Optional[str]) -> str:
