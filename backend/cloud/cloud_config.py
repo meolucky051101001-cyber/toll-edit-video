@@ -99,6 +99,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "warm_session_keepalive_max_seconds": int(os.getenv("AUTODUB_CLOUD_WARM_KEEPALIVE_MAX_SECONDS", "1800")),
     "warm_session_reuse_enabled": os.getenv("AUTODUB_CLOUD_WARM_REUSE", "1").strip().lower() not in ("0", "false", "no"),
     "cloud_gemini_keys_max": int(os.getenv("AUTODUB_CLOUD_GEMINI_KEYS_MAX", "2")),
+    "cloud_asr_engine": os.getenv("AUTODUB_CLOUD_ASR_ENGINE", "openai-whisper").strip().lower() or "openai-whisper",
     "cloud_poll_max_interval_seconds": float(os.getenv("AUTODUB_CLOUD_POLL_MAX_INTERVAL_SECONDS", "30")),
     "cloud_upload_retry_delays_seconds": [5, 15],
     "wsl_distro": os.getenv("AUTODUB_CLOUD_WSL_DISTRO", "Ubuntu"),

@@ -185,6 +185,14 @@ def _build_gemini_env_vars(gemini_key: str, extra_secrets: Sequence[str]) -> Opt
     return env_vars
 
 
+def _build_pipeline_env_vars(gemini_key: str, extra_secrets: Sequence[str]) -> Optional[Dict[str, str]]:
+    env_vars = _build_gemini_env_vars(gemini_key, extra_secrets) or {}
+    asr_engine = str(DEFAULT_CONFIG.get("cloud_asr_engine", "openai-whisper")).strip().lower()
+    if asr_engine and asr_engine != "openai-whisper":
+        env_vars["AUTODUB_CLOUD_ASR_ENGINE"] = asr_engine
+    return env_vars or None
+
+
 def _file_sha256(path_obj: Path) -> str:
     h = hashlib.sha256()
     with open(path_obj, "rb") as f:
@@ -2050,7 +2058,7 @@ class CloudOrchestrator:
             job_opts = getattr(job, "options", None) or {}
             if isinstance(job_opts, dict) and job_opts.get("allow_no_speech"):
                 pipeline_argv.append("--allow-no-speech")
-            env_vars = _build_gemini_env_vars(gemini_key, extra_secrets)
+            env_vars = _build_pipeline_env_vars(gemini_key, extra_secrets)
 
             highest_pipe_pct = [55]
 
