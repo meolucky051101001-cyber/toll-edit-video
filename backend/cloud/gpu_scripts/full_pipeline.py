@@ -216,7 +216,38 @@ def _write_pipeline_progress(percent: int, step_num: int, total: int, message: s
             pass
 
 
+_STEP_TIMINGS: dict[str, float] = {}
+_STEP_TIMING_STATE: dict = {"key": None, "started": None}
+_STEP_TIMING_LOCK = threading.Lock()
+
+
+def _close_step_timing(now: float | None = None) -> None:
+    with _STEP_TIMING_LOCK:
+        key = _STEP_TIMING_STATE.get("key")
+        started = _STEP_TIMING_STATE.get("started")
+        if key is not None and started is not None:
+            elapsed = max(0.0, (time.monotonic() if now is None else now) - float(started))
+            _STEP_TIMINGS[key] = round(_STEP_TIMINGS.get(key, 0.0) + elapsed, 3)
+        _STEP_TIMING_STATE["key"] = None
+        _STEP_TIMING_STATE["started"] = None
+
+
+def _record_step_start(step_num: int, now: float | None = None) -> None:
+    ts = time.monotonic() if now is None else now
+    _close_step_timing(ts)
+    with _STEP_TIMING_LOCK:
+        _STEP_TIMING_STATE["key"] = f"step_{int(step_num)}"
+        _STEP_TIMING_STATE["started"] = ts
+
+
+def get_step_timings() -> dict[str, float]:
+    _close_step_timing()
+    with _STEP_TIMING_LOCK:
+        return dict(_STEP_TIMINGS)
+
+
 def log_step(step_num: int, total: int, message: str):
+    _record_step_start(step_num)
     safe_msg = _redact_secrets_local(message)
     print(f"\n[{step_num}/{total}] {safe_msg}", flush=True)
     _write_pipeline_progress(_STEP_PERCENT_MAP.get(int(step_num), 55), step_num, total, safe_msg)
@@ -3288,6 +3319,7 @@ def main():
             "status": "completed",
             "pipeline_version": PIPELINE_VERSION,
             "elapsed_seconds": elapsed,
+            "step_timings_seconds": get_step_timings(),
             "input_duration_seconds": round(float(video_duration), 3),
             "asr_timing": json.loads(Path("asr_timing.json").read_text(encoding="utf-8")),
             "segments_count": len(segments),
@@ -3341,6 +3373,7 @@ def main():
             "error_code": err_code,
             "error": safe_exc,
             "elapsed_seconds": round(time.time() - start_time, 2),
+            "step_timings_seconds": get_step_timings(),
         }
         with open(metadata_file, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)

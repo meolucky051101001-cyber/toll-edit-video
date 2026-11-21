@@ -659,6 +659,30 @@ def _verify_bundle(bundle_manifest_path: Path, env_manifest: Dict[str, Any], wor
     return True, "Bundle and uploaded input verified cleanly."
 
 
+SETUP_PHASES_ENV = "AUTODUB_SETUP_PHASES"
+
+
+def _inherited_setup_phases() -> Dict[str, float]:
+    try:
+        raw = json.loads(os.environ.get(SETUP_PHASES_ENV) or "{}")
+        return {str(k): round(float(v), 3) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+_SETUP_PHASES: Dict[str, float] = {}
+
+
+def _record_phase(name: str, started_at: float) -> None:
+    _SETUP_PHASES[name] = round(_SETUP_PHASES.get(name, 0.0) + max(0.0, time.monotonic() - started_at), 3)
+
+
+def _child_env_with_phases() -> Dict[str, str]:
+    env = dict(os.environ)
+    env[SETUP_PHASES_ENV] = json.dumps(_SETUP_PHASES)
+    return env
+
+
 def _emit_and_exit(
     *,
     workdir: Path,
@@ -691,6 +715,7 @@ def _emit_and_exit(
         "bundle_verified": bundle_verified,
         "manifest_sha256": manifest_sha256,
         "duration_seconds": round(time.monotonic() - started_at, 3),
+        "phase_seconds": dict(_SETUP_PHASES),
     }
     try:
         manifest_out.parent.mkdir(parents=True, exist_ok=True)
@@ -718,6 +743,8 @@ def _emit_and_exit(
 
 def main(argv: Optional[List[str]] = None) -> int:
     started = time.monotonic()
+    _SETUP_PHASES.clear()
+    _SETUP_PHASES.update(_inherited_setup_phases())
     parser = argparse.ArgumentParser(description="Cloud GPU Environment Setup & Preflight")
     parser.add_argument("--workdir", default=".", help="Working directory (default: current dir)")
     parser.add_argument("--manifest", default="cloud_env_manifest.json", help="Path to cloud_env_manifest.json")
@@ -834,10 +861,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if runtime_spec and not args.allow_local_test and Path(sys.prefix).absolute() != runtime_dir:
         try:
             from bootstrap_runtime import ensure_runtime
+            phase_t0 = time.monotonic()
             runtime_python = ensure_runtime(workdir, runtime_spec)
+            _record_phase("bootstrap_runtime", phase_t0)
             child = subprocess.run([str(runtime_python), str(Path(__file__).absolute()),
                                     *(argv if argv is not None else sys.argv[1:])],
-                                   cwd=workdir, timeout=1200, shell=False)
+                                   cwd=workdir, timeout=1200, shell=False, env=_child_env_with_phases())
             return child.returncode
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
             return _emit_and_exit(workdir=workdir, manifest_out=manifest_out, started_at=started,
@@ -857,7 +886,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (OSError, json.JSONDecodeError):
             state_matches = False
 
+    phase_t0 = time.monotonic()
     pkg_ok, pkg_rc, pkg_code, pkg_msg, versions_info = _verify_packages_and_binaries(manifest, workdir)
+    _record_phase("verify_packages", phase_t0)
     if pkg_ok:
         cache_hit = not args.verify_installed
     else:
@@ -898,11 +929,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
         pip_invoked = True
+        phase_t0 = time.monotonic()
         inst_ok, inst_rc, inst_code, inst_msg = _install_dependencies(
             manifest,
             workdir,
             pip_timeout=int(args.pip_timeout),
         )
+        _record_phase("install_dependencies", phase_t0)
         if not inst_ok:
             return _emit_and_exit(
                 workdir=workdir,
@@ -926,7 +959,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             child_args = list(argv if argv is not None else sys.argv[1:])
             child = subprocess.run([sys.executable, str(Path(__file__).absolute()),
                                     *child_args, "--verify-installed"], cwd=workdir,
-                                   timeout=300, shell=False)
+                                   timeout=300, shell=False, env=_child_env_with_phases())
             return child.returncode
 
         pkg_ok, pkg_rc, pkg_code, pkg_msg, versions_info = _verify_packages_and_binaries(manifest, workdir)
@@ -977,7 +1010,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 4. Stage bundled host fonts, ensure Linux fonts & Model Runtime Readiness Check
     _stage_bundled_subtitle_fonts(workdir, allow_local_test=bool(args.allow_local_test))
     _ensure_linux_subtitle_fonts(allow_local_test=bool(args.allow_local_test), workdir=workdir)
+    phase_t0 = time.monotonic()
     model_ok, model_msg = _verify_models_readiness(manifest, workdir)
+    _record_phase("verify_models", phase_t0)
     if not model_ok:
         return _emit_and_exit(
             workdir=workdir,

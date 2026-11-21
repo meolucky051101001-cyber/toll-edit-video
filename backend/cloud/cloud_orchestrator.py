@@ -359,6 +359,7 @@ class CloudOrchestrator:
         self.has_pending_work_callback = has_pending_work_callback
         self._warm_lock = threading.Lock()
         self._warm_sessions: Dict[str, Dict[str, Any]] = {}
+        self._warm_parked_at: Dict[str, float] = {}
         self._scope_key = _store_scope_key(self.store)
         with _GLOBAL_WARM_LOCK:
             _GLOBAL_ORCHESTRATORS.setdefault(self._scope_key, weakref.WeakSet()).add(self)
@@ -375,6 +376,9 @@ class CloudOrchestrator:
     def _requeue_unstopped_warm_session(self, session_name: str, gpu_type: str, source_job_id: Optional[str] = None) -> None:
         park_fn = getattr(self.store, "park_warm_session", None)
         if callable(park_fn):
+            with self._warm_lock:
+                parked_at = self._warm_parked_at.get(session_name)
+            requeue_ts = time.time() - 5.0
             try:
                 park_fn(
                     session_name,
@@ -382,7 +386,7 @@ class CloudOrchestrator:
                     ttl_seconds=1.0,
                     source_job_id=source_job_id,
                     keepalive_mode=False,
-                    now=time.time() - 5.0,
+                    now=min(requeue_ts, parked_at) if parked_at is not None else requeue_ts,
                 )
             except Exception:
                 pass
@@ -396,6 +400,7 @@ class CloudOrchestrator:
         try:
             res = self._verify_or_stop_session(session_name)
             if res.get("verified_stopped"):
+                self._record_warm_idle(session_name, gpu_type, source_job_id=source_job_id)
                 return True
         except Exception as exc:
             logger.warning("Cảnh báo khi dừng session giữ ấm %s: %s", session_name, redact_secrets(str(exc)))
@@ -512,7 +517,24 @@ class CloudOrchestrator:
         except Exception:
             return False
 
+    def _record_warm_idle(self, session_name: str, gpu_type: str, *, source_job_id: Optional[str] = None) -> None:
+        with self._warm_lock:
+            parked_at = self._warm_parked_at.pop(session_name, None)
+        record_fn = getattr(self.store, "record_warm_idle_usage", None)
+        if parked_at is None or not callable(record_fn):
+            return
+        try:
+            res = record_fn(session_name, gpu_type, parked_at=parked_at, source_job_id=source_job_id)
+            logger.info("CU giữ ấm không tải của %s: %s", session_name, res)
+        except Exception as exc:
+            logger.warning("Không ghi được CU giữ ấm của %s: %s", session_name, redact_secrets(str(exc)))
+
     def _pop_warm_session(self, gpu_type: str) -> Optional[str]:
+        entry = self._pop_warm_session_entry(gpu_type)
+        return entry[0] if entry else None
+
+    def _pop_warm_session_entry(self, gpu_type: str) -> Optional[Tuple[str, Optional[float]]]:
+        """Trả về (session_name, parked_at epoch) để job mới chịu CU của khoảng giữ ấm không tải."""
         if not self.enable_warm_session_reuse:
             return None
         gpu_norm = str(gpu_type or "").strip().upper()
@@ -540,7 +562,15 @@ class CloudOrchestrator:
             return None
         if self._sanitize_warm_workdir(sname):
             logger.info("Tái sử dụng máy ảo GPU %s đang giữ ấm: %s (bỏ qua cold-start setup).", gpu_norm, sname)
-            return sname
+            with self._warm_lock:
+                local_parked = self._warm_parked_at.pop(sname, None)
+            parked_at: Optional[float] = local_parked
+            try:
+                if entry.get("parked_at") is not None and entry is not mem_entry:
+                    parked_at = float(entry["parked_at"])
+            except (TypeError, ValueError):
+                pass
+            return sname, parked_at
         logger.warning("Máy ảo giữ ấm %s không phản hồi lệnh dọn workdir; thu hồi và tạo máy mới.", sname)
         self._stop_warm_session_with_retry_guard(sname, gpu_norm, source_job_id=src_jid)
         return None
@@ -565,6 +595,8 @@ class CloudOrchestrator:
             return False
 
         evicted_snames: List[str] = []
+        with self._warm_lock:
+            self._warm_parked_at[session_name] = time.time()
         park_fn = getattr(self.store, "park_warm_session", None)
         rem_fn = getattr(self.store, "remove_warm_session", None)
         if callable(park_fn):
@@ -603,6 +635,7 @@ class CloudOrchestrator:
                     "session_name": session_name,
                     "gpu_type": gpu_norm,
                     "source_job_id": source_job_id,
+                    "parked_at": time.time(),
                     "expires_at": time.monotonic() + float(ttl_s),
                     "keepalive_mode": not waiting_next,
                 }
@@ -1246,11 +1279,47 @@ class CloudOrchestrator:
         cleanup_result: Optional[Dict[str, Any]] = None
         runtime_end_time: Optional[float] = None
 
-        def _estimate_elapsed_cu() -> float:
+        cu_accrued = 0.0
+        cu_accrual_ts: Optional[float] = None
+        provider_rate_used = False
+        setup_phase_seconds: Dict[str, Any] = {}
+        stage_timings: Dict[str, float] = {}
+        stage_state: Dict[str, Any] = {"name": None, "started": None}
+
+        def _mark_stage(name: Optional[str]) -> None:
+            now_m = time.monotonic()
+            prev, started = stage_state["name"], stage_state["started"]
+            if prev is not None and started is not None:
+                stage_timings[prev] = round(stage_timings.get(prev, 0.0) + (now_m - started), 3)
+            stage_state["name"], stage_state["started"] = name, (now_m if name else None)
+
+        def _raw_elapsed_cu(at_ts: Optional[float] = None) -> float:
             if not session_may_exist or runtime_start_time is None:
                 return 0.0
-            elapsed_sec = max(0.0, (runtime_end_time if runtime_end_time is not None else time.time()) - runtime_start_time)
-            return round((elapsed_sec / 3600.0) * rate_per_hour, 4)
+            end_ts = at_ts if at_ts is not None else (runtime_end_time if runtime_end_time is not None else time.time())
+            base_ts = cu_accrual_ts if cu_accrual_ts is not None else runtime_start_time
+            return cu_accrued + (max(0.0, end_ts - base_ts) / 3600.0) * rate_per_hour
+
+        def _estimate_elapsed_cu() -> float:
+            return round(_raw_elapsed_cu(), 4)
+
+        def _adopt_provider_rate(snap: Dict[str, Any]) -> None:
+            nonlocal cu_accrued, cu_accrual_ts, rate_per_hour, provider_rate_used
+            rate = snap.get("usage_rate")
+            if not session_may_exist or runtime_start_time is None or runtime_end_time is not None:
+                return
+            if rate is None or float(rate) <= 0.0 or snap.get("active_assignments") != 1:
+                return
+            now_ts = time.time()
+            cu_accrued = _raw_elapsed_cu(now_ts)
+            cu_accrual_ts = now_ts
+            rate_per_hour = float(rate)
+            provider_rate_used = True
+
+        def _cu_measurement_source() -> str:
+            if provider_rate_used:
+                return CloudCostMeasurementSource.PROVIDER_RATE_ESTIMATE.value
+            return CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value
 
         def _sync_runtime_usage(*, check_provider: bool = False) -> Tuple[bool, str]:
             nonlocal last_budget_check_ts, latest_provider_balance, budget_abort_reason
@@ -1271,6 +1340,7 @@ class CloudOrchestrator:
                         prov_bal = snap.get("balance")
                         if prov_bal is not None:
                             latest_provider_balance = float(prov_bal)
+                        _adopt_provider_rate(snap)
                     elif u.get("ok") and u.get("balance") is not None:
                         prov_bal = float(u["balance"])
                         latest_provider_balance = prov_bal
@@ -1282,7 +1352,7 @@ class CloudOrchestrator:
                 job_id,
                 session_attempt,
                 est_cu,
-                measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+                measurement_source=_cu_measurement_source(),
                 provider_balance=prov_bal,
             )
             if not res.get("within_budget", True):
@@ -1392,6 +1462,7 @@ class CloudOrchestrator:
         try:
             _raise_if_aborted()
 
+            _mark_stage("preflight")
             # 0. Kiểm tra allowlist GPU/task/voice, đầu vào và bundle cục bộ (0 CU) trước khi cấp phát GPU
             preflight_info: Dict[str, Any] = {}
             source_snapshot: Optional[Dict[str, Any]] = None
@@ -1437,6 +1508,7 @@ class CloudOrchestrator:
 
             _raise_if_aborted()
 
+            _mark_stage("budget_check")
             # 1. Kiểm tra số dư Compute Units, độ mới snapshot và ngân sách trước khi cấp phát máy
             usage = self.adapter.get_usage()
             if hasattr(self.store, "record_provider_usage_snapshot"):
@@ -1519,8 +1591,11 @@ class CloudOrchestrator:
 
             _raise_if_aborted()
 
+            _mark_stage("provisioning")
             # 2. Đăng ký ownership session & khởi tạo (hoặc tái sử dụng máy giữ ấm) Session Colab (`provisioning`)
-            reused_warm_session = self._pop_warm_session(gpu_type)
+            warm_entry = self._pop_warm_session_entry(gpu_type)
+            reused_warm_session = warm_entry[0] if warm_entry else None
+            warm_parked_at = warm_entry[1] if warm_entry else None
             if reused_warm_session:
                 session_name = reused_warm_session
 
@@ -1555,6 +1630,8 @@ class CloudOrchestrator:
 
             session_may_exist = True
             runtime_start_time = time.time()
+            if reused_warm_session and warm_parked_at is not None and warm_parked_at <= runtime_start_time:
+                runtime_start_time = warm_parked_at
             if reused_warm_session:
                 created, msg = True, f"reused warm session {session_name}"
             else:
@@ -1600,6 +1677,7 @@ class CloudOrchestrator:
                 )
                 return False
 
+            _mark_stage("upload")
             # 3. Upload mã nguồn và video lên VM (`uploading` đơn hướng, không lùi từ preparing)
             is_url = validated_input.kind == "url"
             if not _update(
@@ -1728,6 +1806,7 @@ class CloudOrchestrator:
                     )
                 input_arg = f"/content/{remote_video_name}"
 
+            _mark_stage("setup")
             # 4. Giải nén và cài đặt môi trường trên VM (`preparing`)
             if not _update(
                 40,
@@ -1787,6 +1866,7 @@ class CloudOrchestrator:
             _raise_if_aborted()
             safe_env_msg = redact_secrets(env_msg, extra_secrets=extra_secrets)
             logger.info("Env setup output:\n%s", safe_env_msg)
+            setup_phase_seconds = (_parse_setup_env_result(safe_env_msg) or {}).get("phase_seconds") or {}
             if not env_ok:
                 setup_err_code = _extract_setup_error_code(safe_env_msg)
                 setup_result = _parse_setup_env_result(safe_env_msg) or {}
@@ -1796,6 +1876,7 @@ class CloudOrchestrator:
                     f"Cài đặt môi trường AI trên Colab thất bại ({setup_err_code}):\n{setup_detail}",
                 )
 
+            _mark_stage("pipeline")
             # 5. Chạy Pipeline xử lý video chính (`processing`)
             if not _update(
                 55,
@@ -1863,6 +1944,7 @@ class CloudOrchestrator:
                     f"Pipeline Colab thất bại ({pipe_err_code}):\n{pipeline_detail}",
                 )
 
+            _mark_stage("download")
             # 6. Tải video thành phẩm và kết quả về vùng staging riêng theo job/attempt (`downloading`)
             if not _update(
                 85,
@@ -1902,6 +1984,7 @@ class CloudOrchestrator:
                     )
             _raise_if_aborted()
 
+            _mark_stage("validate")
             # 7. Kiểm tra QC tại vùng staging & xuất thành phẩm atomic an toàn (`validating`)
             _raise_if_aborted()
             if not _update(
@@ -2018,6 +2101,8 @@ class CloudOrchestrator:
                     "qc_passed": True,
                     "qc_report": qc_res["qc_report"],
                     "remote_metadata": remote_meta,
+                    "setup_phase_seconds": setup_phase_seconds,
+                    "pipeline_step_seconds": remote_meta.get("step_timings_seconds") or {},
                 }
                 (attempt_res_dir / "output_manifest.json").write_text(
                     redact_secrets(json.dumps(output_manifest, indent=2, ensure_ascii=False), extra_secrets=extra_secrets),
@@ -2035,6 +2120,7 @@ class CloudOrchestrator:
                         pass
                 raise
 
+            _mark_stage("cleanup")
             # 8. Thu hồi & xác nhận session trước bước hoàn tất; tính lượng CU ước tính theo thời gian chạy
             elapsed_sec = max(0.0, (runtime_end_time if runtime_end_time is not None else time.time()) - (runtime_start_time or start_time))
             cu_spent = _estimate_elapsed_cu()
@@ -2044,6 +2130,18 @@ class CloudOrchestrator:
                 cleanup_res.get("cleanup_status")
                 or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
             )
+            _mark_stage(None)
+            output_manifest["stage_timings_seconds"] = dict(stage_timings)
+            output_manifest["cu_rate_per_hour"] = rate_per_hour
+            output_manifest["cu_measurement_source"] = _cu_measurement_source()
+            output_manifest["warm_idle_included"] = bool(reused_warm_session and warm_parked_at is not None)
+            try:
+                (attempt_res_dir / "output_manifest.json").write_text(
+                    redact_secrets(json.dumps(output_manifest, indent=2, ensure_ascii=False), extra_secrets=extra_secrets),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
 
             if not _update(
                 100,
@@ -2052,7 +2150,7 @@ class CloudOrchestrator:
                 result_path=str(final_video_path),
                 cu_actual=cu_spent,
                 cleanup_status=final_cleanup_status,
-                measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+                measurement_source=_cu_measurement_source(),
                 output_manifest=output_manifest,
             ):
                 _raise_if_aborted()
@@ -2113,7 +2211,7 @@ class CloudOrchestrator:
                     owner_id=effective_owner,
                     attempt=ownership_attempt,
                     allow_from_cancel=True,
-                    measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+                    measurement_source=_cu_measurement_source(),
                 )
                 return False
 
@@ -2140,7 +2238,7 @@ class CloudOrchestrator:
                     owner_id=effective_owner,
                     attempt=ownership_attempt,
                     allow_from_cancel=True,
-                    measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+                    measurement_source=_cu_measurement_source(),
                 )
             else:
                 self.store.update_progress(
@@ -2155,7 +2253,7 @@ class CloudOrchestrator:
                     owner_id=effective_owner,
                     attempt=ownership_attempt,
                     allow_from_cancel=True,
-                    measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+                    measurement_source=_cu_measurement_source(),
                 )
             return False
 
@@ -2189,7 +2287,7 @@ class CloudOrchestrator:
                         owner_id=effective_owner,
                         attempt=ownership_attempt,
                         allow_from_cancel=True,
-                        measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+                        measurement_source=_cu_measurement_source(),
                     )
                 return False
 
@@ -2213,7 +2311,7 @@ class CloudOrchestrator:
                     cleanup_res.get("cleanup_status")
                     or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
                 ),
-                measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+                measurement_source=_cu_measurement_source(),
             )
             return False
 
@@ -2227,3 +2325,12 @@ class CloudOrchestrator:
                         session_name,
                         redact_secrets(str(stop_exc), extra_secrets=extra_secrets),
                     )
+            _mark_stage(None)
+            logger.info(
+                "CLOUD_STAGE_TIMINGS job=%s %s",
+                job_id,
+                json.dumps(
+                    {"stages": stage_timings, "cu_rate_per_hour": rate_per_hour, "measurement_source": _cu_measurement_source()},
+                    ensure_ascii=False,
+                ),
+            )
