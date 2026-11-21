@@ -1051,6 +1051,7 @@ class V1Orchestrator:
                              visual_asr_reuse=bool(c.visual_sub_to_speech and asr_was_empty),
                              asr_was_empty=asr_was_empty,
                              detected_watermarks=ocr_metrics.get("detected_watermarks", []))
+                self.manifest_manager.record_stage_metrics(c.job_id, stage_id, ocr_metrics)
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"ocr_data": str(c.out_dir / "ocr.json")})
             except Exception as exc:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
@@ -1493,6 +1494,7 @@ class V1Orchestrator:
                                     delogo_boxes = geo_saved.get("watermarks") or (geo_saved.get("sampling") or {}).get("detected_watermarks") or []
                     except Exception:
                         delogo_boxes = []
+                render_metrics = {}
                 async with async_gpu_gatekeeper("video_rendering", timeout_seconds=t_out, check_stop=c.check_stop):
                     rendered = await c.run_stage(
                         asyncio.to_thread(
@@ -1507,12 +1509,18 @@ class V1Orchestrator:
                             delogo_boxes=delogo_boxes,
                             subtitle_cover_style=sub_cover_style,
                             subtitle_blur_settings=c.effective_cfg,
+                            metrics=render_metrics,
                         ),
                         timeout=t_out
                     )
                 if not rendered or not temp_render_video.is_file() or temp_render_video.stat().st_size < 10240:
 
                     raise RuntimeError("Render video NVENC thất bại hoặc file xuất xưởng bị lỗi.")
+                self.manifest_manager.record_stage_metrics(c.job_id, stage_id, render_metrics)
+                logging.getLogger("v1.performance").info(
+                    "stage_metrics stage=%s job_id=%s metrics=%s",
+                    stage_id, c.job_id, render_metrics,
+                )
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"temp_render": str(temp_render_video)})
             except Exception as exc:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
