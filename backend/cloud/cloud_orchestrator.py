@@ -1330,6 +1330,52 @@ class _JobRun:
             )
             or "/content/drive/MyDrive/AutoDubCloudCache"
         )
+        save_timeout = max(
+            1,
+            min(900, int(DEFAULT_CONFIG.get("cloud_cache_save_timeout_seconds", 900) or 900)),
+        )
+
+        def _set_cache_result(status: str) -> None:
+            self.cache_status = status
+            manifest = getattr(self, "output_manifest", None)
+            if isinstance(manifest, dict):
+                manifest["cache_status"] = status
+                manifest["setup_phase_seconds"] = self.setup_phase_seconds
+
+        def _clear_save_budget_abort() -> None:
+            if self.budget_abort_code in {"budget_exceeded", "budget_uncertain"}:
+                self.budget_abort_code = ""
+                self.budget_abort_reason = ""
+            self.last_budget_check_ts = time.time()
+
+        try:
+            budget_ok, _budget_reason = self._sync_runtime_usage(check_provider=True)
+            budget_info = self.orchestrator.store.get_cu_budget_info()
+            budget_daily = float(budget_info.get("budget_daily", 0.0) or 0.0)
+            committed_today = float(
+                budget_info.get(
+                    "committed_today",
+                    float(budget_info.get("spent_today", 0.0) or 0.0)
+                    + float(budget_info.get("reserved_today", 0.0) or 0.0),
+                )
+                or 0.0
+            )
+            save_cu = (save_timeout / 3600.0) * max(0.0, float(self.rate_per_hour))
+            budget_ok = budget_ok and budget_daily > 0.0 and (
+                committed_today + save_cu <= budget_daily + 1e-6
+            )
+        except Exception:
+            budget_ok = False
+
+        if not budget_ok:
+            _clear_save_budget_abort()
+            _set_cache_result("save_skipped_budget")
+            logger.warning(
+                "Bỏ qua lưu Google Drive cache cho session %s vì không đủ ngân sách CU; tiếp tục công việc.",
+                self.session_name,
+            )
+            return
+
         save_argv = [
             "python3",
             "setup_env.py",
@@ -1339,10 +1385,6 @@ class _JobRun:
             "--manifest-out",
             "cache_save_result.json",
         ]
-        save_timeout = max(
-            1,
-            min(900, int(DEFAULT_CONFIG.get("cloud_cache_save_timeout_seconds", 900) or 900)),
-        )
         try:
             if self.use_monitored_exec:
                 save_ok, save_output = self.orchestrator.adapter.run_argv_monitored(
@@ -1362,24 +1404,43 @@ class _JobRun:
                     timeout=save_timeout,
                     cancel_check=self._cancel_probe,
                 )
-        except _JobAborted:
-            raise
-        except Exception:
             self._raise_if_aborted()
-            self.cache_status = "save_failed"
+        except _JobAborted as abort_exc:
+            if not abort_exc.is_budget_exceeded:
+                raise
+            _clear_save_budget_abort()
+            _set_cache_result("save_skipped_budget")
+            logger.warning(
+                "Bỏ qua lưu Google Drive cache cho session %s do chạm hạn mức CU; tiếp tục công việc.",
+                self.session_name,
+            )
+            return
+        except Exception:
+            if self.budget_abort_code in {"budget_exceeded", "budget_uncertain"}:
+                _clear_save_budget_abort()
+                _set_cache_result("save_skipped_budget")
+            else:
+                _set_cache_result("save_failed")
             logger.warning(
                 "Không lưu được Google Drive cache cho session %s; tiếp tục công việc.",
                 self.session_name,
             )
             return
 
-        self._raise_if_aborted()
-        safe_output = redact_secrets(save_output, extra_secrets=self.extra_secrets)
-        save_result = _parse_setup_env_result(safe_output) or {}
-        save_phases = save_result.get("phase_seconds")
-        if isinstance(save_phases, dict) and "cache_save" in save_phases:
-            self.setup_phase_seconds = dict(self.setup_phase_seconds or {})
-            self.setup_phase_seconds["cache_save"] = save_phases["cache_save"]
+        try:
+            safe_output = redact_secrets(save_output, extra_secrets=self.extra_secrets)
+            save_result = _parse_setup_env_result(safe_output) or {}
+            save_phases = save_result.get("phase_seconds")
+            if isinstance(save_phases, dict) and "cache_save" in save_phases:
+                self.setup_phase_seconds = dict(self.setup_phase_seconds or {})
+                self.setup_phase_seconds["cache_save"] = save_phases["cache_save"]
+        except Exception:
+            _set_cache_result("save_failed")
+            logger.warning(
+                "Không xử lý được kết quả Google Drive cache cho session %s; tiếp tục công việc.",
+                self.session_name,
+            )
+            return
         if save_ok and save_result.get("cache_status") == "saved":
             cache_key = str(save_result.get("cache_key") or "").strip()
             cache_sha256 = str(save_result.get("cache_sha256") or "").strip().lower()
@@ -1393,23 +1454,23 @@ class _JobRun:
                     set_setting(f"drive_cache_sha256:{cache_key}", cache_sha256)
                     set_setting("drive_cache_latest_key", cache_key)
                 except Exception:
-                    self.cache_status = "save_failed"
+                    _set_cache_result("save_failed")
                     logger.warning(
                         "Không thể ghi dấu tin cậy Google Drive cache cho session %s; tiếp tục công việc.",
                         self.session_name,
                     )
                     return
             else:
-                self.cache_status = "save_failed"
+                _set_cache_result("save_failed")
                 logger.warning(
                     "Không nhận được SHA-256 cache hợp lệ cho session %s; tiếp tục công việc.",
                     self.session_name,
                 )
                 return
-            self.cache_status = "saved"
+            _set_cache_result("saved")
             return
 
-        self.cache_status = "save_failed"
+        _set_cache_result("save_failed")
         logger.warning(
             "Không lưu được Google Drive cache cho session %s; tiếp tục công việc.",
             self.session_name,
@@ -1508,43 +1569,6 @@ class _JobRun:
         self._raise_if_aborted()
 
         self.parked_warm = False
-        if (
-            self.session_may_exist
-            and not self.cleanup_done
-            and self.orchestrator._park_warm_session_on_success(
-                self.session_name,
-                self.gpu_type,
-                source_job_id=self.job_id,
-                before_park=self._unmount_drive_before_warm_park if self.cache_mounted else None,
-            )
-        ):
-            self.parked_warm = True
-            self.cleanup_done = True
-            self.runtime_end_time = time.time()
-            self._sync_runtime_usage(check_provider=False)
-            self.cleanup_result = {
-                "verified_stopped": True,
-                "cleanup_status": "verified",
-                "attempts": 0,
-                "error": None,
-            }
-            self.orchestrator.store.record_cleanup_result(
-                self.job_id,
-                self.raw_attempt,
-                self.session_name,
-                verified_stopped=True,
-                cleanup_status="verified",
-                attempts=0,
-                error=None,
-            )
-            cleanup_res = dict(self.cleanup_result)
-        else:
-            cleanup_res = self._finalize_session_once()
-        self.cu_spent = self._estimate_elapsed_cu()
-        if not cleanup_res.get("verified_stopped"):
-            raise _OrchestratorStageError(CloudErrorCode.CLEANUP_FAILED.value,
-                                         cleanup_res.get("error") or "Cloud session cleanup is unverified.")
-        self._raise_if_aborted()
 
         from .cloud_config import _is_local_default_banve, get_cloud_output_dir
 
@@ -1633,10 +1657,56 @@ class _JobRun:
     def _stage_cleanup(self):
         self._mark_stage("cleanup")
         # 8. Thu hồi & xác nhận session trước bước hoàn tất; tính lượng CU ước tính theo thời gian chạy
-        self.elapsed_sec = max(0.0, (self.runtime_end_time if self.runtime_end_time is not None else time.time()) - (self.runtime_start_time or self.start_time))
+        self.parked_warm = False
+        if (
+            self.session_may_exist
+            and not self.cleanup_done
+            and self.orchestrator._park_warm_session_on_success(
+                self.session_name,
+                self.gpu_type,
+                source_job_id=self.job_id,
+                before_park=self._unmount_drive_before_warm_park if self.cache_mounted else None,
+            )
+        ):
+            self.parked_warm = True
+            self.cleanup_done = True
+            self.runtime_end_time = time.time()
+            self._sync_runtime_usage(check_provider=False)
+            self.cleanup_result = {
+                "verified_stopped": True,
+                "cleanup_status": "verified",
+                "attempts": 0,
+                "error": None,
+            }
+            self.orchestrator.store.record_cleanup_result(
+                self.job_id,
+                self.raw_attempt,
+                self.session_name,
+                verified_stopped=True,
+                cleanup_status="verified",
+                attempts=0,
+                error=None,
+            )
+            cleanup_res = dict(self.cleanup_result)
+        else:
+            cleanup_res = self._finalize_session_once()
         self.cu_spent = self._estimate_elapsed_cu()
-        cleanup_res = self._finalize_session_once()
-        self.cu_spent = self._estimate_elapsed_cu()
+        self.elapsed_sec = max(
+            0.0,
+            (self.runtime_end_time if self.runtime_end_time is not None else time.time())
+            - (self.runtime_start_time or self.start_time),
+        )
+        if not cleanup_res.get("verified_stopped"):
+            raise _OrchestratorStageError(
+                CloudErrorCode.CLEANUP_FAILED.value,
+                cleanup_res.get("error") or "Cloud session cleanup is unverified.",
+            )
+        if self.cache_status == "save_skipped_budget":
+            aborted, abort_reason = self._check_abort()
+            if aborted and abort_reason not in {"budget_exceeded", "budget_uncertain"}:
+                self._raise_if_aborted()
+        else:
+            self._raise_if_aborted()
         final_cleanup_status = str(
             cleanup_res.get("cleanup_status")
             or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
@@ -2845,9 +2915,9 @@ class CloudOrchestrator:
             run._stage_upload()
             run._stage_setup()
             run._stage_pipeline()
-            run._stage_cache_save()
             run._stage_download()
             run._stage_validate()
+            run._stage_cache_save()
             return run._stage_cleanup()
         except _JobAborted as abort_exc:
             return run._handle_job_aborted(abort_exc)

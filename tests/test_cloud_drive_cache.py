@@ -596,6 +596,7 @@ class _CacheJobAdapter:
         setup_cache_status: str = "miss",
         pipeline_result: tuple[bool, str] = (True, "PIPELINE_SUCCESS"),
         cache_save_result: tuple[bool, str] = (True, ""),
+        cache_save_budget_abort: bool = False,
         unmount_result: tuple[bool, str] = (True, "unmounted"),
     ):
         self.mount_result = mount_result
@@ -609,6 +610,8 @@ class _CacheJobAdapter:
         self.cache_save_result = cache_save_result
         self.cache_key = "f" * 64
         self.cache_sha256 = "a" * 64
+        self.cache_save_budget_abort = cache_save_budget_abort
+        self.in_cache_save = False
         self.unmount_result = unmount_result
         self.unmount_calls = []
         self.active_sessions = {warm_session} if warm_session else set()
@@ -684,6 +687,11 @@ class _CacheJobAdapter:
         if "--cache-save-only" in argv:
             self.command_order.append("cache_save")
             self.save_only_argv = list(argv)
+            if self.cache_save_budget_abort and cancel_check:
+                self.in_cache_save = True
+                cancel_check()
+                self.in_cache_save = False
+                return False, "cache save interrupted by budget"
             if self.cache_save_result[1]:
                 return self.cache_save_result
             result = {
@@ -714,6 +722,7 @@ class _CacheJobAdapter:
         destination = Path(local_dir) / Path(remote_filename).name
         destination.parent.mkdir(parents=True, exist_ok=True)
         if remote_filename == "output_video.mp4":
+            self.command_order.append("download")
             destination.write_bytes(self.video_bytes)
         elif remote_filename == "result_metadata.json":
             destination.write_text(json.dumps(self.metadata), encoding="utf-8")
@@ -732,6 +741,7 @@ def _run_cache_job(
     cache_save_enabled: bool = True,
     pipeline_result: tuple[bool, str] = (True, "PIPELINE_SUCCESS"),
     cache_save_result: tuple[bool, str] = (True, ""),
+    cache_save_budget_abort: bool = False,
     cache_backend: str = "gdrive",
     warm_reuse_enabled: bool = False,
     warm_keepalive_seconds: int = 0,
@@ -768,6 +778,7 @@ def _run_cache_job(
         setup_cache_status=setup_cache_status,
         pipeline_result=pipeline_result,
         cache_save_result=cache_save_result,
+        cache_save_budget_abort=cache_save_budget_abort,
         unmount_result=unmount_result,
     )
     adapter.store = store
@@ -831,7 +842,8 @@ def test_orchestrator_mounts_drive_and_passes_cache_arguments(
     assert adapter.save_only_argv is not None
     assert colab_bridge._validate_argv(adapter.setup_argv) == adapter.setup_argv
     assert colab_bridge._validate_argv(adapter.save_only_argv) == adapter.save_only_argv
-    assert adapter.command_order == ["setup", "pipeline", "cache_save"]
+    assert adapter.command_order == ["setup", "pipeline", "download", "cache_save"]
+    assert adapter.command_order.index("download") < adapter.command_order.index("cache_save")
     assert job.output_manifest["cache_backend"] == "gdrive"
     assert job.output_manifest["cache_mounted"] is True
     assert job.output_manifest["cache_status"] == "saved"
@@ -1033,6 +1045,55 @@ def test_orchestrator_saves_only_after_pipeline_success_and_continues_on_save_fa
     assert save_failure_adapter.save_only_argv is not None
     assert save_failure_job.output_manifest["cache_status"] == "save_failed"
     assert save_failure_job.state == "completed"
+
+
+def test_orchestrator_cache_save_budget_abort_keeps_delivered_video(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    original_cancel_probe = cloud_orchestrator._JobRun._cancel_probe
+
+    def budget_abort_during_save(run):
+        if getattr(run.orchestrator.adapter, "in_cache_save", False):
+            run.budget_abort_code = "budget_exceeded"
+            run.budget_abort_reason = "daily budget exhausted"
+            return True
+        return original_cancel_probe(run)
+
+    monkeypatch.setattr(cloud_orchestrator._JobRun, "_cancel_probe", budget_abort_during_save)
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (True, "mounted"),
+        cache_save_budget_abort=True,
+    )
+
+    assert adapter.save_only_argv is not None
+    assert job.state == "completed"
+    assert job.output_manifest["cache_status"] == "save_skipped_budget"
+    assert Path(job.output_manifest["result_path"]).is_file()
+
+
+def test_orchestrator_skips_cache_save_when_runtime_budget_check_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    original_sync_usage = cloud_orchestrator._JobRun._sync_runtime_usage
+
+    def budget_check_fails(run, *, check_provider=False):
+        if check_provider:
+            run.budget_abort_code = "budget_exceeded"
+            run.budget_abort_reason = "daily budget exhausted"
+            return False, "budget_exceeded"
+        return original_sync_usage(run, check_provider=check_provider)
+
+    monkeypatch.setattr(cloud_orchestrator._JobRun, "_sync_runtime_usage", budget_check_fails)
+    adapter, job = _run_cache_job(tmp_path, monkeypatch, (True, "mounted"))
+
+    assert adapter.save_only_argv is None
+    assert job.state == "completed"
+    assert job.output_manifest["cache_status"] == "save_skipped_budget"
+    assert Path(job.output_manifest["result_path"]).is_file()
 
 
 def test_mount_drive_hides_authorization_url_and_closes_stdin(monkeypatch: pytest.MonkeyPatch):
