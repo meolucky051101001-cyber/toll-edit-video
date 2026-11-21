@@ -484,16 +484,52 @@ def _asr_alignment_error(raw_segments: list[dict], windows: list[dict]) -> str |
     return None
 
 
+def _faster_whisper_result_to_dict(segments_iter) -> dict:
+    segments = []
+    for idx, segment in enumerate(segments_iter or ()):
+        words = []
+        for word in getattr(segment, "words", None) or ():
+            words.append(
+                {
+                    "word": str(getattr(word, "word", "") or ""),
+                    "start": float(getattr(word, "start", 0.0) or 0.0),
+                    "end": float(getattr(word, "end", 0.0) or 0.0),
+                    "probability": float(getattr(word, "probability", 0.0) or 0.0),
+                }
+            )
+        text = str(getattr(segment, "text", "") or "")
+        segments.append(
+            {
+                "id": idx,
+                "seek": 0,
+                "start": float(getattr(segment, "start", 0.0) or 0.0),
+                "end": float(getattr(segment, "end", 0.0) or 0.0),
+                "text": text,
+                "tokens": [int(token) for token in (getattr(segment, "tokens", None) or ())],
+                "temperature": float(getattr(segment, "temperature", 0.0) or 0.0),
+                "avg_logprob": float(getattr(segment, "avg_logprob", 0.0) or 0.0),
+                "compression_ratio": float(getattr(segment, "compression_ratio", 0.0) or 0.0),
+                "no_speech_prob": float(getattr(segment, "no_speech_prob", 0.0) or 0.0),
+                "words": words,
+            }
+        )
+    return {"text": "".join(segment["text"] for segment in segments), "segments": segments}
+
+
 def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path: str | None = None,
                       audit_path: str | None = None) -> list[dict]:
-    log_step(3, 8, f"Nhận dạng giọng nói (ASR) bằng Whisper {WHISPER_MODEL}...")
+    engine = os.getenv("AUTODUB_CLOUD_ASR_ENGINE", "openai-whisper").strip().lower() or "openai-whisper"
+    if engine not in ("openai-whisper", "faster-whisper"):
+        raise ValueError("AUTODUB_CLOUD_ASR_ENGINE phải là openai-whisper hoặc faster-whisper.")
+    log_step(3, 8, f"Nhận dạng giọng nói (ASR) bằng {engine} {WHISPER_MODEL}...")
     import torch
     import whisper
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if engine == "faster-whisper" or torch.cuda.is_available() else "cpu"
     print(f"  -> Whisper sử dụng thiết bị: {device}", flush=True)
     audio, audit = _asr_speech_audio(audio_path, reference_audio_path)
     audit["model"] = WHISPER_MODEL
+    audit["engine"] = engine
     # Exhausted temperature fallback returned mixed-language gibberish at T=1.0
     # on a real clip. Use beam search and retain confidence failures for retry.
     decode_options = {"verbose": False, "word_timestamps": True,
@@ -514,10 +550,29 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
     # 30-second window. DTW word alignment uses the actual audio frames and refines
     # segment boundaries; do not repair decoder timestamps by clipping/dropping cues.
     if windows:
-        # Match Local V1's model family. Large-v3 dropped real speech on the
-        # long Canary even after an original-track retry with valid clip bounds.
-        model = whisper.load_model(WHISPER_MODEL, device=device)
-        result = model.transcribe(primary_audio, clip_timestamps=clips, **decode_options)
+        if engine == "faster-whisper":
+            from faster_whisper import WhisperModel
+
+            model = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="int8_float16")
+        else:
+            # Match Local V1's model family. Large-v3 dropped real speech on the
+            # long Canary even after an original-track retry with valid clip bounds.
+            model = whisper.load_model(WHISPER_MODEL, device=device)
+
+        def _transcribe(target_audio, clip_timestamps):
+            if engine == "faster-whisper":
+                segments_iter, _info = model.transcribe(
+                    target_audio,
+                    beam_size=5,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                    word_timestamps=True,
+                    clip_timestamps=clip_timestamps,
+                )
+                return _faster_whisper_result_to_dict(segments_iter)
+            return model.transcribe(target_audio, clip_timestamps=clip_timestamps, **decode_options)
+
+        result = _transcribe(primary_audio, clips)
     else:
         result = {"segments": [], "text": ""}
     # Validate both tracks identically and preserve rejected output for review.
@@ -532,7 +587,7 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
         audit["initial_segments"] = result.get("segments", [])
         print("  -> ASR audio gốc chưa đạt; nhận dạng vocal một lần với cùng chính sách kiểm tra.", flush=True)
         clips = _whisper_clip_timestamps(windows, len(audio))
-        result = model.transcribe(audio, clip_timestamps=clips, **decode_options)
+        result = _transcribe(audio, clips)
         audit["recognition_track"] = "vocals_retry"
         audit["decoder_clip_timestamps"] = clips
         gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
