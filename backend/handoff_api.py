@@ -5,17 +5,19 @@ mà pipeline Tool V1 đang dùng (generate_dubbing_audio, sync_and_clamp_subtitl
 generate_ass_file, mix_audio_pydub, process_video).
 
 Không đụng V1Orchestrator: batch 8 bước, Quality Gate và bot Telegram đi theo đường
-code cũ. Tác vụ này xếp hàng sau pipeline bằng _wait_pipeline_free của Studio.
+code cũ. Handoff giữ chung quyền xử lý với batch và khóa render của Studio.
 """
 import json
 import logging
 import os
-import shutil
+import re
 import subprocess
 import threading
 import time
 import uuid
-from datetime import timedelta, timezone
+from collections import deque
+from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,7 +31,11 @@ _VERSION = 1
 _HANDOFF_JOBS: Dict[str, Dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
 _JOB_TTL = 7200.0
-_RENDER_LOCK = threading.Lock()
+_RENDER_QUEUE = deque()
+_QUEUE_WORKER: Optional[threading.Thread] = None
+_MAX_PENDING = 64
+_HANDOFF_STEM = re.compile(r"subextract_[0-9a-f]{32}")
+_ACTIVE = {"queued", "running", "cancelling"}
 _MAX_CUES = 4000
 _DEFAULT_DUCK_DB = -14.0
 _DEFAULT_DUB_DB = 1.0
@@ -203,17 +209,25 @@ def _run(cmd: List[str], timeout: int, job_id: Optional[str] = None) -> subproce
     process = subprocess.Popen(cmd, **popen_kwargs)
     with _JOBS_LOCK:
         job = _HANDOFF_JOBS.get(job_id) if job_id else None
-    if job is not None:
-        job["proc"] = process
+        if job is not None:
+            job["proc"] = process
+            cancelled = job["cancel_requested"]
+        else:
+            cancelled = False
     try:
+        if cancelled:
+            process.kill()
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.kill()
         stdout, stderr = process.communicate()
         raise RuntimeError(f"FFmpeg quá thời gian {timeout}s") from None
     finally:
-        if job is not None:
-            job["proc"] = None
+        with _JOBS_LOCK:
+            if job is not None:
+                job["proc"] = None
+    if job_id:
+        _check_cancel(job_id)
     if process.returncode != 0:
         raise RuntimeError((stderr or stdout or "FFmpeg lỗi")[-300:])
     return subprocess.CompletedProcess(cmd, 0, stdout, stderr)
@@ -238,20 +252,28 @@ def _probe_video(path: Path) -> tuple[int, int, float]:
         return 0, 0, 0.0
 
 
-def _register(job_id: str, stem: str) -> Dict[str, Any]:
-    job = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "stem": stem,
-           "created_at": time.time(), "cancel_requested": False, "proc": None}
-    with _JOBS_LOCK:
-        for stale in [k for k, v in _HANDOFF_JOBS.items() if time.time() - v.get("created_at", 0) > _JOB_TTL]:
-            _HANDOFF_JOBS.pop(stale, None)
-        _HANDOFF_JOBS[job_id] = job
+def _register_locked(job_id: str, stem: str) -> Dict[str, Any]:
+    now = time.time()
+    for stale, record in list(_HANDOFF_JOBS.items()):
+        if record.get("status") not in _ACTIVE and now - record.get("finished_at", now) > _JOB_TTL:
+            del _HANDOFF_JOBS[stale]
+    job = {"status": "queued", "progress": 0, "stage": "Trong hàng chờ…", "stem": stem,
+           "created_at": now, "cancel_requested": False, "proc": None}
+    _HANDOFF_JOBS[job_id] = job
     return job
+
+
+def _register(job_id: str, stem: str) -> Dict[str, Any]:
+    with _JOBS_LOCK:
+        return _register_locked(job_id, stem)
 
 
 def _update(job_id: str, **fields) -> None:
     with _JOBS_LOCK:
         job = _HANDOFF_JOBS.get(job_id)
         if job:
+            if fields.get("status") in {"done", "error", "cancelled"}:
+                fields["finished_at"] = time.time()
             job.update(fields)
 
 
@@ -282,7 +304,8 @@ def _link_into_job_dir(source: Path, target: Path) -> str:
         logger.info("handoff: bỏ qua copy video vì kiểm tra dung lượng thất bại (%s)", type(exc).__name__)
         return "pointer"
     try:
-        shutil.copy2(source, target)
+        from pipeline_v2.atomic_io import atomic_copy_file
+        atomic_copy_file(source, target)
         return "copy"
     except OSError:
         return "pointer"
@@ -300,7 +323,9 @@ def _import_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     wf = _wf()
 
     source = _resolve_source_video(payload.get("source_video"))
-    stem = wf.safe_stem(payload.get("stem") or source.stem)
+    if payload.get("stem"):
+        wf.safe_stem(payload["stem"])
+    stem = "subextract_" + uuid.uuid4().hex
     cues = _normalize_cues(payload.get("cues"))
 
     width = int(_num(payload.get("video_width")))
@@ -317,8 +342,8 @@ def _import_job(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not cue["box"]:
             cue["box"] = _band_box(main_y)
 
-    job_dir = wf.resolve_job_dir(stem)
-    job_dir.mkdir(parents=True, exist_ok=True)
+    job_dir = wf.WORKSPACE.resolve() / stem
+    job_dir.mkdir(exist_ok=False)
     link_mode = _link_into_job_dir(source, job_dir / f"{stem}.mp4")
     video_path = (job_dir / f"{stem}.mp4") if link_mode != "pointer" else source
 
@@ -398,27 +423,108 @@ def _resolve_voice(payload: Dict[str, Any]) -> tuple[str, str, str]:
     return source, param, str(entry.get("label") or f"{source}/{param}")
 
 
+def _project_dir(stem: str) -> Path:
+    if not _HANDOFF_STEM.fullmatch(stem):
+        raise HTTPException(409, "Bản giao cũ chưa có thư mục riêng. Hãy gửi lại từ SubExtract.")
+    path = _wf().WORKSPACE.resolve() / stem
+    if path.resolve() != path or not (path / "handoff.json").is_file():
+        raise HTTPException(404, "Chưa gửi phụ đề sang Tool V1.")
+    return path
+
+
 @router.post("/api/handoff/render")
 async def api_handoff_render(payload: Dict[str, Any] = Body(...)):
-    """Lồng tiếng + che phụ đề gốc + render; trả job_id để poll /api/handoff/status."""
-    wf = _wf()
-    stem = wf.safe_stem(payload.get("stem"))
-    job_dir = wf.resolve_job_dir(stem)
-    meta_path = job_dir / "handoff.json"
-    if not meta_path.is_file():
-        raise HTTPException(status_code=404, detail="Chưa gửi phụ đề sang Tool V1 — hãy bấm gửi ở SubExtract trước.")
-    if not _RENDER_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Tool V1 đang có bản giao render khác — chờ xong đã.")
+    """Nhận tác vụ vào hàng chờ; chỉ worker đầu hàng được xin quyền render."""
+    global _QUEUE_WORKER
+    stem = _wf().safe_stem(payload.get("stem"))
+    _project_dir(stem)
+    if payload.get("delivery_path"):
+        raise HTTPException(400, "Bản giao phải dùng đường dẫn xuất riêng do Tool V1 cấp.")
     job_id = uuid.uuid4().hex[:12]
-    _register(job_id, stem)
-    threading.Thread(target=_render_worker, args=(job_id, stem, dict(payload)), daemon=True).start()
-    return {"status": "ok", "job_id": job_id, "stem": stem}
+    with _JOBS_LOCK:
+        if any(job["stem"] == stem and job["status"] in _ACTIVE for job in _HANDOFF_JOBS.values()):
+            raise HTTPException(409, "Bản giao này đã ở trong hàng chờ hoặc đang xuất video.")
+        if len(_RENDER_QUEUE) >= _MAX_PENDING:
+            raise HTTPException(429, "Hàng chờ Tool V1 đã đầy.")
+        _register_locked(job_id, stem)
+        _RENDER_QUEUE.append((job_id, stem, dict(payload)))
+        position = len(_RENDER_QUEUE)
+        if _QUEUE_WORKER is None:
+            try:
+                worker = threading.Thread(target=_drain_queue, daemon=True, name="subextract-handoff")
+                worker.start()
+            except Exception:
+                _RENDER_QUEUE.pop()
+                del _HANDOFF_JOBS[job_id]
+                raise
+            _QUEUE_WORKER = worker
+    return {"status": "queued", "job_id": job_id, "stem": stem, "queue_position": position}
+
+
+def _drain_queue() -> None:
+    global _QUEUE_WORKER
+    while True:
+        with _JOBS_LOCK:
+            if not _RENDER_QUEUE:
+                _QUEUE_WORKER = None
+                return
+            item = _RENDER_QUEUE[0]
+        _render_worker(*item)
+        with _JOBS_LOCK:
+            if _RENDER_QUEUE and _RENDER_QUEUE[0] is item:
+                _RENDER_QUEUE.popleft()
+
+
+@contextmanager
+def _render_ownership(job_id: str):
+    import job_tracker
+    from v1_integrity_errors import JobStateReadError
+
+    studio = _wf()._TIMELINE_RENDER_SEM
+    _stage(job_id, 0, "Đang chờ batch hoặc lượt render Studio…")
+    while True:
+        _check_cancel(job_id)
+        try:
+            state = job_tracker.get_status(strict=True)
+        except JobStateReadError:
+            # Studio can hold the lease without publishing an active batch.
+            time.sleep(0.25)
+            continue
+        active = state["active"] or any(w["active"] for w in state.get("workers", {}).values())
+        if not active and studio.acquire(blocking=False):
+            claimed = False
+            try:
+                # The idle snapshot alone cannot arbitrate against another process.
+                try:
+                    with job_tracker._LOCK:
+                        job_tracker._claim_batch_lock_unlocked(job_id, exclusive=True)
+                    claimed = True
+                except job_tracker.JobAlreadyRunningError:
+                    pass
+                if claimed:
+                    _check_cancel(job_id)
+                    yield
+                    return
+            finally:
+                try:
+                    if claimed:
+                        job_tracker.release_batch(job_id)
+                finally:
+                    studio.release()
+        time.sleep(0.25)
 
 
 def _render_worker(job_id: str, stem: str, payload: Dict[str, Any]) -> None:
-    started = time.time()
     try:
-        result = _execute_render(job_id, stem, payload)
+        with _render_ownership(job_id):
+            with _JOBS_LOCK:
+                job = _HANDOFF_JOBS[job_id]
+                if job["cancel_requested"]:
+                    raise HandoffCancelled("Đã huỷ bản giao theo yêu cầu.")
+                if _RENDER_QUEUE and _RENDER_QUEUE[0][0] == job_id:
+                    _RENDER_QUEUE.popleft()
+                job.update(status="running", stage="Đang chuẩn bị xuất video…")
+            result = _execute_render(job_id, stem, payload)
         _update(job_id, status="done", progress=100, stage="Hoàn tất", result=result)
     except HandoffCancelled as exc:
         _update(job_id, status="cancelled", stage=str(exc)[:200])
@@ -427,13 +533,10 @@ def _render_worker(job_id: str, stem: str, payload: Dict[str, Any]) -> None:
     except Exception as exc:
         logger.exception("handoff render lỗi")
         _update(job_id, status="error", stage=str(exc)[:200], error=str(exc))
-    finally:
-        _RENDER_LOCK.release()
 
 
 def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     started = time.time()
-    _update(job_id, status="running")
     import asyncio
     import srt
     from ass_utils import generate_ass_file, sync_and_clamp_subtitles
@@ -445,8 +548,10 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
     import canvas_settings
     subtitle_settings = freeze_subtitle_settings(payload, canvas_settings.get_canvas_settings())
     wf = _wf()
-    job_dir = wf.resolve_job_dir(stem)
+    job_dir = _project_dir(stem)
     meta = json.loads((job_dir / "handoff.json").read_text(encoding="utf-8"))
+    if meta.get("source") != "subextract" or meta.get("stem") != stem:
+        raise RuntimeError("Thông tin sở hữu thư mục bản giao không hợp lệ.")
     video = Path(meta.get("video") or "")
     if not video.is_file():
         raise RuntimeError(f"Không tìm thấy video nguồn: {video.name}")
@@ -454,9 +559,6 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
     if not cues:
         raise RuntimeError("handoff.json không có câu phụ đề nào.")
 
-    _stage(job_id, 4, "Chờ pipeline/batch rảnh để mượn tài nguyên...")
-    if not wf._wait_pipeline_free(job_id):
-        raise RuntimeError("Pipeline Tool V1 đang chạy quá lâu — chưa bắt đầu, hãy thử lại.")
     _check_cancel(job_id)
 
     duck_db = _num(payload.get("original_volume_db"), _DEFAULT_DUCK_DB)
@@ -543,14 +645,14 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
                              main_y_pct=main_y, delogo=False,
                              subtitle_cover_style=subtitle_settings["sub_cover_style"],
                              subtitle_blur_settings=subtitle_settings)
+    _check_cancel(job_id)
     if not rendered or not staged_render.is_file() or staged_render.stat().st_size < 10240:
         raise RuntimeError("Render NVENC thất bại hoặc file xuất bị lỗi.")
     atomic_copy_file(staged_render, final_video)
     staged_render.unlink(missing_ok=True)
 
     _stage(job_id, 96, "Đóng gói ra thư mục video hoàn thành...")
-    delivery = payload.get("delivery_path")
-    delivered = Path(str(delivery)) if delivery else (wf.OUTPUT_DIR / f"Dubbed_{stem}.mp4")
+    delivered = wf.OUTPUT_DIR / f"Dubbed_{stem}.mp4"
     try:
         atomic_copy_file(final_video, delivered)
     except OSError as exc:
@@ -613,6 +715,11 @@ async def api_handoff_status(job_id: str = Query(...)):
     with _JOBS_LOCK:
         job = _HANDOFF_JOBS.get(job_id)
         snapshot = dict(job) if job else None
+        if snapshot and snapshot["status"] == "queued":
+            for position, item in enumerate(_RENDER_QUEUE, 1):
+                if item[0] == job_id:
+                    snapshot["queue_position"] = position
+                    break
     if not snapshot:
         raise HTTPException(status_code=404, detail="Không tìm thấy job handoff")
     snapshot.pop("proc", None)
@@ -628,7 +735,17 @@ async def api_handoff_cancel(payload: Dict[str, Any] = Body(...)):
         job = _HANDOFF_JOBS.get(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Không tìm thấy job handoff")
+        if job["status"] not in _ACTIVE:
+            return {"status": job["status"], "job_id": job_id}
         job["cancel_requested"] = True
+        if job["status"] == "queued":
+            for item in _RENDER_QUEUE:
+                if item[0] == job_id:
+                    _RENDER_QUEUE.remove(item)
+                    break
+            job.update(status="cancelled", stage="Đã rút khỏi hàng chờ.", finished_at=time.time())
+            return {"status": "cancelled", "job_id": job_id}
+        job["status"] = "cancelling"
         process = job.get("proc")
     if process is not None:
         try:
@@ -661,4 +778,5 @@ async def api_handoff_info():
         "voices": voices,
         "defaults": {"original_volume_db": _DEFAULT_DUCK_DB, "dubbing_volume_db": _DEFAULT_DUB_DB},
         "version": _VERSION,
+        "render_queue": "fifo",
     }
