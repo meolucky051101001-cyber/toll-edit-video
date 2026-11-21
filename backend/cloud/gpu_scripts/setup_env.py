@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -337,15 +338,15 @@ def _save_cloud_cache(
     cache_dir: Optional[Union[str, Path]],
     cache_key: str,
     workdir: Path,
-) -> str:
+) -> Tuple[str, Optional[str]]:
     if not cache_dir:
-        return "disabled"
+        return "disabled", None
     if re.fullmatch(r"[0-9a-f]{64}", cache_key or "") is None:
-        return "save_failed"
+        return "save_failed", None
 
     cache_root = _validated_cloud_cache_root(cache_dir)
     if cache_root is None:
-        return "save_failed"
+        return "save_failed", None
     key_dir = cache_root / cache_key
     archive_path = key_dir / "runtime.tar"
     checksum_path = key_dir / "runtime.tar.sha256"
@@ -355,6 +356,7 @@ def _save_cloud_cache(
     checksum_existed_before = False
     archive_published = False
     checksum_published = False
+    local_archive_path: Optional[Path] = None
     try:
         if any(
             path.is_symlink()
@@ -370,7 +372,7 @@ def _save_cloud_cache(
             if path.is_dir() and not path.is_symlink()
         }
         if not anchor_paths:
-            return "miss"
+            return "miss", None
 
         index = {
             "schema_version": 1,
@@ -378,14 +380,23 @@ def _save_cloud_cache(
             "anchors": {name: str(path.absolute()) for name, path in anchor_paths.items()},
         }
         index_bytes = json.dumps(index, sort_keys=True).encode("utf-8")
-        with tarfile.open(archive_partial, mode="w:") as tar:
+        with tempfile.NamedTemporaryFile(
+            prefix=".autodub-runtime-",
+            suffix=".tar.partial",
+            dir=str(workdir),
+            delete=False,
+        ) as local_archive:
+            local_archive_path = Path(local_archive.name)
+        with tarfile.open(local_archive_path, mode="w:") as tar:
             index_info = tarfile.TarInfo(_CACHE_INDEX_MEMBER)
             index_info.size = len(index_bytes)
             tar.addfile(index_info, io.BytesIO(index_bytes))
             for anchor_path in anchor_paths.values():
                 tar.add(anchor_path, arcname=anchor_path.as_posix().lstrip("/"), recursive=True)
 
-        checksum_partial.write_text(_sha256_file(archive_partial) + "\n", encoding="ascii")
+        cache_sha256 = _sha256_file(local_archive_path)
+        shutil.copyfile(local_archive_path, archive_partial)
+        checksum_partial.write_text(cache_sha256 + "\n", encoding="ascii")
         os.replace(archive_partial, archive_path)
         archive_published = True
         os.replace(checksum_partial, checksum_path)
@@ -402,7 +413,7 @@ def _save_cloud_cache(
                 and not (sibling / "runtime.tar").is_symlink()
             ):
                 _remove_cache_tree_without_crossing_mounts(sibling)
-        return "saved"
+        return "saved", cache_sha256
     except Exception:
         for partial_path in (archive_partial, checksum_partial):
             try:
@@ -420,7 +431,13 @@ def _save_cloud_cache(
             except OSError:
                 pass
         print("Cloud cache save failed; environment setup remains successful.", flush=True)
-        return "save_failed"
+        return "save_failed", None
+    finally:
+        if local_archive_path is not None:
+            try:
+                local_archive_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _is_production_local_env() -> Tuple[bool, str]:
@@ -1216,7 +1233,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             cache_save_ok = True
             cache_save_message = "Cache saving is disabled."
         else:
-            _CURRENT_CACHE_STATUS = _save_cloud_cache(
+            _CURRENT_CACHE_STATUS, cache_sha256 = _save_cloud_cache(
                 args.cache_dir,
                 cache_key,
                 workdir,
@@ -1224,17 +1241,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             if _CURRENT_CACHE_STATUS != "saved":
                 _CURRENT_CACHE_STATUS = "save_failed"
             cache_save_ok = _CURRENT_CACHE_STATUS == "saved"
-            if cache_save_ok:
-                try:
-                    cache_root = _validated_cloud_cache_root(args.cache_dir)
-                    if cache_root is None:
-                        raise OSError("Invalid cloud cache root.")
-                    cache_sha256 = _sha256_file(
-                        cache_root / cache_key / "runtime.tar"
-                    )
-                except OSError:
-                    _CURRENT_CACHE_STATUS = "save_failed"
-                    cache_save_ok = False
             cache_save_message = (
                 "Cloud runtime and model cache saved."
                 if cache_save_ok

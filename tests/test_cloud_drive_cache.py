@@ -264,7 +264,7 @@ def test_setup_cache_restores_matching_sha256(tmp_path: Path, monkeypatch: pytes
     cache_root = tmp_path / "drive"
     cache_key = _cache_key(workdir, manifest_path)
 
-    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir) == "saved"
+    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir)[0] == "saved"
     archive_path = cache_root / cache_key / "runtime.tar"
     assert setup_env._sha256_file(archive_path) == (
         cache_root / cache_key / "runtime.tar.sha256"
@@ -308,7 +308,7 @@ def test_cache_restore_keeps_real_symlink_venv_runnable(
     cache_root = tmp_path / "drive"
     cache_key = "e" * 64
 
-    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir) == "saved"
+    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir)[0] == "saved"
     archive_path = cache_root / cache_key / "runtime.tar"
     shutil.rmtree(runtime)
 
@@ -343,7 +343,7 @@ def test_cache_sha_mismatch_is_invalid_and_setup_continues(
     (runtime / "existing.txt").write_text("local", encoding="utf-8")
     cache_root = tmp_path / "drive"
     cache_key = _cache_key(workdir, manifest_path)
-    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir) == "saved"
+    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir)[0] == "saved"
     archive_path = cache_root / cache_key / "runtime.tar"
     shutil.rmtree(runtime)
     checksum_path = cache_root / cache_key / "runtime.tar.sha256"
@@ -382,7 +382,7 @@ def test_cache_restore_without_local_hash_skips_archive(
     (runtime / "local.txt").write_text("local", encoding="utf-8")
     cache_root = tmp_path / "drive"
     cache_key = _cache_key(workdir, manifest_path)
-    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir) == "saved"
+    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir)[0] == "saved"
     shutil.rmtree(runtime)
 
     calls: list[str] = []
@@ -504,7 +504,7 @@ def test_cache_save_is_atomic_and_prunes_old_keys(tmp_path: Path, monkeypatch: p
     (non_cache_dir / "keep.txt").write_text("keep", encoding="utf-8")
     current_key = "b" * 64
 
-    assert setup_env._save_cloud_cache(cache_root, current_key, workdir) == "saved"
+    assert setup_env._save_cloud_cache(cache_root, current_key, workdir)[0] == "saved"
     key_dir = cache_root / current_key
     archive_path = key_dir / "runtime.tar"
     checksum_path = key_dir / "runtime.tar.sha256"
@@ -539,7 +539,7 @@ def test_cache_save_is_atomic_and_prunes_old_keys(tmp_path: Path, monkeypatch: p
         lambda path, *_args, **_kwargs: FailingTar(Path(path)),
     )
     failed_key = "d" * 64
-    assert setup_env._save_cloud_cache(failing_root, failed_key, workdir) == "save_failed"
+    assert setup_env._save_cloud_cache(failing_root, failed_key, workdir)[0] == "save_failed"
     failed_dir = failing_root / failed_key
     assert not (failed_dir / "runtime.tar").exists()
     assert not (failed_dir / "runtime.tar.sha256").exists()
@@ -567,7 +567,7 @@ def test_cache_prune_does_not_descend_into_mounts(
         lambda path: Path(path).resolve() == mount_path or real_ismount(path),
     )
 
-    assert setup_env._save_cloud_cache(cache_root, "b" * 64, workdir) == "saved"
+    assert setup_env._save_cloud_cache(cache_root, "b" * 64, workdir)[0] == "saved"
     assert mounted_file.read_text(encoding="utf-8") == "keep"
 
 
@@ -579,7 +579,7 @@ def test_cache_save_refuses_unsafe_roots(tmp_path: Path, cache_root: str):
     workdir, _manifest_path = _prepare_setup_workdir(tmp_path)
 
     assert setup_env._validated_cloud_cache_root(cache_root) is None
-    assert setup_env._save_cloud_cache(cache_root, "f" * 64, workdir) == "save_failed"
+    assert setup_env._save_cloud_cache(cache_root, "f" * 64, workdir)[0] == "save_failed"
 
 
 def test_setup_cache_miss_does_not_save_during_setup(
@@ -654,6 +654,48 @@ def test_setup_cache_save_only_writes_after_verification(
     assert calls == ["packages", "models"]
     assert (key_dir / "runtime.tar").is_file()
     assert (key_dir / "runtime.tar.sha256").is_file()
+
+
+def test_cache_sha256_uses_local_archive_bytes_and_rejects_drive_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _use_temp_model_homes(monkeypatch, tmp_path)
+    workdir, _manifest_path = _prepare_setup_workdir(tmp_path)
+    runtime = workdir / ".autodub_venv"
+    runtime.mkdir()
+    (runtime / "runtime.txt").write_text("runtime", encoding="utf-8")
+    cache_root = tmp_path / "drive"
+    cache_key = "d" * 64
+    archive_path = cache_root / cache_key / "runtime.tar"
+    original_replace = setup_env.os.replace
+    drive_partial_sha256: list[str] = []
+
+    def tamper_after_archive_publish(source, destination):
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if destination_path == archive_path:
+            drive_partial_sha256.append(setup_env._sha256_file(source_path))
+            original_replace(source, destination)
+            destination_path.write_bytes(b"tampered after publish")
+            return
+        original_replace(source, destination)
+
+    monkeypatch.setattr(setup_env.os, "replace", tamper_after_archive_publish)
+    status, cache_sha256 = setup_env._save_cloud_cache(cache_root, cache_key, workdir)
+
+    assert status == "saved"
+    assert cache_sha256 == drive_partial_sha256[0]
+    assert cache_sha256 != setup_env._sha256_file(archive_path)
+    assert (archive_path.parent / "runtime.tar.sha256").read_text(encoding="ascii").strip() == cache_sha256
+
+    shutil.rmtree(runtime)
+    assert setup_env._restore_cloud_cache(
+        cache_root,
+        cache_key,
+        workdir,
+        expected_sha256=cache_sha256,
+    ) == "invalid"
 
 
 class _CacheJobAdapter:
