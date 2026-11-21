@@ -65,6 +65,7 @@ _AUTODUB_LAUNCH_MARKER = "AUTODUB_LAUNCH_JSON:"
 _AUTODUB_POLL_MARKER = "AUTODUB_POLL_JSON:"
 _UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 _UPLOAD_BODY_REJECTED = re.compile(r"\b(?:400 Client Error|413 Client Error|413 (?:Payload|Content) Too Large)\b", re.I)
+_TRANSFER_FAILURE_RE = re.compile(r"\b(?:upload|download)\s+failed\b", re.I)
 _ASSEMBLE_VIDEO = """
 import hashlib
 from pathlib import Path
@@ -668,7 +669,7 @@ def _upload_with_retry(
             session_name=session_name,
         )
         combined = redact_secrets(f"{stdout}\n{stderr}".strip())
-        if rc == 0:
+        if rc == 0 and not _TRANSFER_FAILURE_RE.search(combined):
             return True, "Upload thành công."
         if rc == -3 or _is_session_aborted(session_name):
             return False, "Tác vụ đã bị hủy bởi yêu cầu dừng."
@@ -1559,7 +1560,19 @@ def download_file(
 
     logger.info("Đang download %s từ session %s về %s...", remote_src, safe_session, expected_file)
     combined = ""
+
+    def remove_partial() -> Optional[str]:
+        try:
+            if expected_file.exists() or expected_file.is_symlink():
+                expected_file.unlink()
+        except OSError as exc:
+            return redact_secrets(str(exc))
+        return None
+
     for attempt_idx in range(1, 3):
+        cleanup_error = remove_partial()
+        if cleanup_error:
+            return False, f"Không thể xóa file download cũ: {cleanup_error}"
         rc, stdout, stderr = _run_wsl_colab_argv(
             ["download", "-s", safe_session, remote_src, wsl_dest_file],
             timeout=timeout,
@@ -1568,10 +1581,19 @@ def download_file(
         )
         combined = redact_secrets(f"{stdout}\n{stderr}".strip())
         if rc == -3:
+            remove_partial()
             return False, f"Tác vụ đã bị hủy bởi yêu cầu dừng. {combined}".strip() if combined else "Tác vụ đã bị hủy bởi yêu cầu dừng."
-        if rc == 0 or expected_file.exists():
+        file_ready = False
+        try:
+            file_ready = expected_file.is_file() and expected_file.stat().st_size > 0
+        except OSError:
+            pass
+        if rc == 0 and not _TRANSFER_FAILURE_RE.search(combined) and file_ready:
             logger.info("Download %s thành công.", Path(remote_filename).name)
             return True, str(expected_file)
+        cleanup_error = remove_partial()
+        if cleanup_error:
+            combined = f"{combined}\nKhông thể xóa file download không hợp lệ: {cleanup_error}".strip()
         if attempt_idx < 2 and _is_transient_transport_error(combined):
             logger.warning("Download %s gặp rớt kết nối tạm (lần %d), tự thử lại...", Path(remote_filename).name, attempt_idx)
             if _wait_interruptible(1.5, session_name=safe_session, cancel_check=cancel_check):
