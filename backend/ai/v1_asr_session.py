@@ -77,11 +77,21 @@ def close_session() -> None:
             stderr_thread.join(timeout=1.0)
 
 
+def _close_if_idle_after_delay(idle_s: float) -> None:
+    if close_if_idle(idle_s):
+        return
+    with _lock:
+        if _process is None or threading.current_thread() is not _idle_timer:
+            return
+        remaining = idle_s - (time.monotonic() - _last_used_at)
+        _schedule_idle_close(max(remaining, 0.001))
+
+
 def _schedule_idle_close(idle_s: float) -> None:
     global _idle_timer
     if _idle_timer is not None:
         _idle_timer.cancel()
-    _idle_timer = threading.Timer(idle_s, close_if_idle, args=(idle_s,))
+    _idle_timer = threading.Timer(idle_s, _close_if_idle_after_delay, args=(idle_s,))
     _idle_timer.daemon = True
     _idle_timer.start()
 
