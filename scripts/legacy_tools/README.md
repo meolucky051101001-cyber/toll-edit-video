@@ -8,3 +8,10 @@ Khi cần chạy thủ công một script trong thư mục này, đặt `PYTHONP
 $env:PYTHONPATH = "C:\tool v1;C:\tool v1\backend"
 & "C:\tool v1\backend\venv\Scripts\python.exe" "scripts\legacy_tools\<ten_script>.py"
 ```
+
+## Chuyển vào ngày 2026-11-21
+
+Ba script không được module, test, CI hay file `.bat` nào tham chiếu:
+
+- `diagnose_canary.py`, `diagnose_covers.py`: script chạy một lần, đọc cứng đường dẫn `D:\workspace_v2\canary_batch_runs\...`.
+- `audit_video_timeline.py` (trước đây ở `backend/scripts/`): công cụ kiểm tra timeline thủ công.
