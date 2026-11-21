@@ -106,7 +106,7 @@ def detect_letterbox_crop(video_path: str, padding: int = 0) -> Optional[Dict[st
         if w <= 0 or h <= 0 or total_frames <= 0:
             cap.release()
             return None
-        
+
         sample_indices = [int(total_frames * p) for p in [0.10, 0.25, 0.50, 0.75, 0.90]]
         crops = []
         for idx in sample_indices:

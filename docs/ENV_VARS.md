@@ -6,7 +6,7 @@ File này được sinh tự động bởi `python scripts/gen_env_docs.py`. Kh�
 Cột *Mặc định* là giá trị viết trong code. Nhiều giá trị nghĩa là các module dùng
 mặc định khác nhau cho cùng một biến; nên xem lại những dòng đó.
 
-Tổng: 202 biến.
+Tổng: 220 biến.
 
 | Biến | Mặc định | Nơi đọc |
 |---|---|---|
@@ -14,33 +14,46 @@ Tổng: 202 biến.
 | `ATEMPO_MAX` | `1.5` | `backend/pipeline_v2/config.py` |
 | `ATEMPO_MIN` | `1.0` | `backend/pipeline_v2/config.py` |
 | `AUTODUB_ALLOWED_VIDEO_ROOTS` | — | `backend/script_api.py` |
+| `AUTODUB_ALLOW_EXTERNAL_ENV_FALLBACK` | — | `backend/cloud/cloud_config.py` |
 | `AUTODUB_ALLOW_REMOTE_CLOUD_NODE` | — | `run_cloud_node.py` |
 | `AUTODUB_ALLOW_TEST_PROGRESS_FILE` | — | `backend/cloud/gpu_scripts/full_pipeline.py` |
 | `AUTODUB_CLOUD_ALLOWED_ROOTS` | — | `backend/cloud/cloud_security.py` |
+| `AUTODUB_CLOUD_ASR_ENGINE` | `openai-whisper` | `backend/cloud/cloud_config.py`, `backend/cloud/gpu_scripts/full_pipeline.py`, `backend/cloud/gpu_scripts/setup_env.py` |
 | `AUTODUB_CLOUD_BILLING_ROUNDING_QUANTUM_CU` | `0.02` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_BUDGET_TIMEZONE` | `Asia/Ho_Chi_Minh` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_CACHE_BACKEND` | `none` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_CACHE_DRIVE_ROOT` | `/content/drive/MyDrive/AutoDubCloudCache` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_CACHE_SAVE` | `1` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_CACHE_SAVE_TIMEOUT_SECONDS` | `900` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_CU_BUDGET` | `10.0` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_DEFAULT_GPU` | `T4` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_DOWNLOAD_TIMEOUT` | `1800` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_DRIVE_MOUNT_TIMEOUT_SECONDS` | `180` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_EXEC_TIMEOUT` | `7200` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_GEMINI_KEYS_MAX` | `2` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_MAX_UPLOAD_BYTES` | `(tính lúc chạy)` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_MIN_DISK_MB` | `4096` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_MIN_PROVIDER_BALANCE_CU` | `0.0` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_OUTPUT_DIR` | — | `backend/cloud/cloud_config.py`, `backend/cloud/cloud_orchestrator.py`, `run_cloud_node.py` |
+| `AUTODUB_CLOUD_POLL_MAX_INTERVAL_SECONDS` | `30` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_PROVIDER_BALANCE_STALE_SECONDS` | `300` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_RUNTIME_BUDGET_CHECK_INTERVAL_SECONDS` | `15` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_SESSION_TIMEOUT` | `7200` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_SETUP_TIMEOUT` | `600` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_STOP_LATENCY_BUFFER_SECONDS` | `60` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_STOP_TIMEOUT` | `60` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_TEST_OUTPUT_GUARD` | — | `backend/cloud/cloud_orchestrator.py` |
 | `AUTODUB_CLOUD_UPLOAD_TIMEOUT` | `1800` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_WARM_HANDOFF_SECONDS` | `300` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_WARM_KEEPALIVE_MAX_SECONDS` | `1800` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_WARM_KEEPALIVE_SECONDS` | `300` | `backend/cloud/cloud_config.py` |
+| `AUTODUB_CLOUD_WARM_REUSE` | `1` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_WSL_DISTRO` | `Ubuntu` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CLOUD_WSL_USER` | `root` | `backend/cloud/cloud_config.py` |
 | `AUTODUB_CONTROL_DIR` | `(tính lúc chạy)` | `backend/service_control.py`, `backend/tool_control_runtime.py` |
 | `AUTODUB_CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8088,http://localhost:8088` / `http://127.0.0.1:5173,http://localhost:5173,null` | `backend/main.py`, `backend/pipeline_v2/preflight.py` |
 | `AUTODUB_DATA_DIR` | — | `backend/config/paths.py` |
+| `AUTODUB_DISABLE_REPO_PROGRESS_FILE` | — | `backend/cloud/gpu_scripts/full_pipeline.py` |
 | `AUTODUB_DISABLE_STOP_CHECK` | `0` | `backend/shared_state.py`, `backend/social_downloader.py` |
 | `AUTODUB_INPUT_DIR` | `D:\video_input` | `backend/batch_processor.py`, `backend/main.py`, `backend/telegram_bot.py` |
 | `AUTODUB_LOCAL_TOKEN` | — | `backend/control_token.py` |
@@ -70,6 +83,7 @@ Tổng: 202 biến.
 | `DOUYIN_COOKIE_FILE` | — | `backend/douyin_direct.py` |
 | `DOWNLOADER_BOT_TOKEN` | — | `telebot_video_downloader.py` |
 | `DOWNLOADER_SEND_VIDEO_TO_CHAT` | `false` | `telebot_video_downloader.py` |
+| `EASYOCR_MODULE_PATH` | — | `backend/cloud/gpu_scripts/setup_env.py` |
 | `ENABLE_ADAPTIVE_DEMUCS` | `False` | `backend/pipeline_v2/config.py` |
 | `ENABLE_ADAPTIVE_OCR` | `True` | `backend/pipeline_v2/config.py` |
 | `ENABLE_AUTO_GENDER` | `False` | `backend/pipeline_v2/config.py` |
@@ -94,7 +108,9 @@ Tổng: 202 biến.
 | `GEMINI_VISION_MODEL` | `(tính lúc chạy)` | `backend/ai/scriptwriting.py` |
 | `GOOGLE_API_KEY` | — | `backend/whiteboard_animator/cli.py` |
 | `GPU_LOCK_TIMEOUT_SECONDS` | `1800.0` | `backend/pipeline_v2/config.py` |
-| `HF_HOME` | — | `backend/ai/v1_ocr_session.py` |
+| `HF_HOME` | — | `backend/ai/v1_ocr_session.py`, `backend/cloud/gpu_scripts/setup_env.py` |
+| `HF_HUB_CACHE` | — | `backend/cloud/gpu_scripts/setup_env.py` |
+| `HUGGINGFACE_HUB_CACHE` | — | `backend/cloud/gpu_scripts/setup_env.py` |
 | `LLM_PROVIDER` | `auto` | `backend/ai/translation.py`, `backend/pipeline_v2/video_pipeline.py`, `backend/telegram_bot.py` |
 | `LOCALAPPDATA` | — | `backend/config/paths.py`, `backend/subtitle_layout.py`, `run_cloud_node.py` |
 | `META_API_BASE_URL` | `(tính lúc chạy)` | `backend/ai/muse_spark_service.py` |
@@ -115,7 +131,7 @@ Tổng: 202 biến.
 | `PADDLE_PDX_CACHE_HOME` | — | `backend/ai/v1_ocr_session.py` |
 | `PIPELINE_MODE` | `(tính lúc chạy)` / `legacy` | `backend/pipeline_v2/config.py`, `backend/v1_preflight.py` |
 | `PRESERVE_SOURCE_RESOLUTION` | `True` | `backend/pipeline_v2/config.py` |
-| `PYTEST_CURRENT_TEST` | — | `backend/ai/v1_asr_isolated.py`, `backend/cloud/cloud_orchestrator.py`, `backend/cloud/gpu_scripts/full_pipeline.py`, `backend/job_tracker.py` (+3) |
+| `PYTEST_CURRENT_TEST` | — | `backend/ai/v1_asr_isolated.py`, `backend/job_tracker.py`, `backend/segment_editor_service.py`, `backend/video_utils.py` (+1) |
 | `PYTHONPATH` | — | `backend/pipeline_v2/gpu_executor.py` |
 | `QC_GATE_POLICY` | `(tính lúc chạy)` / `block` | `backend/pipeline_v2/config.py`, `backend/pipeline_v2/qc.py` |
 | `SAVE_DIRECTORY` | — | `backend/config/paths.py`, `telebot_video_downloader.py` |
@@ -140,6 +156,7 @@ Tổng: 202 biến.
 | `TELEGRAM_SCRIPT_BOT_TOKEN` | — | `backend/telegram_script_bot.py` |
 | `TOOL_V1_CONTROL_DIR` | `(tính lúc chạy)` | `backend/service_control.py`, `backend/tool_control_runtime.py` |
 | `TOOL_V2_RENDER_HISTORY` | `(tính lúc chạy)` | `backend/render_history.py` |
+| `TORCH_HOME` | — | `backend/cloud/gpu_scripts/setup_env.py` |
 | `TRANSLATION_BATCH_CHARACTERS` | `12000` | `backend/pipeline_v2/config.py` |
 | `TRANSLATION_BATCH_SEGMENTS` | `80` | `backend/pipeline_v2/config.py` |
 | `TRUE_PEAK_MAX_DBTP` | `(tính lúc chạy)` | `backend/pipeline_v2/config.py` |
@@ -211,4 +228,5 @@ Tổng: 202 biến.
 | `VOICE_API_KEY` | — | `backend/ai/v1_gemini_dispatcher.py`, `backend/cloud/cloud_orchestrator.py`, `backend/model_workers/v1_voice_worker.py`, `backend/v1_orchestrator.py` |
 | `WHISPER_MODEL` | — | `backend/ai/model_policy.py` |
 | `WINDIR` | `C:/Windows` / `C:\Windows` | `backend/ai/satori_renderer.py`, `backend/cloud/cloud_orchestrator.py`, `backend/subtitle_layout.py` |
+| `XDG_CACHE_HOME` | — | `backend/cloud/gpu_scripts/setup_env.py` |
 | `XDG_DATA_HOME` | — | `backend/config/paths.py` |

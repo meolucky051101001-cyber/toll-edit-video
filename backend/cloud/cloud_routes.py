@@ -570,6 +570,14 @@ async def api_cloud_session_stop(payload: Dict[str, Any] = Body(...)):
     except CloudValidationError as exc:
         raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
 
+    warm_row: Optional[Dict[str, Any]] = None
+    get_warm_fn = getattr(store, "get_warm_session", None)
+    if callable(get_warm_fn):
+        try:
+            warm_row = await asyncio.to_thread(get_warm_fn, session_name)
+        except Exception as exc:
+            logger.warning("Không đọc được thông tin session giữ ấm %s: %s", session_name, redact_secrets(str(exc)))
+
     action_res = await asyncio.to_thread(
         run_provider_action_nonblocking,
         stop_session,
@@ -589,9 +597,28 @@ async def api_cloud_session_stop(payload: Dict[str, Any] = Body(...)):
             "message": f"Lỗi dừng session: {redact_secrets(str(action_res.get('error') or ''))}",
         }
     ok, msg = action_res["result"]
-    if ok and hasattr(store, "remove_warm_session"):
+    if ok and warm_row and warm_row.get("parked_at") is not None:
+        record_warm_idle = getattr(store, "record_warm_idle_usage", None)
+        if callable(record_warm_idle):
+            try:
+                await asyncio.to_thread(
+                    record_warm_idle,
+                    session_name,
+                    str(warm_row.get("gpu_type") or "T4"),
+                    parked_at=float(warm_row["parked_at"]),
+                    ended_at=time.time(),
+                    source_job_id=warm_row.get("source_job_id"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Không ghi được CU giữ ấm của %s khi dừng từ Dashboard: %s",
+                    session_name,
+                    redact_secrets(str(exc)),
+                )
+    remove_warm_fn = getattr(store, "remove_warm_session", None)
+    if ok and callable(remove_warm_fn):
         try:
-            await asyncio.to_thread(store.remove_warm_session, session_name)
+            await asyncio.to_thread(remove_warm_fn, session_name)
         except Exception:
             pass
     safe_msg = redact_secrets(msg)
@@ -605,6 +632,13 @@ async def api_cloud_session_stop(payload: Dict[str, Any] = Body(...)):
 @router.post("/api/cloud/stop")
 async def api_cloud_stop():
     """Pause admission, cancel accepted jobs, and verify remote shutdown."""
+    list_warm_fn = getattr(store, "list_warm_sessions", None)
+    try:
+        warm_rows = await asyncio.to_thread(list_warm_fn, include_expired=True) if callable(list_warm_fn) else []
+    except Exception as exc:
+        logger.warning("Không đọc được danh sách session giữ ấm khi dừng Cloud: %s", redact_secrets(str(exc)))
+        warm_rows = []
+
     def cancel_admitted_jobs():
         store.set_rollout(arm=False)
         for job in store.list_jobs(limit=-1, include_hidden=True):
@@ -622,6 +656,26 @@ async def api_cloud_stop():
                 "message": "Chưa xác nhận dừng Cloud: " + redact_secrets(str(action.get("error") or ""))}
     stopped, message = action["result"]
     if stopped:
+        record_warm_idle = getattr(store, "record_warm_idle_usage", None)
+        if callable(record_warm_idle):
+            for warm_row in warm_rows:
+                if warm_row.get("parked_at") is None:
+                    continue
+                try:
+                    await asyncio.to_thread(
+                        record_warm_idle,
+                        str(warm_row.get("session_name") or ""),
+                        str(warm_row.get("gpu_type") or "T4"),
+                        parked_at=float(warm_row["parked_at"]),
+                        ended_at=time.time(),
+                        source_job_id=warm_row.get("source_job_id"),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Không ghi được CU giữ ấm của %s khi dừng toàn bộ Cloud: %s",
+                        warm_row.get("session_name"),
+                        redact_secrets(str(exc)),
+                    )
         from .cloud_orchestrator import clear_warm_registry_for_store
 
         await asyncio.to_thread(clear_warm_registry_for_store, store)

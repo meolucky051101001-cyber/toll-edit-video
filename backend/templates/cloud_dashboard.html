@@ -978,14 +978,18 @@
       write('telegram-cta-note', bot.running ? 'Dán link video vào bot để xếp hàng tự động.' : 'Gửi link qua bot khi trạng thái Telegram sẵn sàng.');
     }
 
-    function renderProvider(usage, cache, gpuCount, warmCount, fresh, cleanupCount) {
+    function renderProvider(usage, cache, gpuCount, warmCount, fresh, cleanupCount, warmSessions) {
       const disconnected = cache.provider_unreachable && !cache.in_flight;
       const status = disconnected ? 'Mất kết nối Colab' : 'Đang đồng bộ Colab';
       write('session-value', fresh ? `${gpuCount} đang chạy` : warmCount > 0 ? `${warmCount} đang giữ ấm` : 'Đang kiểm tra');
       tone('session-value', disconnected ? 'warn' : '');
       const rate = `${cu(usage.usage_rate)}/h`;
+      const warmIdleCu = (warmSessions || []).reduce((total, item) => {
+        const amount = Number(item.idle_cu_estimate);
+        return total + (Number.isFinite(amount) ? amount : 0);
+      }, 0);
       const sessionNote = warmCount > 0
-        ? `${warmCount} phiên giữ ấm · chờ video tiếp theo`
+        ? `${warmCount} phiên giữ ấm · ~${cu(warmIdleCu)} CU nhàn rỗi`
         : cleanupCount > 0
           ? 'Đang chờ xác nhận thu hồi'
           : gpuCount > 0
@@ -1151,7 +1155,7 @@
       renderHostMemory(data.host_memory);
       const resources = data.session_resources || [];
       renderSessionResources(resources, data.tracked_jobs || activeJobs);
-      renderProvider(usage, cache, gpuCount, warmCount, fresh, cleanup.length);
+      renderProvider(usage, cache, gpuCount, warmCount, fresh, cleanup.length, data.warm_sessions);
       renderBudget(data.budget);
       renderConcurrency();
       const actualGpu = job && measuredGpu(resources.find(item => item.job_id === job.job_id));

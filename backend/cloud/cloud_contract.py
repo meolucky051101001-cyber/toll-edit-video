@@ -255,6 +255,7 @@ class CloudCostMeasurementSource(str, Enum):
     """How CU usage in a ledger entry was measured or estimated."""
 
     RUNTIME_RATE_ESTIMATE = "runtime_rate_estimate"
+    PROVIDER_RATE_ESTIMATE = "provider_rate_estimate"
     PROVIDER_BALANCE_DELTA = "provider_balance_delta"
     MANUAL_OVERRIDE = "manual_override"
     UNVERIFIED_ESTIMATE = "unverified_estimate"

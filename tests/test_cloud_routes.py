@@ -2,6 +2,7 @@
 Kiểm thử tích hợp các endpoint Cloud GPU trên FastAPI TestClient.
 """
 import sys
+import time
 from pathlib import Path
 
 backend_dir = Path(__file__).resolve().parent.parent / "backend"
@@ -63,6 +64,40 @@ def test_cloud_api_status():
     assert data["status"] == "ok"
     assert "usage" in data
     print("  -> GET /api/cloud/status: 200 OK")
+
+
+def test_dashboard_stop_of_parked_session_ledgers_warm_idle(monkeypatch):
+    store = cloud_routes.store
+    session_name = "cjobroutewarm"
+    parked_at = time.time() - 600
+    store.park_warm_session(
+        session_name,
+        "T4",
+        ttl_seconds=3600,
+        source_job_id="route-source",
+        now=parked_at,
+    )
+    monkeypatch.setattr(
+        cloud_routes,
+        "run_provider_action_nonblocking",
+        lambda *_args, **_kwargs: {
+            "timed_out": False,
+            "completed": True,
+            "result": (True, "stopped"),
+        },
+    )
+
+    response = client.post(
+        "/api/cloud/session/stop",
+        headers=auth_headers,
+        json={"session_name": session_name},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    rows = store.list_cost_ledger(job_id=f"warm:{session_name}")
+    assert len(rows) == 1 and rows[0]["cu_observed"] > 0.0
+    assert rows[0]["usage_started_at"] == parked_at
 
 
 def test_cloud_api_jobs():

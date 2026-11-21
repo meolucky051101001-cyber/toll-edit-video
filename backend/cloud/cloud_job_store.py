@@ -207,7 +207,23 @@ def _normalize_provider_usage_payload(
         "stale_flag": stale_flag,
         "is_stale": is_stale,
         "error": safe_err,
+        "usage_rate": _optional_float(usage.get("usage_rate")),
+        "active_assignments": _optional_int(usage.get("active_assignments")),
     }
+
+
+def _optional_float(raw: Any) -> Optional[float]:
+    try:
+        return None if raw is None or raw == "" else float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(raw: Any) -> Optional[int]:
+    try:
+        return None if raw is None or raw == "" else int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -1565,6 +1581,14 @@ class CloudJobStore:
                 db.execute("ROLLBACK")
                 raise
 
+    def get_warm_session(self, session_name: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM cloud_warm_sessions WHERE session_name = ?",
+                (session_name,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def pop_all_warm_sessions(self, gpu_type: Optional[str] = None) -> List[Dict[str, Any]]:
         gpu_norm = str(gpu_type).strip().upper() if gpu_type else None
         with self._connect() as db:
@@ -1605,7 +1629,80 @@ class CloudJobStore:
                     "SELECT * FROM cloud_warm_sessions WHERE expires_at >= ? ORDER BY parked_at DESC",
                     (check_now,),
                 ).fetchall()
-            return [dict(r) for r in rows]
+            sessions: List[Dict[str, Any]] = []
+            for row in rows:
+                info = dict(row)
+                parked_at = float(info.get("parked_at") or 0.0)
+                expires_at = float(info.get("expires_at") or 0.0)
+                gpu_norm = str(info.get("gpu_type") or "T4").strip().upper()
+                idle_seconds = max(0.0, check_now - parked_at)
+                rate = float(GPU_CU_RATES.get(gpu_norm, GPU_CU_RATES.get("T4", 1.15)))
+                info["idle_seconds"] = idle_seconds
+                info["expires_in_seconds"] = max(0.0, expires_at - check_now)
+                info["cu_rate_per_hour"] = rate
+                info["idle_cu_estimate"] = round(idle_seconds / 3600.0 * rate, 3)
+                sessions.append(info)
+            return sessions
+
+    def record_warm_idle_usage(
+        self,
+        session_name: str,
+        gpu_type: str,
+        *,
+        parked_at: float,
+        ended_at: Optional[float] = None,
+        hourly_rate: Optional[float] = None,
+        source_job_id: Optional[str] = None,
+        measurement_source: str = CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+    ) -> Dict[str, Any]:
+        """Ghi CU tiêu tốn khi máy ảo giữ ấm chạy không tải vào ledger (tính vào hạn mức ngày)."""
+        start_ts = float(parked_at)
+        end_ts = max(start_ts, time.time() if ended_at is None else float(ended_at))
+        gpu_norm = str(gpu_type or "T4").strip().upper()
+        rate = float(hourly_rate) if hourly_rate and float(hourly_rate) > 0 else float(
+            GPU_CU_RATES.get(gpu_norm, GPU_CU_RATES.get("T4", 1.15))
+        )
+        idle_cu = round(((end_ts - start_ts) / 3600.0) * rate, 4)
+        ledger_job_id = f"warm:{session_name}"
+        ledger_attempt = int(start_ts)
+        notes = f"warm idle {round(end_ts - start_ts, 1)}s @ {rate} CU/h" + (
+            f"; source_job={source_job_id}" if source_job_id else ""
+        )
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO cloud_cost_ledger (
+                    job_id, attempt, gpu_type, task_type, cu_estimated, cu_buffer, cu_reserved,
+                    cu_observed, cu_reconciled, measurement_source, status, job_state, cleanup_verified,
+                    usage_started_at, usage_ended_at, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, 'warm_idle', 0, 0, 0, ?, ?, ?, ?, 'warm_idle', 1, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id, attempt) DO UPDATE SET
+                    cu_observed = MAX(cloud_cost_ledger.cu_observed, excluded.cu_observed),
+                    cu_reconciled = MAX(COALESCE(cloud_cost_ledger.cu_reconciled, 0), excluded.cu_reconciled),
+                    usage_ended_at = MAX(COALESCE(cloud_cost_ledger.usage_ended_at, 0), excluded.usage_ended_at),
+                    notes = excluded.notes,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    ledger_job_id, ledger_attempt, gpu_norm, idle_cu, idle_cu, str(measurement_source),
+                    CloudLedgerStatus.RECONCILED.value, start_ts, end_ts, notes, end_ts, end_ts,
+                ),
+            )
+        return {"job_id": ledger_job_id, "attempt": ledger_attempt, "cu": idle_cu, "idle_seconds": end_ts - start_ts}
+
+    def _record_reclaimed_warm_idle(self, w_row: Dict[str, Any], *, ended_at: float) -> None:
+        try:
+            if w_row.get("parked_at") is None:
+                return
+            self.record_warm_idle_usage(
+                str(w_row.get("session_name") or ""),
+                str(w_row.get("gpu_type") or "T4"),
+                parked_at=float(w_row["parked_at"]),
+                ended_at=ended_at,
+                source_job_id=w_row.get("source_job_id"),
+            )
+        except Exception as exc:
+            logger.warning("Không ghi được CU giữ ấm khi thu hồi: %s", redact_secrets(str(exc)))
 
     def list_reclaimable_warm_sessions(
         self,
@@ -3252,6 +3349,7 @@ class CloudJobStore:
                     w_job_id = str(w_row.get("source_job_id") or f"warm:{s_name}")
                     if s_name not in active_names_warm:
                         self.remove_warm_session(s_name)
+                        self._record_reclaimed_warm_idle(w_row, ended_at=min(current_time, float(w_row.get("expires_at") or current_time)))
                         results.append({
                             "job_id": w_job_id,
                             "session_name": s_name,
@@ -3262,6 +3360,7 @@ class CloudJobStore:
                         cleanup_res = self._stop_and_verify_with_adapter(resolved_adapter, s_name)
                         if cleanup_res.get("verified_stopped"):
                             self.remove_warm_session(s_name)
+                            self._record_reclaimed_warm_idle(w_row, ended_at=current_time)
                             results.append({
                                 "job_id": w_job_id,
                                 "session_name": s_name,

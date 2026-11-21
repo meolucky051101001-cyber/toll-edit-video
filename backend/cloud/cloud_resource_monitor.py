@@ -303,4 +303,3 @@ _monitor = CloudSessionResourceMonitor()
 def get_cloud_session_resource_snapshot(session_names: Iterable[str], *,
                                         owners: Optional[Mapping[str, str]] = None) -> List[Dict[str, Any]]:
     return _monitor.snapshot(session_names, owners=owners)
-

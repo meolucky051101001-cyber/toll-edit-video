@@ -158,6 +158,13 @@ def test_gpu_check_uses_no_video_and_verifies_teardown(tmp_path, scenario, error
     assert adapter.sessions_stopped == ([saved.session_name] if stopped else [])
     assert not store.list_warm_sessions()
     assert store.get_cu_budget_info()["unreconciled_count"] == int(scenario == "cleanup_uncertain")
+    if scenario in {"refused", "no_capacity"}:
+        assert saved.cleanup_status == "verified"
+        assert saved.cu_actual == 0.0
+        ledger = store.list_cost_ledger(job_id=job.job_id)
+        assert ledger and ledger[0]["cu_observed"] == 0.0
+        next_job = store.enqueue("", video_name="next", gpu_type="L4")
+        assert store.claim_job(next_job.job_id, "next-job") is not None
 
 
 def test_gpu_check_accepts_provider_hardware_while_kernel_is_booting(tmp_path):
@@ -183,3 +190,50 @@ def test_gpu_check_accepts_provider_hardware_while_kernel_is_booting(tmp_path):
     assert orch.process_job(claimed, owner_id="gpu-test")
     assert store.get_job(job.job_id).state == "completed"
     assert len(adapter.sessions_stopped) == 1
+
+
+@pytest.mark.parametrize("timeout_stage", ["create_session", "gpu_check"])
+@pytest.mark.parametrize(
+    ("stop_succeeds", "cleanup_status"),
+    [(True, "verified"), (False, "failed_retry_needed")],
+)
+def test_gpu_check_timeout_stops_potentially_allocated_session(
+    tmp_path,
+    timeout_stage,
+    stop_succeeds,
+    cleanup_status,
+):
+    class Adapter(_Phase5Adapter):
+        def __init__(self):
+            super().__init__()
+            self.stop_calls = []
+
+        def create_session(self, session_name, gpu="T4"):
+            result = super().create_session(session_name, gpu=gpu)
+            if timeout_stage == "create_session":
+                raise TimeoutError("session creation timed out after allocation")
+            return result
+
+        def stop_session(self, session_name):
+            self.stop_calls.append(session_name)
+            if not stop_succeeds:
+                return False, "stop was not verified"
+            return super().stop_session(session_name)
+
+        def exec_argv(self, session_name, argv, **kwargs):
+            assert argv[0] == "nvidia-smi"
+            raise TimeoutError("GPU check timed out")
+
+    store = CloudJobStore(tmp_path / "gpu-timeout.db", rollout_controlled=False)
+    adapter = Adapter()
+    orch = CloudOrchestrator(store=store, adapter=adapter)
+    job = store.enqueue("", video_name="GPU check", task_type=GPU_CHECK_TASK, gpu_type="L4")
+    claimed = store.claim_job(job.job_id, "gpu-timeout")
+
+    assert orch.process_job(claimed, owner_id="gpu-timeout") is False
+
+    saved = store.get_job(job.job_id)
+    assert saved.state == "failed"
+    assert saved.cleanup_status == cleanup_status
+    assert adapter.stop_calls == [saved.session_name]
+    assert adapter.sessions_stopped == ([saved.session_name] if stop_succeeds else [])

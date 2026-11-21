@@ -51,6 +51,40 @@ def _enqueue_and_claim(store: CloudJobStore, video_path: Path, *, owner_id: str 
     return claimed
 
 
+def _run_stubbed_openai_asr(tmp_path, monkeypatch, raw_segments, windows, *, with_original=False):
+    sample_count = max(1, round(max((window["end"] for window in windows), default=1.0) * 16000))
+    vocal_audio, original_audio = [0] * sample_count, [1] * sample_count
+    calls = []
+
+    def transcribe(audio, **_options):
+        calls.append(audio)
+        return {"segments": [dict(segment) for segment in raw_segments]}
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)))
+    monkeypatch.setitem(
+        sys.modules,
+        "whisper",
+        SimpleNamespace(
+            load_audio=lambda _path: original_audio,
+            load_model=lambda *_args, **_kwargs: SimpleNamespace(transcribe=transcribe),
+        ),
+    )
+    monkeypatch.setattr(
+        full_pipeline,
+        "_asr_speech_audio",
+        lambda *_args: (
+            vocal_audio,
+            {"speech_windows_seconds": windows, "track_windows_seconds": {"original": windows}},
+        ),
+    )
+    monkeypatch.setattr(full_pipeline, "validate_asr_source_timeline", lambda *_args: None)
+    output_srt = tmp_path / "confidence.srt"
+    kwargs = {"reference_audio_path": "original.wav"} if with_original else {}
+    result = full_pipeline.step3_asr_whisper("vocals.wav", str(output_srt), **kwargs)
+    audit = json.loads(output_srt.with_suffix(".asr.json").read_text(encoding="utf-8"))
+    return result, audit, calls, vocal_audio, original_audio, output_srt
+
+
 # ---------------------------------------------------------------------------
 # 1. Translation Validation Tests
 # ---------------------------------------------------------------------------
@@ -194,6 +228,111 @@ def test_asr_prefers_original_and_retries_invalid_output_once_then_fails_closed(
     assert bool(audit["initial_low_confidence_segments"]) == (retry_cause == "low_confidence")
     assert bool(audit["initial_alignment_error"]) == (retry_cause == "alignment")
     assert bool(audit["uncovered_speech"] or audit["low_confidence_segments"] or audit["alignment_error"]) == (not retry_recovers)
+
+
+def test_asr_drops_tolerable_short_low_confidence_segment_after_vocals_retry(tmp_path, monkeypatch):
+    raw_segments = [
+        {"start": 0.0, "end": 6.0, "text": "first good"},
+        {"start": 6.0, "end": 12.0, "text": "second good"},
+        {"start": 12.0, "end": 18.0, "text": "third good"},
+        {"start": 18.0, "end": 24.0, "text": "fourth good"},
+        {"start": 24.0, "end": 26.5, "text": "before tail"},
+        {"start": 26.5, "end": 26.7, "text": "false tail", "avg_logprob": -1.31},
+        {"start": 26.7, "end": 30.0, "text": "after tail"},
+    ]
+    result, audit, calls, vocal_audio, original_audio, output_srt = _run_stubbed_openai_asr(
+        tmp_path,
+        monkeypatch,
+        raw_segments,
+        [{"start": 0.0, "end": 30.0}],
+        with_original=True,
+    )
+
+    assert calls == [original_audio, vocal_audio]
+    assert audit["recognition_track"] == "vocals_retry"
+    assert "false tail" not in [segment["text"] for segment in audit["segments"]]
+    assert "false tail" not in [segment["text"] for segment in result]
+    assert audit["low_confidence_segments"] == [
+        {"start": 26.5, "end": 26.7, "avg_logprob": -1.31}
+    ]
+    assert audit["dropped_low_confidence_segments"] == [
+        {"start": 26.5, "end": 26.7, "avg_logprob": -1.31, "text": "false tail"}
+    ]
+    assert "false tail" not in output_srt.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "low_confidence_segment",
+    [
+        {"start": 2.0, "end": 4.0, "text": "long tail", "avg_logprob": -1.3},
+        {"start": 4.0, "end": 4.3, "text": "severe tail", "avg_logprob": -2.5},
+    ],
+)
+def test_asr_rejects_blocking_low_confidence_segments(tmp_path, monkeypatch, low_confidence_segment):
+    if low_confidence_segment["start"] == 2.0:
+        raw_segments = [
+            {"start": 0.0, "end": 2.0, "text": "before"},
+            low_confidence_segment,
+            {"start": 4.0, "end": 10.0, "text": "after"},
+        ]
+    else:
+        raw_segments = [
+            {"start": 0.0, "end": 4.0, "text": "before"},
+            low_confidence_segment,
+            {"start": 4.3, "end": 10.0, "text": "after"},
+        ]
+
+    with pytest.raises(full_pipeline.PipelineStageError, match="ASR có độ tin cậy quá thấp") as error:
+        _run_stubbed_openai_asr(tmp_path, monkeypatch, raw_segments, [{"start": 0.0, "end": 10.0}])
+
+    assert error.value.error_code == "ASR_TIMING_INVALID"
+    audit_path = tmp_path / "confidence.asr.json"
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit["dropped_low_confidence_segments"] == []
+
+
+def test_asr_rejects_tolerable_segments_over_ten_percent_of_speech_duration(tmp_path, monkeypatch):
+    raw_segments = []
+    cursor = 0.0
+    for index in range(5):
+        raw_segments.append({"start": cursor, "end": cursor + 1.0, "text": f"good {index}"})
+        cursor += 1.0
+        raw_segments.append(
+            {
+                "start": cursor,
+                "end": cursor + 0.3,
+                "text": f"short {index}",
+                "avg_logprob": -1.2,
+            }
+        )
+        cursor += 0.3
+    raw_segments.append({"start": cursor, "end": 10.0, "text": "last good"})
+
+    with pytest.raises(full_pipeline.PipelineStageError, match="ASR có độ tin cậy quá thấp") as error:
+        _run_stubbed_openai_asr(tmp_path, monkeypatch, raw_segments, [{"start": 0.0, "end": 10.0}])
+
+    assert error.value.error_code == "ASR_TIMING_INVALID"
+    audit = json.loads((tmp_path / "confidence.asr.json").read_text(encoding="utf-8"))
+    assert len(audit["low_confidence_segments"]) == 5
+    assert audit["dropped_low_confidence_segments"] == []
+
+
+def test_asr_rechecks_coverage_after_dropping_tolerable_segments(tmp_path, monkeypatch):
+    raw_segments = [
+        {"start": 0.0, "end": 2.7, "text": "before"},
+        {"start": 2.7, "end": 3.0, "text": "short", "avg_logprob": -1.3},
+        {"start": 5.9, "end": 10.0, "text": "after"},
+    ]
+
+    with pytest.raises(full_pipeline.PipelineStageError, match="ASR bỏ trống vùng có lời") as error:
+        _run_stubbed_openai_asr(tmp_path, monkeypatch, raw_segments, [{"start": 0.0, "end": 10.0}])
+
+    assert error.value.error_code == "ASR_TIMING_INVALID"
+    audit = json.loads((tmp_path / "confidence.asr.json").read_text(encoding="utf-8"))
+    assert audit["dropped_low_confidence_segments"] == [
+        {"start": 2.7, "end": 3.0, "avg_logprob": -1.3, "text": "short"}
+    ]
+    assert audit["uncovered_speech"] == [{"start": 2.7, "end": 5.9}]
 
 
 def test_asr_does_not_decode_when_vad_finds_no_speech(tmp_path, monkeypatch):
