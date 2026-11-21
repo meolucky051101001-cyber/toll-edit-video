@@ -773,6 +773,7 @@ def test_separator_warm_session_reuse_teardown_ram_guard_and_cpu_offload(tmp_pat
 # ---------------------------------------------------------------------------
 
 def test_cpu_inplace_blur_accuracy_3stage_pipeline_stop_and_nvenc_preset(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
     from backend import batch_control
     from backend import v1_gpu_subtitle_blur as gpu_blur
     from backend import video_utils

@@ -6,6 +6,12 @@ giai đoạn nâng cấp CapCut (đối chứng tại baseline 592276d — 0 reg
 Cách gỡ skip: triage test, sửa cho khớp hành vi hiện tại rồi xóa nodeid khỏi
 QUARANTINE_STALE bên dưới. Lý do theo file nằm trong FILE_REASONS.
 """
+import os
+
+os.environ["AUTODUB_CLOUD_WARM_REUSE"] = "0"
+os.environ["AUTODUB_CLOUD_TEST_OUTPUT_GUARD"] = "1"
+os.environ["AUTODUB_DISABLE_REPO_PROGRESS_FILE"] = "1"
+
 import pytest
 
 FILE_REASONS = {

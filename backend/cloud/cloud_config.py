@@ -2,16 +2,20 @@
 cloud_config.py - Cấu hình hệ thống Cloud GPU cho Tool V1.
 """
 
+import logging
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, List, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = BASE_DIR.parent
 
+logger = logging.getLogger(__name__)
+
 # Tự động nạp .env nếu chưa có trong biến môi trường.
 # Khi fallback sang .env của checkout khác, không ghi đè workspace/token cục bộ của checkout hiện tại.
 _LOCAL_ENV_PATH = BACKEND_DIR / ".env"
+_EXTERNAL_ENV_PATH = Path(r"C:\tool v1\backend\.env")
 _ISOLATED_ENV_KEYS = {
     "AUTODUB_WORKSPACE",
     "AUTODUB_LOCAL_TOKEN",
@@ -19,12 +23,25 @@ _ISOLATED_ENV_KEYS = {
     "AUTODUB_CLOUD_OUTPUT_DIR",
     "AUTODUB_INPUT_DIR",
 }
-for _env_candidate in [
-    _LOCAL_ENV_PATH,
-    Path(r"C:\tool v1\backend\.env"),
-]:
-    if _env_candidate.exists():
-        _is_external_fallback = _env_candidate != _LOCAL_ENV_PATH
+
+
+def _env_candidates() -> List[Tuple[Path, bool]]:
+    candidates = [(_LOCAL_ENV_PATH, False)]
+    if _EXTERNAL_ENV_PATH.exists():
+        if os.getenv("AUTODUB_ALLOW_EXTERNAL_ENV_FALLBACK") == "1":
+            candidates.append((_EXTERNAL_ENV_PATH, True))
+        else:
+            logger.warning(
+                "Bỏ qua file .env bên ngoài %s; đặt AUTODUB_ALLOW_EXTERNAL_ENV_FALLBACK=1 để cho phép.",
+                _EXTERNAL_ENV_PATH,
+            )
+    return candidates
+
+
+def _load_environment() -> None:
+    for _env_candidate, _is_external_fallback in _env_candidates():
+        if not _env_candidate.exists():
+            continue
         try:
             with open(_env_candidate, "r", encoding="utf-8") as _ef:
                 for _line in _ef:
@@ -37,7 +54,14 @@ for _env_candidate in [
                             os.environ[_k] = _v
             break
         except Exception:
-            pass
+            continue
+
+
+_load_environment()
+
+_cloud_cache_backend = os.getenv("AUTODUB_CLOUD_CACHE_BACKEND", "none").strip().lower()
+if _cloud_cache_backend not in {"none", "gdrive"}:
+    _cloud_cache_backend = "none"
 
 WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(BACKEND_DIR.parent / "workspace")))
 
@@ -77,6 +101,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "warm_session_handoff_seconds": int(os.getenv("AUTODUB_CLOUD_WARM_HANDOFF_SECONDS", "180")),
     "warm_session_keepalive_seconds": int(os.getenv("AUTODUB_CLOUD_WARM_KEEPALIVE_SECONDS", "300")),
     "warm_session_keepalive_max_seconds": int(os.getenv("AUTODUB_CLOUD_WARM_KEEPALIVE_MAX_SECONDS", "1800")),
+    "warm_session_reuse_enabled": os.getenv("AUTODUB_CLOUD_WARM_REUSE", "1").strip().lower() not in ("0", "false", "no"),
+    "cloud_gemini_keys_max": int(os.getenv("AUTODUB_CLOUD_GEMINI_KEYS_MAX", "2")),
+    "cloud_asr_engine": os.getenv("AUTODUB_CLOUD_ASR_ENGINE", "openai-whisper").strip().lower() or "openai-whisper",
+    "cloud_cache_backend": _cloud_cache_backend,
+    "cloud_cache_drive_root": os.getenv(
+        "AUTODUB_CLOUD_CACHE_DRIVE_ROOT", "/content/drive/MyDrive/AutoDubCloudCache"
+    ).strip()
+    or "/content/drive/MyDrive/AutoDubCloudCache",
+    "cloud_cache_save_enabled": os.getenv("AUTODUB_CLOUD_CACHE_SAVE", "1").strip().lower()
+    not in ("0", "false", "no"),
+    "cloud_cache_save_timeout_seconds": int(
+        os.getenv("AUTODUB_CLOUD_CACHE_SAVE_TIMEOUT_SECONDS", "900")
+    ),
+    "cloud_drive_mount_timeout_seconds": int(
+        os.getenv("AUTODUB_CLOUD_DRIVE_MOUNT_TIMEOUT_SECONDS", "180")
+    ),
     "cloud_poll_max_interval_seconds": float(os.getenv("AUTODUB_CLOUD_POLL_MAX_INTERVAL_SECONDS", "30")),
     "cloud_upload_retry_delays_seconds": [5, 15],
     "wsl_distro": os.getenv("AUTODUB_CLOUD_WSL_DISTRO", "Ubuntu"),

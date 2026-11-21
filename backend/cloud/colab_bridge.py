@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import posixpath
 import re
 import shlex
 import stat
@@ -176,9 +177,11 @@ def _run_wsl_argv(
     distro: Optional[str] = None,
     user: Optional[str] = None,
     stdin_text: Optional[str] = None,
+    stdin: Any = None,
     extra_secrets: Sequence[str] = (),
     cancel_check: Optional[Callable[[], bool]] = None,
     session_name: Optional[str] = None,
+    log_failure_output: bool = True,
 ) -> Tuple[int, str, str]:
     """Execute a binary inside WSL2 via strict argv list (never bash -c)."""
     target_distro = distro or DEFAULT_CONFIG["wsl_distro"]
@@ -201,13 +204,16 @@ def _run_wsl_argv(
 
     if not use_popen:
         try:
-            proc = subprocess.run(
-                cmd_args,
-                input=stdin_text.encode("utf-8") if stdin_text is not None else None,
-                capture_output=True,
-                timeout=timeout,
-                shell=False,
-            )
+            run_kwargs: Dict[str, Any] = {
+                "capture_output": True,
+                "timeout": timeout,
+                "shell": False,
+            }
+            if stdin_text is not None:
+                run_kwargs["input"] = stdin_text.encode("utf-8")
+            elif stdin is not None:
+                run_kwargs["stdin"] = stdin
+            proc = subprocess.run(cmd_args, **run_kwargs)
             stdout = redact_secrets(
                 proc.stdout.decode("utf-8", errors="replace").strip(),
                 extra_secrets=extra_secrets,
@@ -218,12 +224,15 @@ def _run_wsl_argv(
             )
 
             if proc.returncode != 0:
-                logger.warning(
-                    "WSL argv failed (rc=%d): %s | stderr: %s",
-                    proc.returncode,
-                    program,
-                    stderr[:300],
-                )
+                if log_failure_output:
+                    logger.warning(
+                        "WSL argv failed (rc=%d): %s | stderr: %s",
+                        proc.returncode,
+                        program,
+                        stderr[:300],
+                    )
+                else:
+                    logger.warning("WSL argv failed (rc=%d): %s", proc.returncode, program)
             return proc.returncode, stdout, stderr
 
         except subprocess.TimeoutExpired:
@@ -250,7 +259,7 @@ def _run_wsl_argv(
     try:
         popen_obj = subprocess.Popen(
             cmd_args,
-            stdin=subprocess.PIPE if stdin_text is not None else None,
+            stdin=subprocess.PIPE if stdin_text is not None else stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
@@ -336,12 +345,15 @@ def _run_wsl_argv(
 
         rc = popen_obj.returncode if popen_obj.returncode is not None else -2
         if rc != 0:
-            logger.warning(
-                "WSL argv failed (rc=%d): %s | stderr: %s",
-                rc,
-                program,
-                stderr[:300],
-            )
+            if log_failure_output:
+                logger.warning(
+                    "WSL argv failed (rc=%d): %s | stderr: %s",
+                    rc,
+                    program,
+                    stderr[:300],
+                )
+            else:
+                logger.warning("WSL argv failed (rc=%d): %s", rc, program)
         return rc, stdout, stderr
 
     except Exception as exc:
@@ -372,9 +384,11 @@ def _run_wsl_colab_argv(
     timeout: int = 300,
     distro: Optional[str] = None,
     user: Optional[str] = None,
+    stdin: Any = None,
     extra_secrets: Sequence[str] = (),
     cancel_check: Optional[Callable[[], bool]] = None,
     session_name: Optional[str] = None,
+    log_failure_output: bool = True,
 ) -> Tuple[int, str, str]:
     """Execute Colab CLI in WSL2 via `env` + strict argv without bash interpolation."""
     env_args = [
@@ -391,10 +405,56 @@ def _run_wsl_colab_argv(
         timeout=timeout,
         distro=distro,
         user=user,
+        stdin=stdin,
         extra_secrets=extra_secrets,
         cancel_check=cancel_check,
         session_name=session_name,
+        log_failure_output=log_failure_output,
     )
+
+
+def mount_drive(
+    session_name: str,
+    mount_path: str = "/content/drive",
+    *,
+    timeout: int = 180,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[bool, str]:
+    raw_path = str(mount_path)
+    path_parts = raw_path.split("/")
+    normalized_path = posixpath.normpath(raw_path)
+    if (
+        has_control_chars(raw_path)
+        or not raw_path.startswith("/")
+        or ".." in path_parts
+        or normalized_path == "/content"
+        or not normalized_path.startswith("/content/")
+    ):
+        return False, "Đường dẫn gắn Google Drive không hợp lệ."
+    try:
+        safe_session = validate_session_name(session_name)
+    except CloudValidationError:
+        return False, "Tên session Colab không hợp lệ."
+
+    rc, stdout, stderr = _run_wsl_colab_argv(
+        ["drivemount", "-s", safe_session, normalized_path],
+        timeout=max(1, int(timeout)),
+        stdin=subprocess.DEVNULL,
+        cancel_check=cancel_check,
+        session_name=safe_session,
+        log_failure_output=False,
+    )
+    output = f"{stdout}\n{stderr}"
+    if "[colab] REQUIRED: Google Drive Authorization needed." in output:
+        return (
+            False,
+            "Google Drive cần được ủy quyền một lần. Hãy chạy `colab drivemount` tương tác trong WSL rồi hoàn tất cấp quyền Google.",
+        )
+    if rc == 0:
+        return True, "Đã gắn Google Drive."
+    if rc == -3:
+        return False, "Lệnh gắn Google Drive đã bị hủy."
+    return False, f"Không thể gắn Google Drive qua Colab CLI (mã lỗi {rc})."
 
 
 def _write_wsl_temp_script(wsl_path: str, content: str) -> None:
@@ -634,7 +694,7 @@ def exec_script(
     combined = redact_secrets(f"{stdout}\n{stderr}".strip())
     if rc == -3:
         return False, f"Tác vụ đã bị hủy bởi yêu cầu dừng. {combined}".strip() if combined else "Tác vụ đã bị hủy bởi yêu cầu dừng."
-    is_ok = (rc == 0) and ("EXEC_CMD_FAILED_WITH_CODE:" not in combined) and ("SyntaxError" not in combined)
+    is_ok = (rc == 0) and ("EXEC_CMD_FAILED_WITH_CODE:" not in combined)
     return is_ok, combined
 
 
@@ -791,7 +851,7 @@ def exec_argv(
         combined = redact_secrets(f"{stdout}\n{stderr}".strip(), extra_secrets=secret_values)
         if rc == -3:
             return False, f"Tác vụ đã bị hủy bởi yêu cầu dừng. {combined}".strip() if combined else "Tác vụ đã bị hủy bởi yêu cầu dừng."
-        is_ok = (rc == 0) and ("EXEC_CMD_FAILED_WITH_CODE:" not in combined) and ("SyntaxError" not in combined)
+        is_ok = (rc == 0) and ("EXEC_CMD_FAILED_WITH_CODE:" not in combined)
         return is_ok, combined
 
     finally:
@@ -1313,7 +1373,6 @@ def run_argv_monitored(
                 is_ok = (
                     (remote_rc == 0)
                     and ("EXEC_CMD_FAILED_WITH_CODE:" not in final_log)
-                    and ("SyntaxError" not in final_log)
                 )
                 return is_ok, final_log
 
@@ -1539,6 +1598,21 @@ class ColabProviderAdapter:
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Tuple[bool, str]:
         return create_session(session_name, gpu=gpu, cancel_check=cancel_check)
+
+    def mount_drive(
+        self,
+        session_name: str,
+        mount_path: str = "/content/drive",
+        *,
+        timeout: int = 180,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[bool, str]:
+        return mount_drive(
+            session_name,
+            mount_path,
+            timeout=timeout,
+            cancel_check=cancel_check,
+        )
 
     def upload_file(
         self,
