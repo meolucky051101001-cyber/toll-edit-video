@@ -222,10 +222,11 @@ def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_b
     cut_right = right < 1. and any(b[2] >= right - tolerance for b in boxes)
     if not (cut_left or cut_right):
         return boxes
-    return _observe_caption_boxes(
+    wider = _observe_caption_boxes(
         reader, frame, band_top=band_top, band_bottom=band_bottom,
         x_bounds=(0. if cut_left else left, 1. if cut_right else right),
     )
+    return wider or boxes  # a wider pass that sees nothing must not drop the measured caption
 
 
 def _observe_caption_boxes(reader, frame, *, band_top, band_bottom, x_bounds):
