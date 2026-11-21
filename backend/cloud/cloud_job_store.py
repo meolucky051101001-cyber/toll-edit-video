@@ -1450,7 +1450,20 @@ class CloudJobStore:
                     "SELECT * FROM cloud_warm_sessions WHERE expires_at >= ? ORDER BY parked_at DESC",
                     (check_now,),
                 ).fetchall()
-            return [dict(r) for r in rows]
+            sessions: List[Dict[str, Any]] = []
+            for row in rows:
+                info = dict(row)
+                parked_at = float(info.get("parked_at") or 0.0)
+                expires_at = float(info.get("expires_at") or 0.0)
+                gpu_norm = str(info.get("gpu_type") or "T4").strip().upper()
+                idle_seconds = max(0.0, check_now - parked_at)
+                rate = float(GPU_CU_RATES.get(gpu_norm, GPU_CU_RATES.get("T4", 1.15)))
+                info["idle_seconds"] = idle_seconds
+                info["expires_in_seconds"] = max(0.0, expires_at - check_now)
+                info["cu_rate_per_hour"] = rate
+                info["idle_cu_estimate"] = round(idle_seconds / 3600.0 * rate, 3)
+                sessions.append(info)
+            return sessions
 
     def record_warm_idle_usage(
         self,

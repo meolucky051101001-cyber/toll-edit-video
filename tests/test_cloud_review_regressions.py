@@ -224,8 +224,9 @@ def test_cancel_during_allocation_stops_vm_and_never_uploads(cloud):
     assert cloud.store.get_cu_spent_today() == pytest.approx(.575)
 
 
-def test_upload_failure_is_billed_and_cleanup_failure_blocks_admission(cloud):
+def test_upload_failure_is_billed_and_cleanup_failure_blocks_admission(cloud, monkeypatch):
     runner, provider = fake_provider(cloud)
+    monkeypatch.setitem(DEFAULT_CONFIG, 'cloud_upload_retry_delays_seconds', [0, 0])
     job = claim(cloud)
     def upload(*args, **kwargs):
         cloud.now[0] += 1800
@@ -236,7 +237,8 @@ def test_upload_failure_is_billed_and_cleanup_failure_blocks_admission(cloud):
     saved = cloud.store.get_job(job.job_id)
     assert saved.state == 'failed'
     assert saved.cleanup_status != 'verified'
-    assert cloud.store.get_cu_spent_today() == pytest.approx(.575)
+    assert provider.upload_file.call_count == 3
+    assert cloud.store.get_cu_spent_today() == pytest.approx(1.725)
     assert cloud.store.get_cu_budget_info()['unreconciled_count'] == 1
     assert cloud.store.claim_job(cloud.store.enqueue(str(cloud.source)).job_id, owner_id='new') is None
 

@@ -38,6 +38,9 @@ PIPELINE_RESULT_PREFIX = "PIPELINE_RESULT_JSON:"
 PIPELINE_VERSION = "v1_cloud_phase9_full_v1_parity_v1"
 WHISPER_MODEL = "large-v3-turbo"
 ASR_MIN_AVG_LOGPROB = -1.0  # Whisper's default decoder failure threshold.
+ASR_SEVERE_AVG_LOGPROB = -2.0
+ASR_TOLERATED_LOW_CONF_MAX_SECONDS = 1.5
+ASR_TOLERATED_LOW_CONF_MAX_RATIO = 0.10
 
 VOICE_FEMALE_PARAM = "BV562_streaming"
 VOICE_MALE_PARAM = "BV075_streaming"
@@ -190,7 +193,7 @@ _STEP_PERCENT_MAP = {
 
 def _write_pipeline_progress(percent: int, step_num: int, total: int, message: str) -> None:
     if (
-        os.getenv("PYTEST_CURRENT_TEST")
+        os.getenv("AUTODUB_DISABLE_REPO_PROGRESS_FILE") == "1"
         and os.getenv("AUTODUB_ALLOW_TEST_PROGRESS_FILE") != "1"
         and (Path.cwd() / ".git").exists()
     ):
@@ -467,13 +470,56 @@ def _asr_uncovered_speech(raw_segments: list[dict], windows: list[dict]) -> list
 
 
 def _asr_low_confidence(raw_segments: list[dict]) -> list[dict]:
-    """Reject severely uncertain decoder output even when its timestamps fit."""
+    """List every below-threshold decoder segment for retry and audit."""
     failures = []
     for segment in raw_segments:
         score = float(segment.get("avg_logprob", 0.0))
         if not math.isfinite(score) or score < ASR_MIN_AVG_LOGPROB:
             failures.append({"start": segment["start"], "end": segment["end"], "avg_logprob": score})
     return failures
+
+
+def _partition_asr_low_confidence(
+    raw_segments: list[dict],
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    uncertain = _asr_low_confidence(raw_segments)
+    tolerated = []
+    blocking = []
+    dropped = []
+    for segment in raw_segments:
+        score = float(segment.get("avg_logprob", 0.0))
+        if math.isfinite(score) and score >= ASR_MIN_AVG_LOGPROB:
+            continue
+        try:
+            start, end = float(segment["start"]), float(segment["end"])
+            duration = end - start
+        except (KeyError, TypeError, ValueError):
+            start = end = duration = float("nan")
+        detail = {"start": segment.get("start"), "end": segment.get("end"), "avg_logprob": score}
+        if (
+            math.isfinite(score)
+            and score >= ASR_SEVERE_AVG_LOGPROB
+            and math.isfinite(duration)
+            and 0.0 <= duration <= ASR_TOLERATED_LOW_CONF_MAX_SECONDS
+        ):
+            tolerated.append(segment)
+            dropped.append({"start": start, "end": end, "avg_logprob": score, "text": segment.get("text", "")})
+        else:
+            blocking.append(detail)
+    return uncertain, tolerated, blocking, dropped
+
+
+def _asr_speech_duration(raw_segments: list[dict], windows: list[dict]) -> float:
+    duration_sources = windows if windows else raw_segments
+    total = 0.0
+    for item in duration_sources:
+        try:
+            duration = float(item["end"]) - float(item["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(duration) and duration > 0.0:
+            total += duration
+    return total
 
 
 def _asr_alignment_error(raw_segments: list[dict], windows: list[dict]) -> str | None:
@@ -484,9 +530,44 @@ def _asr_alignment_error(raw_segments: list[dict], windows: list[dict]) -> str |
     return None
 
 
+def _faster_whisper_result_to_dict(segments_iter) -> dict:
+    segments = []
+    for idx, segment in enumerate(segments_iter or ()):
+        words = []
+        for word in getattr(segment, "words", None) or ():
+            words.append(
+                {
+                    "word": str(getattr(word, "word", "") or ""),
+                    "start": float(getattr(word, "start", 0.0) or 0.0),
+                    "end": float(getattr(word, "end", 0.0) or 0.0),
+                    "probability": float(getattr(word, "probability", 0.0) or 0.0),
+                }
+            )
+        text = str(getattr(segment, "text", "") or "")
+        segments.append(
+            {
+                "id": idx,
+                "seek": 0,
+                "start": float(getattr(segment, "start", 0.0) or 0.0),
+                "end": float(getattr(segment, "end", 0.0) or 0.0),
+                "text": text,
+                "tokens": [int(token) for token in (getattr(segment, "tokens", None) or ())],
+                "temperature": float(getattr(segment, "temperature", 0.0) or 0.0),
+                "avg_logprob": float(getattr(segment, "avg_logprob", 0.0) or 0.0),
+                "compression_ratio": float(getattr(segment, "compression_ratio", 0.0) or 0.0),
+                "no_speech_prob": float(getattr(segment, "no_speech_prob", 0.0) or 0.0),
+                "words": words,
+            }
+        )
+    return {"text": "".join(segment["text"] for segment in segments), "segments": segments}
+
+
 def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path: str | None = None,
                       audit_path: str | None = None) -> list[dict]:
-    log_step(3, 8, f"Nhận dạng giọng nói (ASR) bằng Whisper {WHISPER_MODEL}...")
+    engine = os.getenv("AUTODUB_CLOUD_ASR_ENGINE", "openai-whisper").strip().lower() or "openai-whisper"
+    if engine not in ("openai-whisper", "faster-whisper"):
+        raise ValueError("AUTODUB_CLOUD_ASR_ENGINE phải là openai-whisper hoặc faster-whisper.")
+    log_step(3, 8, f"Nhận dạng giọng nói (ASR) bằng {engine} {WHISPER_MODEL}...")
     import torch
     import whisper
 
@@ -494,6 +575,8 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
     print(f"  -> Whisper sử dụng thiết bị: {device}", flush=True)
     audio, audit = _asr_speech_audio(audio_path, reference_audio_path)
     audit["model"] = WHISPER_MODEL
+    audit["engine"] = engine
+    audit["device"] = device
     # Exhausted temperature fallback returned mixed-language gibberish at T=1.0
     # on a real clip. Use beam search and retain confidence failures for retry.
     decode_options = {"verbose": False, "word_timestamps": True,
@@ -514,10 +597,30 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
     # 30-second window. DTW word alignment uses the actual audio frames and refines
     # segment boundaries; do not repair decoder timestamps by clipping/dropping cues.
     if windows:
-        # Match Local V1's model family. Large-v3 dropped real speech on the
-        # long Canary even after an original-track retry with valid clip bounds.
-        model = whisper.load_model(WHISPER_MODEL, device=device)
-        result = model.transcribe(primary_audio, clip_timestamps=clips, **decode_options)
+        if engine == "faster-whisper":
+            from faster_whisper import WhisperModel
+
+            compute_type = "int8_float16" if device == "cuda" else "int8"
+            model = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
+        else:
+            # Match Local V1's model family. Large-v3 dropped real speech on the
+            # long Canary even after an original-track retry with valid clip bounds.
+            model = whisper.load_model(WHISPER_MODEL, device=device)
+
+        def _transcribe(target_audio, clip_timestamps):
+            if engine == "faster-whisper":
+                segments_iter, _info = model.transcribe(
+                    target_audio,
+                    beam_size=5,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                    word_timestamps=True,
+                    clip_timestamps=clip_timestamps,
+                )
+                return _faster_whisper_result_to_dict(segments_iter)
+            return model.transcribe(target_audio, clip_timestamps=clip_timestamps, **decode_options)
+
+        result = _transcribe(primary_audio, clips)
     else:
         result = {"segments": [], "text": ""}
     # Validate both tracks identically and preserve rejected output for review.
@@ -532,20 +635,39 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
         audit["initial_segments"] = result.get("segments", [])
         print("  -> ASR audio gốc chưa đạt; nhận dạng vocal một lần với cùng chính sách kiểm tra.", flush=True)
         clips = _whisper_clip_timestamps(windows, len(audio))
-        result = model.transcribe(audio, clip_timestamps=clips, **decode_options)
+        result = _transcribe(audio, clips)
         audit["recognition_track"] = "vocals_retry"
         audit["decoder_clip_timestamps"] = clips
         gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
         uncertain = _asr_low_confidence(result.get("segments", []))
         alignment_error = _asr_alignment_error(result.get("segments", []), windows)
+    uncertain, tolerated, blocking, dropped = _partition_asr_low_confidence(result.get("segments", []))
+    tolerated_duration = sum(float(segment["end"]) - float(segment["start"]) for segment in tolerated)
+    speech_duration = _asr_speech_duration(result.get("segments", []), windows)
+    confidence_budget_exceeded = tolerated_duration > speech_duration * ASR_TOLERATED_LOW_CONF_MAX_RATIO
+    low_confidence_blocking = bool(blocking) or confidence_budget_exceeded
+    if tolerated and not low_confidence_blocking:
+        tolerated_ids = {id(segment) for segment in tolerated}
+        result["segments"] = [
+            segment for segment in result.get("segments", []) if id(segment) not in tolerated_ids
+        ]
+        print(
+            f"  -> ASR bỏ {len(dropped)} đoạn ngắn độ tin cậy thấp ({tolerated_duration:.2f}s tổng).",
+            flush=True,
+        )
+    else:
+        dropped = []
+    gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
+    alignment_error = _asr_alignment_error(result.get("segments", []), windows)
     audit["uncovered_speech"] = gaps
     audit["low_confidence_segments"] = uncertain
+    audit["dropped_low_confidence_segments"] = dropped
     audit["alignment_error"] = alignment_error
     audit["segments"] = result.get("segments", [])
     audit_file.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
     if gaps:
         raise PipelineStageError("ASR_TIMING_INVALID", f"ASR bỏ trống vùng có lời {gaps}; chặn bản nhận dạng thiếu.")
-    if uncertain:
+    if low_confidence_blocking:
         raise PipelineStageError("ASR_TIMING_INVALID", f"ASR có độ tin cậy quá thấp {uncertain}; cần kiểm tra audio nguồn.")
     if alignment_error:
         raise PipelineStageError("ASR_TIMING_INVALID", alignment_error)
