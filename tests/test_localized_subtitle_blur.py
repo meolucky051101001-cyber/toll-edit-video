@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 import json
+import time
 import pytest
 
 from backend import subtitle_blur as blur
@@ -350,6 +351,7 @@ def test_renderer_reads_ass_geometry_and_keeps_text_after_blur(tmp_path):
     metrics = {}
     def fake_run(cmd, **kwargs):
         commands.append(cmd)
+        time.sleep(0.02)
         output.write_bytes(b"x" * 12000)
         return NS(returncode=0, stdout="", stderr="")
     with patch.object(v1_media_streams, "probe_main_video", return_value=MainVideo(0,720,1280,30,4,1,1,False)), \
@@ -361,6 +363,10 @@ def test_renderer_reads_ass_geometry_and_keeps_text_after_blur(tmp_path):
     assert metrics["blur_path"] == "ffmpeg_filtergraph"
     assert metrics["encoder"] == "h264_nvenc preset=p3"
     assert metrics["encode_seconds"] >= 0
+    assert metrics["render_fps"] == pytest.approx(
+        120 / metrics["encode_seconds"],
+        rel=0.03,
+    )
     graph = commands[0][commands[0].index("-vf") + 1]
     assert graph.index("boxblur=") < graph.index("subtitles=")
     assert "gte(t,0.400000)*lt(t,1.000000)" in graph

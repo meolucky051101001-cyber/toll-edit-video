@@ -808,8 +808,11 @@ def process_video(
             if source_duration > 0 and encode_seconds > 0:
                 render_metrics["realtime_factor"] = round(source_duration / encode_seconds, 3)
             source_fps = float(getattr(source_video, "fps", 0.0) or 0.0)
-            if source_fps > 0:
-                render_metrics["render_fps"] = round(source_fps, 3)
+            if source_fps > 0 and source_duration > 0 and encode_seconds > 0:
+                render_metrics["render_fps"] = round(
+                    source_fps * source_duration / encode_seconds,
+                    3,
+                )
             metrics.update(render_metrics)
 
         def _build_sub_filter(fw: int, fh: int, extra_post_blur: str = "") -> str:
