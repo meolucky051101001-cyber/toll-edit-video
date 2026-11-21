@@ -12,17 +12,25 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import psutil
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .cloud_contract import (
+    CHECKABLE_GPUS,
+    DASHBOARD_GPU_SETTING,
+    GPU_CHECK_TASK,
+    GPU_CU_RATES,
     admit_and_enqueue_job,
     fetch_provider_status_nonblocking,
     get_cloud_status_snapshot,
     request_job_cancellation,
+    resolve_cloud_source_channel,
     run_provider_action_nonblocking,
+    stamp_provider_usage_observation,
 )
 from .cloud_job_store import CloudJobStore
+from .cloud_job_store import MAX_CONCURRENT_JOBS
 from .cloud_security import (
     CloudValidationError,
     is_loopback_client,
@@ -33,7 +41,13 @@ from .cloud_security import (
     validate_session_name,
 )
 from .cloud_worker import get_cloud_worker, peek_cloud_worker
-from .cloud_telegram_bot import get_cloud_telegram_bot_status, peek_cloud_telegram_bot_worker
+from .cloud_telegram_bot import (
+    get_cloud_default_gpu,
+    get_cloud_telegram_bot_status,
+    peek_cloud_telegram_bot,
+    peek_cloud_telegram_bot_worker,
+)
+from .cloud_resource_monitor import get_cloud_session_resource_snapshot
 from .colab_bridge import (
     ColabProviderAdapter,
     abort_session_processes,
@@ -48,6 +62,58 @@ _ORIG_GET_USAGE = get_usage
 _ORIG_GET_SESSIONS = get_sessions
 
 logger = logging.getLogger("cloud.routes")
+
+
+def _read_provider_usage_observation() -> Dict[str, Any]:
+    usage = get_usage()
+    return stamp_provider_usage_observation(usage, observed_at=time.time()) if isinstance(usage, dict) else usage
+
+
+async def _fresh_usage_for_admission() -> Optional[Dict[str, Any]]:
+    snapshot = await asyncio.to_thread(store.get_provider_usage_snapshot)
+    if snapshot is not None and (snapshot.get("is_stale") or not snapshot.get("ok")):
+        probe = await asyncio.to_thread(
+            run_provider_action_nonblocking, _read_provider_usage_observation, timeout_seconds=8.0,
+        )
+        if probe.get("completed") and isinstance(probe.get("result"), dict):
+            return probe["result"]
+    return None
+
+
+def _checked_gpu_option(raw: Any) -> str:
+    gpu = raw.strip().upper() if isinstance(raw, str) else ""
+    if gpu not in CHECKABLE_GPUS:
+        raise HTTPException(status_code=400, detail="Chọn T4, L4, A100 hoặc H100.")
+    return gpu
+
+
+def _read_host_memory() -> Optional[Dict[str, Any]]:
+    """Physical RAM on the host running this node, not on a Colab VM."""
+    try:
+        memory = psutil.virtual_memory()
+    except (OSError, RuntimeError, psutil.Error):
+        return None
+    if memory.total <= 0:
+        return None
+    available = max(0, min(memory.available, memory.total))
+    used = memory.total - available
+    return {
+        "used_bytes": used,
+        "total_bytes": memory.total,
+        "percent_used": round(100 * used / memory.total, 1),
+    }
+
+
+def _worker_has_jobs(worker: Any) -> bool:
+    if worker is None:
+        return False
+    try:
+        get_jobs = getattr(worker, "get_current_jobs", None)
+        if callable(get_jobs):
+            return bool(get_jobs())
+        return worker.get_current_job() is not None
+    except Exception:
+        return False
 
 
 async def _verify_local_cloud_request(request: Request) -> None:
@@ -81,6 +147,36 @@ router = APIRouter(
 store = CloudJobStore()
 
 
+def _read_cloud_session_resources(active_jobs: list[Dict[str, Any]],
+                                  warm_sessions: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """Sample only sessions currently referenced by active jobs or unexpired warm rows."""
+    try:
+        active = {job["session_name"]: job for job in active_jobs if job.get("session_name")}
+        warm = {
+            item["session_name"]: item for item in warm_sessions
+            if item.get("session_name") and item["session_name"] not in active
+        }
+        owners = {name: f"{job['job_id']}:{job['attempt']}" for name, job in active.items()}
+        owners.update({name: f"warm:{item.get('source_job_id')}" for name, item in warm.items()})
+        samples = get_cloud_session_resource_snapshot([*active, *warm], owners=owners)
+        for sample in samples:
+            name = sample["session_name"]
+            job = active.get(name)
+            if job:
+                sample.update(job_id=job["job_id"], job_name=job["video_name"], job_state=job["state"],
+                              requested_gpu=job["gpu_type"], warm=False)
+                job_ram = sample.get("job_ram")
+                active_stage = {"preparing": "setup", "processing": "pipeline"}.get(job["state"])
+                if job_ram and job_ram["stage"] != active_stage:
+                    sample["job_ram"] = None
+            else:
+                sample.update(requested_gpu=warm[name].get("gpu_type"), warm=True, job_ram=None)
+        return samples
+    except Exception:
+        logger.warning("Unable to list Cloud-owned sessions for resource telemetry")
+        return []
+
+
 @router.get("/cloud", response_class=HTMLResponse)
 async def cloud_dashboard_page():
     """Trang giao diện điều khiển Cloud GPU Pipeline theo phong cách Tool V1 tối giản."""
@@ -95,6 +191,21 @@ async def cloud_dashboard_page():
     return HTMLResponse("<h2>Không tìm thấy template cloud_dashboard.html.</h2>", status_code=404)
 
 
+@router.get("/api/cloud/local-resources")
+async def api_cloud_local_resources():
+    """Read local RAM and shared job limits without contacting the Colab provider."""
+    active_jobs, concurrency_limit = await asyncio.gather(
+        asyncio.to_thread(store.list_active_jobs),
+        asyncio.to_thread(store.get_concurrency_limit),
+    )
+    return {
+        "status": "ok",
+        "host_memory": _read_host_memory(),
+        "active_job_count": len(active_jobs),
+        "max_concurrent_jobs": concurrency_limit,
+    }
+
+
 @router.get("/api/cloud/status")
 async def api_cloud_status(force_refresh: bool = Query(False)):
     """Tra cứu trạng thái usage, worker, active job và active session (non-blocking, read-only)."""
@@ -103,8 +214,10 @@ async def api_cloud_status(force_refresh: bool = Query(False)):
     active_worker = peek_cloud_worker()
     bot_worker = peek_cloud_telegram_bot_worker()
     tb_status = get_cloud_telegram_bot_status()
-    if bot_worker is not None and (active_worker is None or active_worker.get_current_job() is None):
-        if bot_worker.get_current_job() is not None:
+    active_jobs = store.list_active_jobs() if hasattr(store, "list_active_jobs") else []
+    has_active_jobs = bool(active_jobs) or store.get_active_job() is not None
+    if bot_worker is not None and (active_worker is None or not _worker_has_jobs(active_worker)):
+        if _worker_has_jobs(bot_worker):
             active_worker = bot_worker
     snap = await asyncio.to_thread(
         get_cloud_status_snapshot,
@@ -114,11 +227,45 @@ async def api_cloud_status(force_refresh: bool = Query(False)):
         sessions_fn=sessions_fn,
         force_refresh=force_refresh,
     )
-    if bot_worker is not None and bot_worker.get_current_job() is not None:
+    if _worker_has_jobs(bot_worker):
         snap["worker_running"] = True
         snap["worker_state"] = "running"
+    elif not has_active_jobs and active_worker is None:
+        snap["worker_running"] = False
     snap["telegram_bot"] = tb_status
+    snap["default_gpu"] = tb_status.get("default_gpu") or await asyncio.to_thread(get_cloud_default_gpu, store)
+    snap["gpu_concurrency_limits"] = await asyncio.to_thread(store.get_gpu_concurrency_limits)
+    snap["host_memory"] = _read_host_memory()
+    jobs, resources = await asyncio.to_thread(_read_dashboard_tracking, snap.get("warm_sessions", []))
+    snap["tracked_jobs"] = jobs
+    snap["session_resources"] = resources
     return snap
+
+
+def _read_dashboard_tracking(warm_sessions: list[Dict[str, Any]]):
+    bot = peek_cloud_telegram_bot()
+    intake = bot.list_intake_jobs() if bot else []
+    live_jobs = store.list_live_jobs()
+    active = []
+    tracked = []
+    queue_keys = set()
+    for job in live_jobs:
+        channel = resolve_cloud_source_channel(job.options, job.idempotency_key)
+        row = {
+            "job_id": job.job_id, "attempt": job.attempt, "state": job.state,
+            "video_name": redact_secrets(job.video_name), "gpu_type": job.gpu_type,
+            "session_name": job.session_name, "percent": job.percent, "step_name": job.step_name,
+            "source": "Telegram" if channel == "cloud_telegram_bot" else "Dashboard",
+        }
+        tracked.append(row)
+        if job.idempotency_key:
+            queue_keys.add(job.idempotency_key)
+        if job.state != "queued":
+            active.append(row)
+    for row in intake:
+        if row["queue_key"] not in queue_keys:
+            tracked.append({key: value for key, value in row.items() if key != "queue_key"})
+    return tracked, _read_cloud_session_resources(active, warm_sessions)
 
 
 @router.post("/api/cloud/rollout")
@@ -163,6 +310,90 @@ async def api_cloud_set_budget(payload: Dict[str, Any] = Body(...)):
     }
 
 
+@router.post("/api/cloud/concurrency")
+async def api_cloud_set_concurrency(payload: Dict[str, Any] = Body(...)):
+    """Persist the maximum number of simultaneous Cloud jobs (1–4)."""
+    raw_limit = payload.get("max_concurrent_jobs") if isinstance(payload, dict) else None
+    if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+        raise HTTPException(status_code=400, detail="Số luồng Cloud phải là số nguyên.")
+    if not 1 <= raw_limit <= MAX_CONCURRENT_JOBS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Số luồng Cloud phải từ 1 đến {MAX_CONCURRENT_JOBS}.",
+        )
+    if "gpu_type" in payload:
+        gpu = _checked_gpu_option(payload["gpu_type"])
+        await asyncio.to_thread(store.set_gpu_concurrency_limits, {gpu: raw_limit})
+        return {"status": "ok", "gpu_type": gpu, "max_concurrent_jobs": raw_limit}
+    limit = await asyncio.to_thread(store.set_concurrency_limit, raw_limit)
+    return {"status": "ok", "max_concurrent_jobs": limit}
+
+
+@router.get("/api/cloud/gpu-settings")
+async def api_cloud_gpu_settings():
+    default_gpu, history, limits = await asyncio.gather(
+        asyncio.to_thread(get_cloud_default_gpu, store),
+        asyncio.to_thread(store.list_gpu_evidence),
+        asyncio.to_thread(store.get_gpu_concurrency_limits),
+    )
+    by_gpu = {item["gpu_type"]: item for item in history}
+    return {
+        "status": "ok",
+        "default_gpu": default_gpu,
+        "gpu_concurrency_limits": limits,
+        "gpus": [
+            {
+                "gpu_type": gpu,
+                "estimated_cu_per_hour": GPU_CU_RATES[gpu],
+                "evidence": by_gpu.get(gpu),
+            }
+            for gpu in CHECKABLE_GPUS
+        ],
+    }
+
+
+@router.post("/api/cloud/gpu-settings")
+async def api_cloud_save_gpu_settings(payload: Dict[str, Any] = Body(...)):
+    gpu = _checked_gpu_option(payload.get("gpu_type"))
+    await asyncio.to_thread(store.set_setting, DASHBOARD_GPU_SETTING, gpu)
+    return {"status": "ok", "default_gpu": gpu}
+
+
+@router.post("/api/cloud/gpu-check")
+async def api_cloud_gpu_check(payload: Dict[str, Any] = Body(...)):
+    gpu = _checked_gpu_option(payload.get("gpu_type"))
+    permit = payload.get("rollout_permit")
+    if not isinstance(permit, str) and store.rollout_controlled:
+        raise HTTPException(status_code=409, detail="Mở một lượt Cloud trước khi thử cấp GPU.")
+    estimated_cu = GPU_CU_RATES[gpu] * 150 / 3600
+    usage = await _fresh_usage_for_admission()
+    decision = await asyncio.to_thread(
+        store.check_admission_allowed, gpu_type=gpu, cu_estimated=estimated_cu, provider_usage=usage,
+    )
+    if not decision.get("allowed"):
+        raise HTTPException(
+            status_code=decision.get("http_status") or 409,
+            detail=redact_secrets(decision.get("reason") or "Chưa xác nhận được hạn mức CU."),
+        )
+    try:
+        job, _ = await asyncio.to_thread(
+            store.enqueue_or_get,
+            video_path="",
+            video_name=f"Thử cấp GPU {gpu}",
+            gpu_type=gpu,
+            task_type=GPU_CHECK_TASK,
+            cu_estimated=estimated_cu,
+            rollout_permit=permit,
+            options={"source_channel": "dashboard", "execution_mode": "cloud"},
+        )
+    except CloudValidationError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=redact_secrets(str(exc))) from exc
+    worker = get_cloud_worker()
+    if not worker.is_running():
+        await asyncio.to_thread(worker.start)
+    return {"status": "ok", "job_id": job.job_id, "gpu_type": gpu}
+
+
 @router.get("/api/cloud/jobs")
 async def api_cloud_jobs(limit: int = Query(30, ge=1, le=100)):
     """Lấy danh sách các job trong hàng đợi Cloud GPU."""
@@ -198,7 +429,7 @@ async def api_cloud_enqueue(request: Request, payload: Dict[str, Any] = Body(...
     if not isinstance(raw_target, str):
         raise HTTPException(status_code=400, detail="Trường video_path/url phải là chuỗi.")
 
-    gpu_type = payload.get("gpu_type", "T4")
+    gpu_type = payload["gpu_type"] if "gpu_type" in payload else await asyncio.to_thread(get_cloud_default_gpu, store)
     task_type = payload.get("task_type", "full_pipeline")
     voice = payload.get("voice", "BV562_streaming")
     if not isinstance(gpu_type, str) or not isinstance(task_type, str) or not isinstance(voice, str):
@@ -218,16 +449,7 @@ async def api_cloud_enqueue(request: Request, payload: Dict[str, Any] = Body(...
     if idempotency_key is None:
         idempotency_key = request.headers.get("X-Idempotency-Key")
 
-    fresh_usage: Optional[Dict[str, Any]] = None
-    existing_snap = await asyncio.to_thread(store.get_provider_usage_snapshot)
-    if existing_snap is not None and (existing_snap.get("is_stale") or not existing_snap.get("ok")):
-        probe_res = await asyncio.to_thread(
-            run_provider_action_nonblocking,
-            get_usage,
-            timeout_seconds=8.0,
-        )
-        if probe_res.get("completed") and isinstance(probe_res.get("result"), dict):
-            fresh_usage = probe_res["result"]
+    fresh_usage = await _fresh_usage_for_admission()
 
     try:
         job, contract = await asyncio.to_thread(
@@ -280,9 +502,21 @@ async def api_cloud_job_cancel(payload: Dict[str, Any] = Body(...)):
     job_id = raw_job_id.strip()
 
     target_worker = peek_cloud_worker()
+    if target_worker is not None:
+        try:
+            if target_worker.get_current_job(job_id) is None:
+                target_worker = None
+        except TypeError:
+            current = target_worker.get_current_job()
+            if current is None or current.job_id != job_id:
+                target_worker = None
     bot_worker = peek_cloud_telegram_bot_worker()
     if bot_worker is not None:
-        cur_bot_job = bot_worker.get_current_job()
+        try:
+            cur_bot_job = bot_worker.get_current_job(job_id)
+        except TypeError:
+            current = bot_worker.get_current_job()
+            cur_bot_job = current if current is not None and current.job_id == job_id else None
         if cur_bot_job is not None and cur_bot_job.job_id == job_id:
             target_worker = bot_worker
 

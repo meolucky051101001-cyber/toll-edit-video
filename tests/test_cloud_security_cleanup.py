@@ -170,10 +170,9 @@ def test_monitored_result_uses_return_code(
     monkeypatch.setattr(colab_bridge, "_remove_wsl_temp_file", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(colab_bridge, "_wait_interruptible", lambda *_args, **_kwargs: False)
 
-    def fake_run(colab_args, **_kwargs):
-        args = list(colab_args)
-        script_path = args[args.index("-f") + 1]
-        if "colab_launch_" in script_path:
+    def fake_run(colab_args, **kwargs):
+        script_text = str(kwargs.get("stdin_text") or "")
+        if "AUTODUB_LAUNCH_JSON" in script_text:
             return 0, 'AUTODUB_LAUNCH_JSON:{"launched": true, "sup_pid": 4321}', ""
         payload = {"done": True, "returncode": return_code, "log_tail": output}
         return 0, "AUTODUB_POLL_JSON:" + json.dumps(payload), ""

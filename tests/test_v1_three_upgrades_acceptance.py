@@ -255,7 +255,8 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             with patch.object(v1_media_streams, "probe_main_video", return_value=MainVideo(0, 720, 1280, 30.0, 4.0, 1, 1, False)), \
                  patch.object(v1_media_streams, "validate_video_output"), \
                  patch.object(video_utils, "run_batch_subprocess", side_effect=fake_run), \
-                 patch.object(canvas_settings, "get_canvas_settings", return_value={"sub_cover_style": "localized_blur", "delogo_mode": "smart", "watermark_enabled": False}):
+                 patch.object(canvas_settings, "get_canvas_settings", return_value={"sub_cover_style": "localized_blur", "delogo_mode": "smart", "watermark_enabled": False}), \
+                 patch.dict("os.environ", {"V1_GPU_LOCALIZED_BLUR": "0"}):
                 ok = video_utils.process_video(
                     str(in_vid),
                     str(in_ass),
@@ -523,7 +524,10 @@ class TestDot3StructuredTranslationAndDomainPresets(unittest.TestCase):
 
             captured = {}
 
+            voice_calls = []
+
             def fake_decide_voice(**kwargs):
+                voice_calls.append(kwargs)
                 return {
                     "voice_id": "capcut-BV075_streaming",
                     "voice_source": "capcut",
@@ -544,8 +548,12 @@ class TestDot3StructuredTranslationAndDomainPresets(unittest.TestCase):
                  patch("ai.translation.translate_subtitles", side_effect=fake_translate_subtitles), \
                  patch("ai.transcription.save_srt"):
                 translated, _ = asyncio.run(orch._stage_translate(ctx, [s1, s2], original_audio=vocals, vocals_audio=vocals))
+                asyncio.run(orch._stage_translate(
+                    ctx, [s1, s2], original_audio=vocals, vocals_audio=vocals, asr_was_empty=True
+                ))
 
             self.assertEqual([s.content for s in translated], ["Dịch 1", "Dịch 2"])
+            self.assertFalse(voice_calls[-1]["visual_sub_to_speech"])
             meta = captured["kwargs"]["cue_meta"]
             self.assertEqual(len(meta), 2)
             self.assertEqual(meta[0]["speaker"], "male")

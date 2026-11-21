@@ -13,8 +13,11 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -39,6 +42,60 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 import uvicorn
 
+from backend.cloud.cloud_config import WORKSPACE_DIR
+
+
+def _workspace_write_available(workspace: Path) -> bool:
+    try:
+        with tempfile.TemporaryFile(dir=workspace) as probe:
+            probe.write(b"cloud-startup-probe")
+        return True
+    except PermissionError:
+        return False
+
+
+def _relaunch_with_writable_runtime(workspace: Path):
+    """Keep Windows startup usable when its selected interpreter cannot write the job workspace."""
+    marker = "AUTODUB_CLOUD_RUNTIME_FALLBACK"
+    if os.getenv(marker) == "1" or _workspace_write_available(workspace):
+        return None
+    launcher = shutil.which("py.exe") or shutil.which("py")
+    if not launcher:
+        candidate = Path(os.getenv("LOCALAPPDATA", "")) / "Programs" / "Python" / "Launcher" / "py.exe"
+        launcher = str(candidate) if candidate.is_file() else None
+    if not launcher:
+        return None
+    env = dict(os.environ, **{marker: "1", "PYTHONIOENCODING": "utf-8"})
+    package_path = PROJECT_ROOT / "backend" / "venv" / "Lib" / "site-packages"
+    probe_code = (
+        "import sys,tempfile; sys.path.append(sys.argv[2]); "
+        "import fastapi,uvicorn,psutil,pydantic,telegram; "
+        "f=tempfile.TemporaryFile(dir=sys.argv[1]); f.write(b'cloud-startup-probe'); f.close()"
+    )
+    try:
+        result = subprocess.run([launcher, "-3", "-c", probe_code, str(workspace), str(package_path)],
+                                env=env, capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+    logger.warning("Current Python cannot write the Cloud workspace; using a verified installed Python runtime.")
+    # Prefer the installed runtime's compatible extensions; reuse existing pure-Python
+    # application dependencies only when they are missing from that runtime.
+    bootstrap = (
+        "import sys,runpy,pathlib; root=pathlib.Path(sys.argv.pop(1)); "
+        "sys.path.append(str(root/'backend'/'venv'/'Lib'/'site-packages')); "
+        "sys.argv[0]=str(root/'run_cloud_node.py'); runpy.run_path(sys.argv[0],run_name='__main__')"
+    )
+    return subprocess.call([launcher, "-3", "-c", bootstrap, str(PROJECT_ROOT), *sys.argv[1:]], env=env)
+
+
+if __name__ == "__main__" and os.name == "nt":
+    _fallback_result = _relaunch_with_writable_runtime(WORKSPACE_DIR)
+    if _fallback_result is not None:
+        raise SystemExit(_fallback_result)
+
+
 from backend.cloud.cloud_routes import router as cloud_router
 from backend.cloud.cloud_security import (
     allowed_loopback_origins,
@@ -53,7 +110,6 @@ from backend.cloud.cloud_telegram_bot import (
     peek_cloud_telegram_bot,
     peek_cloud_telegram_bot_worker,
 )
-from backend.cloud.cloud_config import WORKSPACE_DIR
 
 NODE_APP_ID = "tool-v1-cloud-node"
 NODE_INSTANCE = secrets.token_hex(16)
@@ -405,6 +461,15 @@ def _bind_listener(host: str, port: int) -> socket.socket:
 
 def main():
     global _STARTUP_REPORT, _ACTIVE_UVICORN_SERVER
+    # Hidden Scheduled Tasks may inherit CP1252 instead of a UTF-8 console.
+    # Configure only this CLI invocation, not callers importing the ASGI app.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
     parser = argparse.ArgumentParser(description="Tool V1 Cloud GPU Standalone Node")
     parser.add_argument("--port", type=int, default=int(os.getenv("CLOUD_PORT", "8089")), help="Cổng chạy dịch vụ (mặc định: 8089)")
     parser.add_argument("--host", default="127.0.0.1", help="Host lắng nghe (mặc định: 127.0.0.1)")

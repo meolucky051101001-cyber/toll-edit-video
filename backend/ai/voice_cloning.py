@@ -2,6 +2,7 @@ import os
 import asyncio
 import re
 import random
+import subprocess
 import threading
 import logging
 import edge_tts
@@ -119,7 +120,7 @@ def _get_capcut_client():
 
 @stage("tts_capcut_attempt")
 def _run_capcut_tts_once(
-    text, output_path, voice="BV562_streaming", poll_interval=3.0
+    text, output_path, voice="BV562_streaming", poll_interval=3.0, cancel=None
 ):
     import json, time
     client = _get_capcut_client()
@@ -130,8 +131,11 @@ def _run_capcut_tts_once(
     
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
-        time.sleep(min(max(0.0, float(poll_interval)),
-                       max(0.0, deadline - time.monotonic())))
+        delay = min(max(0.0, float(poll_interval)), max(0.0, deadline - time.monotonic()))
+        if cancel is None:
+            time.sleep(delay)
+        elif cancel.wait(delay):
+            raise InterruptedError("Translation prefetch ended")
         if time.monotonic() >= deadline:
             break
         query_res = client.query_tts_task(task_id, token)
@@ -384,7 +388,12 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                 else:
                     await generate_tts_edge(text, temp_raw, voice_param, pitch="+0Hz", rate="+5%")
             elif voice_source == "capcut":
-                await asyncio.to_thread(_run_capcut_tts, text, temp_raw, voice_param)
+                from .v1_voice_prefetch import raw_voice_path
+                prepared = raw_voice_path(output_folder, text, voice_param)
+                try:
+                    os.replace(prepared, temp_raw)
+                except FileNotFoundError:
+                    await asyncio.to_thread(_run_capcut_tts, text, temp_raw, voice_param)
             elif voice_source in ("vieneu", "vie-tts"):
                 from .vieneu_tts_service import generate_tts_vieneu
                 await generate_tts_vieneu(text, temp_raw, voice=voice_param)
@@ -476,7 +485,8 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
     condensation_api_key = condensation_api_key or os.getenv("GEMINI_API_KEY", "")
     import v1_speech_guard as _speech_guard_mod
     from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline, SpeechTimingError, vietnamese_spoken_seconds
-    emergency_enabled = os.getenv("V1_ALLOW_EMERGENCY_SPEED", "1").strip().lower() not in ("0", "false", "no", "off")
+    from config.env import env_flag
+    emergency_enabled = env_flag("V1_ALLOW_EMERGENCY_SPEED", True)
     emergency_speed_cap = float(globals().get("MAX_EMERGENCY_SPEED") or getattr(_speech_guard_mod, "MAX_EMERGENCY_SPEED", 1.75))
     if segment_voices:
         for seg in translated_segments:

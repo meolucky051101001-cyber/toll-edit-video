@@ -582,6 +582,197 @@ def check_rendered_pixel_coverage(
     )
 
 
+def _qc_file_integrity(v_path, checks):
+    # 1. FILE INTEGRITY
+    if not v_path.is_file():
+        checks.append(QCCheckItem(
+            category=QCCategory.FILE_INTEGRITY.value,
+            name="final_video_exists",
+            status="FAIL",
+            message=f"Tệp video thành phẩm không tồn tại: {v_path}",
+        ))
+    else:
+        v_size = v_path.stat().st_size
+        if v_size < 10240:
+            checks.append(QCCheckItem(
+                category=QCCategory.FILE_INTEGRITY.value,
+                name="final_video_size",
+                status="FAIL",
+                message=f"Tệp video quá nhỏ ({v_size} bytes), có thể bị lỗi render",
+                details={"size_bytes": v_size},
+            ))
+        else:
+            checks.append(QCCheckItem(
+                category=QCCategory.FILE_INTEGRITY.value,
+                name="final_video_size",
+                status="PASS",
+                message=f"Tệp video hợp lệ ({v_size / 1024 / 1024:.2f} MB)",
+                details={"size_bytes": v_size},
+            ))
+
+
+def _qc_asr_coverage(translated_subtitles, checks):
+    # 3. ASR COVERAGE
+    all_ocr_located = bool(translated_subtitles) and all(
+        _seg_val(s, "ocr_mask_status") == "located" and _seg_val(s, "best_block") is not None
+        for s in translated_subtitles
+    )
+    if translated_subtitles is not None:
+        seg_count = len(translated_subtitles)
+        if seg_count == 0:
+            checks.append(QCCheckItem(
+                category=QCCategory.ASR_COVERAGE.value,
+                name="transcription_segments_count",
+                status="WARN",
+                message="Không có câu thoại nào được nhận diện (video im lặng hoặc lỗi ASR)",
+            ))
+        elif all_ocr_located:
+            checks.append(QCCheckItem(
+                category=QCCategory.ASR_COVERAGE.value,
+                name="transcription_segments_count",
+                status="PASS",
+                message=f"Đã nhận diện và đối chiếu tọa độ OCR cho {seg_count} câu thoại",
+                details={"segment_count": seg_count, "ocr_verified": True},
+            ))
+        else:
+            checks.append(QCCheckItem(
+                category=QCCategory.ASR_COVERAGE.value,
+                name="transcription_segments_count",
+                status="WARN",
+                message=f"Có {seg_count} câu; chưa có bản chép lời chuẩn để xác minh không sót thoại",
+                details={"segment_count": seg_count},
+            ))
+    return all_ocr_located
+
+
+def _qc_translation_integrity(translated_subtitles, checks):
+    # 4. TRANSLATION INTEGRITY
+    if translated_subtitles:
+        cjk_leaks = []
+        empty_lines = []
+        for i, s in enumerate(translated_subtitles):
+            txt = str(_seg_val(s, "content") or _seg_val(s, "text") or "").strip()
+            s_idx = _seg_val(s, "index", i + 1)
+            if not txt:
+                empty_lines.append(s_idx)
+            elif _check_cjk(txt):
+                cjk_leaks.append({"index": s_idx, "text": txt[:30]})
+
+        if cjk_leaks:
+            checks.append(QCCheckItem(
+                category=QCCategory.TRANSLATION_INTEGRITY.value,
+                name="no_cjk_residual",
+                status="FAIL",
+                message=f"Phát hiện {len(cjk_leaks)} câu còn sót chữ Hán",
+                details={"cjk_leaks": cjk_leaks[:5]},
+            ))
+        else:
+            checks.append(QCCheckItem(
+                category=QCCategory.TRANSLATION_INTEGRITY.value,
+                name="no_cjk_residual",
+                status="PASS",
+                message="100% câu dịch sạch tiếng Trung",
+            ))
+
+        if empty_lines:
+            checks.append(QCCheckItem(
+                category=QCCategory.TRANSLATION_INTEGRITY.value,
+                name="no_empty_subtitles",
+                status="FAIL",
+                message=f"Có {len(empty_lines)} câu bị rỗng nội dung",
+                details={"empty_indices": empty_lines[:10]},
+            ))
+        else:
+            checks.append(QCCheckItem(
+                category=QCCategory.TRANSLATION_INTEGRITY.value,
+                name="no_empty_subtitles",
+                status="PASS",
+                message="Không có câu dịch nào bị rỗng",
+            ))
+
+
+def _qc_audio_balance(mixed_audio_path, checks):
+    # 7. AUDIO BALANCE
+    if mixed_audio_path and Path(mixed_audio_path).is_file():
+        try:
+            import soundfile as sf
+            import numpy as np
+            peak = max((float(np.max(np.abs(block))) for block in sf.blocks(str(mixed_audio_path), blocksize=65536, dtype="float32")), default=0.0)
+            peak_dbfs = 20 * math.log10(max(peak, 1e-12))
+            if peak_dbfs > -0.05:
+                checks.append(QCCheckItem(
+                    category=QCCategory.AUDIO_BALANCE.value,
+                    name="peak_ceiling",
+                    status="WARN",
+                    message=f"Đỉnh âm thanh chạm ngưỡng clipping ({peak_dbfs:.2f} dBFS)",
+                    details={"peak_dbfs": peak_dbfs},
+                ))
+            else:
+                checks.append(QCCheckItem(
+                    category=QCCategory.AUDIO_BALANCE.value,
+                    name="peak_ceiling",
+                    status="PASS",
+                    message=f"Đỉnh âm thanh an toàn ({peak_dbfs:.2f} dBFS <= -0.5 dBFS)",
+                    details={"peak_dbfs": peak_dbfs},
+                ))
+        except Exception:
+            pass
+    elif mixed_audio_path:
+        checks.append(QCCheckItem(
+            category=QCCategory.AUDIO_BALANCE.value,
+            name="peak_ceiling",
+            status="WARN",
+            message=f"Không tìm thấy file audio mixed để đo peak: {mixed_audio_path}",
+        ))
+
+
+def _qc_render_continuity(v_path, checks):
+    # 8. RENDER CONTINUITY & FRAME DECODING (PROBE THẬT)
+    if not v_path.is_file():
+        checks.append(QCCheckItem(
+            category=QCCategory.RENDER_CONTINUITY.value,
+            name="video_stream_integrity",
+            status="FAIL",
+            message="Không tìm thấy tệp video để kiểm tra stream rendering",
+        ))
+    else:
+        try:
+            import cv2
+            cap = cv2.VideoCapture(str(v_path))
+            is_open = cap.isOpened()
+            frame_cnt = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if is_open else 0
+            v_fps = float(cap.get(cv2.CAP_PROP_FPS)) if is_open else 0.0
+            v_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if is_open else 0
+            v_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if is_open else 0
+            ret, _ = cap.read() if is_open else (False, None)
+            cap.release()
+
+            if is_open and frame_cnt > 0 and v_fps > 0 and v_w > 0 and v_h > 0 and ret:
+                checks.append(QCCheckItem(
+                    category=QCCategory.RENDER_CONTINUITY.value,
+                    name="video_stream_integrity",
+                    status="PASS",
+                    message=f"Khung hình đầu giải mã được; chưa kiểm tra toàn bộ video ({v_w}x{v_h} @ {v_fps:.1f} FPS, {frame_cnt} frames)",
+                    details={"width": v_w, "height": v_h, "fps": v_fps, "frame_count": frame_cnt},
+                ))
+            else:
+                checks.append(QCCheckItem(
+                    category=QCCategory.RENDER_CONTINUITY.value,
+                    name="video_stream_integrity",
+                    status="FAIL",
+                    message=f"Tệp video bị hỏng stream hoặc không giải mã được khung hình (frames={frame_cnt})",
+                    details={"is_open": is_open, "frame_count": frame_cnt},
+                ))
+        except Exception as vid_err:
+            checks.append(QCCheckItem(
+                category=QCCategory.RENDER_CONTINUITY.value,
+                name="video_stream_integrity",
+                status="WARN",
+                message=f"Không thể probe stream video bằng OpenCV: {vid_err}",
+            ))
+
+
+
 @stage("quality_gate")
 def run_quality_gate(
     job_id: str,
@@ -609,32 +800,7 @@ def run_quality_gate(
     video_name = v_path.name if v_path.name else "unknown_video"
     checks: List[QCCheckItem] = []
 
-    # 1. FILE INTEGRITY
-    if not v_path.is_file():
-        checks.append(QCCheckItem(
-            category=QCCategory.FILE_INTEGRITY.value,
-            name="final_video_exists",
-            status="FAIL",
-            message=f"Tệp video thành phẩm không tồn tại: {v_path}",
-        ))
-    else:
-        v_size = v_path.stat().st_size
-        if v_size < 10240:
-            checks.append(QCCheckItem(
-                category=QCCategory.FILE_INTEGRITY.value,
-                name="final_video_size",
-                status="FAIL",
-                message=f"Tệp video quá nhỏ ({v_size} bytes), có thể bị lỗi render",
-                details={"size_bytes": v_size},
-            ))
-        else:
-            checks.append(QCCheckItem(
-                category=QCCategory.FILE_INTEGRITY.value,
-                name="final_video_size",
-                status="PASS",
-                message=f"Tệp video hợp lệ ({v_size / 1024 / 1024:.2f} MB)",
-                details={"size_bytes": v_size},
-            ))
+    _qc_file_integrity(v_path, checks)
 
     # Compare source/output metadata: reading an audio file alone proves no sync.
     try:
@@ -690,80 +856,9 @@ def run_quality_gate(
         checks.append(QCCheckItem(QCCategory.AV_SYNC.value, "duration_alignment",
             "WARN", f"Chưa xác minh được đồng bộ: {exc}"))
 
-    # 3. ASR COVERAGE
-    all_ocr_located = bool(translated_subtitles) and all(
-        _seg_val(s, "ocr_mask_status") == "located" and _seg_val(s, "best_block") is not None
-        for s in translated_subtitles
-    )
-    if translated_subtitles is not None:
-        seg_count = len(translated_subtitles)
-        if seg_count == 0:
-            checks.append(QCCheckItem(
-                category=QCCategory.ASR_COVERAGE.value,
-                name="transcription_segments_count",
-                status="WARN",
-                message="Không có câu thoại nào được nhận diện (video im lặng hoặc lỗi ASR)",
-            ))
-        elif all_ocr_located:
-            checks.append(QCCheckItem(
-                category=QCCategory.ASR_COVERAGE.value,
-                name="transcription_segments_count",
-                status="PASS",
-                message=f"Đã nhận diện và đối chiếu tọa độ OCR cho {seg_count} câu thoại",
-                details={"segment_count": seg_count, "ocr_verified": True},
-            ))
-        else:
-            checks.append(QCCheckItem(
-                category=QCCategory.ASR_COVERAGE.value,
-                name="transcription_segments_count",
-                status="WARN",
-                message=f"Có {seg_count} câu; chưa có bản chép lời chuẩn để xác minh không sót thoại",
-                details={"segment_count": seg_count},
-            ))
+    all_ocr_located = _qc_asr_coverage(translated_subtitles, checks)
 
-    # 4. TRANSLATION INTEGRITY
-    if translated_subtitles:
-        cjk_leaks = []
-        empty_lines = []
-        for i, s in enumerate(translated_subtitles):
-            txt = str(_seg_val(s, "content") or _seg_val(s, "text") or "").strip()
-            s_idx = _seg_val(s, "index", i + 1)
-            if not txt:
-                empty_lines.append(s_idx)
-            elif _check_cjk(txt):
-                cjk_leaks.append({"index": s_idx, "text": txt[:30]})
-
-        if cjk_leaks:
-            checks.append(QCCheckItem(
-                category=QCCategory.TRANSLATION_INTEGRITY.value,
-                name="no_cjk_residual",
-                status="FAIL",
-                message=f"Phát hiện {len(cjk_leaks)} câu còn sót chữ Hán",
-                details={"cjk_leaks": cjk_leaks[:5]},
-            ))
-        else:
-            checks.append(QCCheckItem(
-                category=QCCategory.TRANSLATION_INTEGRITY.value,
-                name="no_cjk_residual",
-                status="PASS",
-                message="100% câu dịch sạch tiếng Trung",
-            ))
-
-        if empty_lines:
-            checks.append(QCCheckItem(
-                category=QCCategory.TRANSLATION_INTEGRITY.value,
-                name="no_empty_subtitles",
-                status="FAIL",
-                message=f"Có {len(empty_lines)} câu bị rỗng nội dung",
-                details={"empty_indices": empty_lines[:10]},
-            ))
-        else:
-            checks.append(QCCheckItem(
-                category=QCCategory.TRANSLATION_INTEGRITY.value,
-                name="no_empty_subtitles",
-                status="PASS",
-                message="Không có câu dịch nào bị rỗng",
-            ))
+    _qc_translation_integrity(translated_subtitles, checks)
 
     # 5. SUBTITLE STYLING
     if ass_subtitle_path:
@@ -931,82 +1026,9 @@ def run_quality_gate(
             message="Chưa có dữ liệu danh sách audio lồng tiếng để kiểm tra va chạm",
         ))
 
-    # 7. AUDIO BALANCE
-    if mixed_audio_path and Path(mixed_audio_path).is_file():
-        try:
-            import soundfile as sf
-            import numpy as np
-            peak = max((float(np.max(np.abs(block))) for block in sf.blocks(str(mixed_audio_path), blocksize=65536, dtype="float32")), default=0.0)
-            peak_dbfs = 20 * math.log10(max(peak, 1e-12))
-            if peak_dbfs > -0.05:
-                checks.append(QCCheckItem(
-                    category=QCCategory.AUDIO_BALANCE.value,
-                    name="peak_ceiling",
-                    status="WARN",
-                    message=f"Đỉnh âm thanh chạm ngưỡng clipping ({peak_dbfs:.2f} dBFS)",
-                    details={"peak_dbfs": peak_dbfs},
-                ))
-            else:
-                checks.append(QCCheckItem(
-                    category=QCCategory.AUDIO_BALANCE.value,
-                    name="peak_ceiling",
-                    status="PASS",
-                    message=f"Đỉnh âm thanh an toàn ({peak_dbfs:.2f} dBFS <= -0.5 dBFS)",
-                    details={"peak_dbfs": peak_dbfs},
-                ))
-        except Exception:
-            pass
-    elif mixed_audio_path:
-        checks.append(QCCheckItem(
-            category=QCCategory.AUDIO_BALANCE.value,
-            name="peak_ceiling",
-            status="WARN",
-            message=f"Không tìm thấy file audio mixed để đo peak: {mixed_audio_path}",
-        ))
+    _qc_audio_balance(mixed_audio_path, checks)
 
-    # 8. RENDER CONTINUITY & FRAME DECODING (PROBE THẬT)
-    if not v_path.is_file():
-        checks.append(QCCheckItem(
-            category=QCCategory.RENDER_CONTINUITY.value,
-            name="video_stream_integrity",
-            status="FAIL",
-            message="Không tìm thấy tệp video để kiểm tra stream rendering",
-        ))
-    else:
-        try:
-            import cv2
-            cap = cv2.VideoCapture(str(v_path))
-            is_open = cap.isOpened()
-            frame_cnt = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if is_open else 0
-            v_fps = float(cap.get(cv2.CAP_PROP_FPS)) if is_open else 0.0
-            v_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if is_open else 0
-            v_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if is_open else 0
-            ret, _ = cap.read() if is_open else (False, None)
-            cap.release()
-
-            if is_open and frame_cnt > 0 and v_fps > 0 and v_w > 0 and v_h > 0 and ret:
-                checks.append(QCCheckItem(
-                    category=QCCategory.RENDER_CONTINUITY.value,
-                    name="video_stream_integrity",
-                    status="PASS",
-                    message=f"Khung hình đầu giải mã được; chưa kiểm tra toàn bộ video ({v_w}x{v_h} @ {v_fps:.1f} FPS, {frame_cnt} frames)",
-                    details={"width": v_w, "height": v_h, "fps": v_fps, "frame_count": frame_cnt},
-                ))
-            else:
-                checks.append(QCCheckItem(
-                    category=QCCategory.RENDER_CONTINUITY.value,
-                    name="video_stream_integrity",
-                    status="FAIL",
-                    message=f"Tệp video bị hỏng stream hoặc không giải mã được khung hình (frames={frame_cnt})",
-                    details={"is_open": is_open, "frame_count": frame_cnt},
-                ))
-        except Exception as vid_err:
-            checks.append(QCCheckItem(
-                category=QCCategory.RENDER_CONTINUITY.value,
-                name="video_stream_integrity",
-                status="WARN",
-                message=f"Không thể probe stream video bằng OpenCV: {vid_err}",
-            ))
+    _qc_render_continuity(v_path, checks)
 
     # Tổng kết
     pass_cnt = sum(1 for c in checks if c.status == "PASS")

@@ -100,6 +100,7 @@ class _ExecutionContext:
     pause_checkpoint: Any = None
     run_stage: Any = None
     ocr_reader_releaser: Any = None
+    voice_prefetch: Any = None
 
 
 class V1Orchestrator:
@@ -461,7 +462,8 @@ class V1Orchestrator:
             srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
                 c, srt_original, srt_segments, asr_was_empty)
             translated_segments, v1_script_mode = await self._stage_translate(
-                c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio)
+                c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio,
+                asr_was_empty=asr_was_empty)
             translated_segments, dubbing_audio_files, ass_path = await self._stage_tts(
                 c, original_audio, vocals_audio, srt_segments, translated_segments,
                 floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode)
@@ -472,6 +474,8 @@ class V1Orchestrator:
             completed_ok = True
             return out_result
         finally:
+            if getattr(c, "voice_prefetch", None):
+                await asyncio.to_thread(c.voice_prefetch.close)
             if completed_ok:
                 await _flush_notify(timeout=3.0)
             else:
@@ -982,16 +986,11 @@ class V1Orchestrator:
             flags = dict(c.overrides.get("feature_flags") or get_feature_flags(self.workspace))
             enable_smart = flags.get("V1_SMART_SKIP_OCR", True)
             ocr_strat = c.overrides.get("ocr_strategy") or c.planned.get("ocr_strategy", "auto")
-            if c.overrides.get("ocr_strategy"):
-                ocr_strat = c.overrides["ocr_strategy"]
-            elif enable_smart:
-                ocr_strat = "smart_skip"
-            elif not ocr_strat or ocr_strat == "auto":
-                short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
-                if c.video_dur_s > 0 and c.video_dur_s <= short_thresh:
-                    ocr_strat = "full"
-                else:
-                    ocr_strat = "smart_skip"
+            short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
+            if 0 < c.video_dur_s <= short_thresh:
+                ocr_strat = "full"
+            elif not c.overrides.get("ocr_strategy"):
+                ocr_strat = "smart_skip" if enable_smart else "full"
             try:
                 import job_tracker
                 from ai.v1_model_policy import current_v1_model_policy
@@ -1051,6 +1050,7 @@ class V1Orchestrator:
                              visual_asr_reuse=bool(c.visual_sub_to_speech and asr_was_empty),
                              asr_was_empty=asr_was_empty,
                              detected_watermarks=ocr_metrics.get("detected_watermarks", []))
+                self.manifest_manager.record_stage_metrics(c.job_id, stage_id, ocr_metrics)
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"ocr_data": str(c.out_dir / "ocr.json")})
             except Exception as exc:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
@@ -1071,7 +1071,9 @@ class V1Orchestrator:
         self._align_source_subtitles(srt_segments)
         return srt_segments, floating_segments, vid_w, vid_h, main_y_pct
 
-    async def _stage_translate(self, c, srt_segments, original_audio=None, vocals_audio=None):
+    async def _stage_translate(
+        self, c, srt_segments, original_audio=None, vocals_audio=None, asr_was_empty=False
+    ):
         # ==================== STAGE 5: AI TRANSLATION ====================
         stage_id = "ai_translation"
         srt_translated = c.out_dir / "translated.srt"
@@ -1126,10 +1128,19 @@ class V1Orchestrator:
                     and v_mode != "manual"
                     and (v_cfg.get("enabled") or v_mode in ("auto", "dialogue", "smart_dialogue", "dual"))
                 )
-                if run_early_voice_lock:
+                # Single acoustic and manual choices can also be settled before
+                # translation. Script-dependent choices stay with stage 6.
+                prefetch_voice = None
+                if v_mode == "manual":
+                    manual = v_cfg.get("manual_voice") or {}
+                    if isinstance(manual, dict):
+                        prefetch_voice = {"voice_source": manual.get("source"), "voice_param": manual.get("param")}
+                elif run_early_voice_lock or (srt_segments and c.visual_sub_to_speech and vocals_audio
+                                               and v_mode == "auto" and not v_cfg.get("dual_voice")
+                                               and not all(getattr(s, "visual_sub_to_speech", False) for s in srt_segments)):
                     try:
                         from ai.v1_auto_voice import decide_video_voice
-                        voice_lock_info = await asyncio.to_thread(
+                        prefetch_voice = await asyncio.to_thread(
                             decide_video_voice,
                             out_dir=str(c.out_dir),
                             srt_segments=srt_segments,
@@ -1140,8 +1151,11 @@ class V1Orchestrator:
                             workspace=str(self.workspace),
                             voice_config=c.effective_cfg["voice_config"],
                             job_id=c.job_id,
-                            visual_sub_to_speech=bool(c.visual_sub_to_speech and asr_was_empty),
+                            visual_sub_to_speech=c.visual_sub_to_speech,
+                            defer_script_fallback=not run_early_voice_lock,
                         )
+                        if run_early_voice_lock:
+                            voice_lock_info = prefetch_voice
                     except Exception as vl_exc:
                         logger.warning("[TRANSLATE] Early voice lock fallback sang speaker='unknown': %s", vl_exc)
 
@@ -1191,23 +1205,29 @@ class V1Orchestrator:
 
                 gemini_key = c.overrides.get("api_key") or ""
                 c.check_stop()
-                translated_segments = await c.run_stage(
-                    asyncio.to_thread(
-                        translate_subtitles,
-                        srt_segments,
-                        c.effective_cfg.get("target_lang", "vi"),
-                        api_key=gemini_key,
-                        video_path=str(c.v_path),
-                        strict=True,
-                        script_mode=v1_script_mode,
-                        cue_meta=cue_meta or None,
-                        gemini_model=flag_gemini or None,
-                        max_speech_speed=(c.effective_cfg.get("feature_flags") or {}).get("V1_MAX_NATURAL_SPEED"),
-                        stop_checker=lambda: shared_state.stop_requested,
-                        folder_scope=str(c.v_path.parent),
-                    ),
-                    timeout=t_out
+                from ai.v1_voice_prefetch import CapCutPrefetch
+                prefetch = None
+                if (prefetch_voice and prefetch_voice.get("voice_source") == "capcut"
+                        and prefetch_voice.get("voice_param") and not prefetch_voice.get("dual_voice")
+                        and not any((c.out_dir / "dubbing").glob("*.mp3"))
+                        and c.effective_cfg.get("target_lang", "vi").lower().startswith("vi")):
+                    prefetch = CapCutPrefetch(c.out_dir / "dubbing", prefetch_voice["voice_param"],
+                                              (c.effective_cfg.get("feature_flags") or {}).get("V1_TTS_WORKERS", 6),
+                                              lambda: shared_state.stop_requested)
+                    c.voice_prefetch = prefetch
+                translation_work = asyncio.to_thread(
+                    translate_subtitles, srt_segments, c.effective_cfg.get("target_lang", "vi"),
+                    api_key=gemini_key, video_path=str(c.v_path), strict=True,
+                    script_mode=v1_script_mode, cue_meta=cue_meta or None, gemini_model=flag_gemini or None,
+                    max_speech_speed=(c.effective_cfg.get("feature_flags") or {}).get("V1_MAX_NATURAL_SPEED"),
+                    stop_checker=lambda: shared_state.stop_requested, folder_scope=str(c.v_path.parent),
+                    _on_ready_texts=prefetch.submit if prefetch else None,
                 )
+                try:
+                    translated_segments = await c.run_stage(translation_work, timeout=t_out)
+                finally:
+                    if prefetch:
+                        prefetch.close(wait=False)
                 save_srt(translated_segments, str(srt_translated))
                 try:
                     import job_tracker
@@ -1493,6 +1513,7 @@ class V1Orchestrator:
                                     delogo_boxes = geo_saved.get("watermarks") or (geo_saved.get("sampling") or {}).get("detected_watermarks") or []
                     except Exception:
                         delogo_boxes = []
+                render_metrics = {}
                 async with async_gpu_gatekeeper("video_rendering", timeout_seconds=t_out, check_stop=c.check_stop):
                     rendered = await c.run_stage(
                         asyncio.to_thread(
@@ -1507,12 +1528,18 @@ class V1Orchestrator:
                             delogo_boxes=delogo_boxes,
                             subtitle_cover_style=sub_cover_style,
                             subtitle_blur_settings=c.effective_cfg,
+                            metrics=render_metrics,
                         ),
                         timeout=t_out
                     )
                 if not rendered or not temp_render_video.is_file() or temp_render_video.stat().st_size < 10240:
 
                     raise RuntimeError("Render video NVENC thất bại hoặc file xuất xưởng bị lỗi.")
+                self.manifest_manager.record_stage_metrics(c.job_id, stage_id, render_metrics)
+                logging.getLogger("v1.performance").info(
+                    "stage_metrics stage=%s job_id=%s metrics=%s",
+                    stage_id, c.job_id, render_metrics,
+                )
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"temp_render": str(temp_render_video)})
             except Exception as exc:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))

@@ -1,0 +1,4 @@
+extend-exclude = ["backend/venv*", "**/venv*", "node_modules"]
+
+[lint]
+select = ["F821", "E9", "F63", "F7"]

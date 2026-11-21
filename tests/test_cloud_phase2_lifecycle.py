@@ -230,11 +230,7 @@ def test_exec_argv_midflight_subprocess_cancellation():
     t = threading.Thread(target=_trigger_abort, daemon=True)
     t.start()
     start_ts = time.monotonic()
-    with (
-        patch.object(colab_bridge, "_write_wsl_temp_script"),
-        patch.object(colab_bridge, "_remove_wsl_temp_file"),
-        patch.object(colab_bridge.subprocess, "Popen", FakePopen),
-    ):
+    with patch.object(colab_bridge.subprocess, "Popen", FakePopen):
         ok, msg = colab_bridge.exec_argv(
             "cjobmid1a1",
             ["python3", "full_pipeline.py", "--input", "/content/in.mp4"],
@@ -389,6 +385,7 @@ def test_stop_verification_recognizes_real_colab_alias_format(monkeypatch):
 
 def test_startup_recover_and_lease_reconciliation(tmp_path: Path):
     store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
+    store.set_concurrency_limit(3)
     video = _make_sample_video(tmp_path)
 
     # Job 1: orphaned session with active session on provider -> stopped and marked failed
@@ -400,11 +397,13 @@ def test_startup_recover_and_lease_reconciliation(tmp_path: Path):
     j2 = store.enqueue(str(video), video_name="j2.mp4")
     c2 = store.claim_next(owner_id="dead-w", lease_seconds=5.0)
     assert store.register_session(c2.job_id, c2.attempt, "dead-w", "cjoborph2a1") is True
-    store.request_cancel(c2.job_id)
 
+    # Claim the third lane before cancellation creates real pending cleanup debt.
     # Job 3: no session created yet -> marked failed without touching provider
     j3 = store.enqueue(str(video), video_name="j3.mp4")
     c3 = store.claim_next(owner_id="dead-w", lease_seconds=5.0)
+    assert c3 is not None
+    store.request_cancel(c2.job_id)
 
     stopped_sessions: list[str] = []
 
@@ -550,3 +549,28 @@ def test_worker_honest_stop_status_and_drain(tmp_path: Path):
     finally:
         release_job.set()
         worker.stop(timeout=2.0)
+
+
+def test_preflight_blocks_new_session_when_fresh_balance_cannot_cover_all_holds(tmp_path, monkeypatch):
+    store = CloudJobStore(tmp_path / "aggregate_preflight.db", rollout_controlled=False)
+    store.set_concurrency_limit(2)
+    video = _make_sample_video(tmp_path)
+    jobs = [store.enqueue(str(video), cu_estimated=0.4, cu_buffer=0.0) for _ in range(2)]
+    claimed = [store.claim_job(job.job_id, f"owner-{index}", provider_usage={"ok": True, "balance": 2.0})
+               for index, job in enumerate(jobs)]
+    assert all(claimed)
+
+    class NoCreateAdapter:
+        def get_usage(self):
+            return {"ok": True, "balance": 0.6}
+
+        def create_session(self, *args, **kwargs):
+            raise AssertionError("aggregate CU gate must reject before creating a GPU session")
+
+    orchestrator = CloudOrchestrator(store=store, adapter=NoCreateAdapter(), allowed_roots=[tmp_path])
+    monkeypatch.setattr(orchestrator, "verify_local_preflight", lambda _input: {})
+    assert orchestrator.process_job(claimed[0], owner_id=claimed[0].owner_id) is False
+    rejected = store.get_job(jobs[0].job_id)
+    assert rejected.state == "failed"
+    assert rejected.error_code == "INSUFFICIENT_CU"
+    assert store.get_job(jobs[1].job_id).state == "provisioning"

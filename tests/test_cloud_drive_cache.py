@@ -1051,7 +1051,7 @@ def test_warm_session_parks_when_drive_cache_is_disabled(
     assert job.state == "completed"
     assert adapter.mount_calls == []
     assert adapter.unmount_calls == []
-    assert adapter.command_order == ["setup", "pipeline", "warm_reset"]
+    assert adapter.command_order == ["setup", "pipeline", "download", "warm_reset"]
     assert adapter.warm_reset_argv is not None
     assert len(adapter.parked_warm_sessions) == 1
     assert adapter.parked_warm_sessions[0]["session_name"] in adapter.active_sessions

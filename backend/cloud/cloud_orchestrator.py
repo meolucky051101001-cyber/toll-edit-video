@@ -31,8 +31,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .cloud_config import DEFAULT_CONFIG
 from .cloud_contract import (
+    CHECKABLE_GPUS,
     CloudCostMeasurementSource,
     CloudErrorCode,
+    GPU_CHECK_TASK,
     GPU_CU_RATES,
     build_input_fingerprint,
     probe_video_metadata,
@@ -70,6 +72,7 @@ _V1_CORE_MODULE_NAMES = (
     "v1_timing_solver.py",
     "v1_speech_guard.py",
     "visual_caption_timing.py",
+    "pipeline_v2/mixer.py",
 )
 
 _FONT_EXTENSIONS = frozenset({".ttf", ".otf", ".ttc"})
@@ -470,12 +473,15 @@ class _JobRun:
     qc_res: Optional[Dict[str, Any]] = None
     parked_warm: bool = False
     final_video_path: Optional[Path] = None
+    final_output_dir: Optional[Path] = None
     output_manifest: Dict[str, Any] = field(default_factory=dict)
     cu_spent: float = 0.0
     elapsed_sec: float = 0.0
     cache_backend: str = "none"
     cache_mounted: bool = False
     cache_status: str = "disabled"
+    is_gpu_check: bool = False
+    subtitle_failure_after_setup: bool = False
 
     @classmethod
     def from_job(
@@ -495,7 +501,10 @@ class _JobRun:
 
         clean_id = re.sub(r"[^a-zA-Z0-9]", "", job_id)[-8:] or uuid.uuid4().hex[:6]
         session_name = validate_session_name(f"cjob{clean_id}a{session_attempt}")
-        gemini_key, extra_secrets = _resolve_gemini_key_and_secrets()
+        is_gpu_check = getattr(job, "task_type", None) == GPU_CHECK_TASK
+        gemini_key, extra_secrets = (
+            ("", ()) if is_gpu_check else _resolve_gemini_key_and_secrets()
+        )
         start_time = time.time()
         runtime_start_time: Optional[float] = None
         last_budget_check_ts = start_time
@@ -529,6 +538,7 @@ class _JobRun:
             runtime_end_time=runtime_end_time, cu_accrued=cu_accrued, cu_accrual_ts=cu_accrual_ts,
             provider_rate_used=provider_rate_used, provider_rate_eligible=provider_rate_eligible,
             setup_phase_seconds=setup_phase_seconds, stage_timings=stage_timings, stage_state=stage_state,
+            is_gpu_check=is_gpu_check,
         )
 
     def _mark_stage(self, name: Optional[str]) -> None:
@@ -711,7 +721,7 @@ class _JobRun:
                 pass
         return ok
 
-    def _finalize_session_once(self) -> Dict[str, Any]:
+    def _finalize_session_once(self, *, allow_warm_reuse: bool = False) -> Dict[str, Any]:
         if self.cleanup_done:
             return dict(self.cleanup_result or {"verified_stopped": False,
                                            "cleanup_status": "failed_retry_needed",
@@ -723,9 +733,28 @@ class _JobRun:
                 "attempts": 0,
                 "error": None,
             }
+        parked_warm = allow_warm_reuse and self.orchestrator._park_warm_session_on_success(
+            self.session_name,
+            self.gpu_type,
+            source_job_id=self.job_id,
+            before_park=self._unmount_drive_before_warm_park if self.cache_mounted else None,
+            rate_per_hour=self.rate_per_hour,
+        )
         self.cleanup_done = True
-        logger.info("Dọn dẹp: Dừng và xác nhận session Colab %s...", self.session_name)
-        res = self.orchestrator._verify_or_stop_session(self.session_name, extra_secrets=self.extra_secrets)
+        if parked_warm:
+            res = {
+                "verified_stopped": True,
+                "cleanup_status": "verified",
+                "attempts": 0,
+                "error": None,
+                "parked_warm": True,
+            }
+        else:
+            logger.info("Dọn dẹp: Dừng và xác nhận session Colab %s...", self.session_name)
+            res = self.orchestrator._verify_or_stop_session(
+                self.session_name,
+                extra_secrets=self.extra_secrets,
+            )
         self.cleanup_result = dict(res)
         if res.get("verified_stopped"):
             self.runtime_end_time = time.time()
@@ -743,7 +772,7 @@ class _JobRun:
             self.session_name,
             verified_stopped=bool(res.get("verified_stopped")),
             cleanup_status=str(res.get("cleanup_status") or "failed_retry_needed"),
-            attempts=int(res.get("attempts") or 1),
+            attempts=0 if parked_warm else int(res.get("attempts") or 1),
             error=safe_cleanup_err,
         )
         if not res.get("verified_stopped"):
@@ -762,15 +791,24 @@ class _JobRun:
         self.source_snapshot: Optional[Dict[str, Any]] = None
         try:
             self.gpu_type = validate_gpu_type(self.job.gpu_type)
-            validate_task_type(getattr(self.job, "task_type", "full_pipeline"))
-            self.voice_choice = validate_voice(getattr(self.job, "voice", "BV562_streaming") or "BV562_streaming")
-            self.validated_input = validate_video_input(
-                self.job.video_path,
-                allowed_roots=self.orchestrator.allowed_roots,
-                require_exists=True,
-            )
-            self.preflight_info = self.orchestrator.verify_local_preflight(self.validated_input)
-            self.source_snapshot = self.preflight_info.get("source_snapshot")
+            if self.is_gpu_check:
+                if self.gpu_type not in CHECKABLE_GPUS:
+                    raise CloudValidationError(
+                        "GPU này không có trong danh sách thử cấp.",
+                        code="UNSUPPORTED_GPU",
+                    )
+            else:
+                validate_task_type(getattr(self.job, "task_type", "full_pipeline"))
+                self.voice_choice = validate_voice(
+                    getattr(self.job, "voice", "BV562_streaming") or "BV562_streaming"
+                )
+                self.validated_input = validate_video_input(
+                    self.job.video_path,
+                    allowed_roots=self.orchestrator.allowed_roots,
+                    require_exists=True,
+                )
+                self.preflight_info = self.orchestrator.verify_local_preflight(self.validated_input)
+                self.source_snapshot = self.preflight_info.get("source_snapshot")
             self.rate_per_hour = GPU_CU_RATES.get(self.gpu_type, 1.15)
         except Exception as val_exc:
             safe_err = redact_secrets(str(val_exc), extra_secrets=self.extra_secrets)
@@ -796,7 +834,7 @@ class _JobRun:
             self.job_id,
             self.session_attempt,
             self.session_name,
-            self.validated_input.display_name,
+            self.job.video_name if self.is_gpu_check else self.validated_input.display_name,
             self.gpu_type,
         )
 
@@ -831,6 +869,18 @@ class _JobRun:
                 error_code=CloudErrorCode.BUDGET_UNCERTAIN.value,
             )
             return False
+
+        if hasattr(self.orchestrator.store, "check_reserved_provider_balance"):
+            reserved_gate = self.orchestrator.store.check_reserved_provider_balance()
+            if not reserved_gate.get("allowed", False):
+                self._update(
+                    0,
+                    "Lỗi: Số dư Colab không đủ cho các job đã giữ chỗ",
+                    state="failed",
+                    error=reserved_gate.get("reason") or "Không xác nhận được tổng giữ chỗ CU.",
+                    error_code=reserved_gate.get("code") or CloudErrorCode.BUDGET_UNCERTAIN.value,
+                )
+                return False
 
         balance = snap.get("balance")
         required_bal = max(
@@ -893,7 +943,9 @@ class _JobRun:
     def _stage_provision(self):
         self._mark_stage("provisioning")
         # 2. Đăng ký ownership session & khởi tạo (hoặc tái sử dụng máy giữ ấm) Session Colab (`provisioning`)
-        warm_entry = self.orchestrator._pop_warm_session_entry(self.gpu_type)
+        warm_entry = (
+            None if self.is_gpu_check else self.orchestrator._pop_warm_session_entry(self.gpu_type)
+        )
         self.reused_warm_session = warm_entry[0] if warm_entry else None
         self.warm_parked_at = warm_entry[1] if warm_entry else None
         if self.reused_warm_session:
@@ -969,11 +1021,18 @@ class _JobRun:
 
         if not created:
             self.session_may_exist = False
-            err_code = (
-                CloudErrorCode.PROVIDER_503.value
-                if "503" in str(msg) or "hết máy" in str(msg).lower()
-                else CloudErrorCode.SESSION_CREATE_FAILED.value
-            )
+            provision_error = str(msg).lower()
+            if re.search(r"\b(?:503|412)\b", provision_error) or "hết máy" in provision_error:
+                err_code = CloudErrorCode.PROVIDER_503.value
+            elif "backend rejected accelerator" in provision_error:
+                err_code = CloudErrorCode.GPU_ALLOCATION_REFUSED.value
+            else:
+                err_code = CloudErrorCode.SESSION_CREATE_FAILED.value
+                if self.is_gpu_check:
+                    raise _OrchestratorStageError(
+                        err_code,
+                        f"Chưa xác nhận kết quả cấp GPU: {msg}",
+                    )
             self._update(
                 0,
                 "Lỗi: Tạo máy ảo Colab thất bại",
@@ -994,6 +1053,59 @@ class _JobRun:
             return False
 
         return True
+
+    def _stage_gpu_check(self) -> bool:
+        self._mark_stage("gpu_check")
+        gpu_names = ""
+        if isinstance(self.orchestrator.adapter, ColabProviderAdapter):
+            inventory = self.orchestrator.adapter.get_sessions_status()
+            if inventory.get("ok"):
+                for entry in inventory.get("sessions", []):
+                    if entry.get("name") == self.session_name and entry.get("is_active"):
+                        hardware = re.search(
+                            r"\|\s*Hardware:\s*([^|]+)",
+                            str(entry.get("raw", "")),
+                        )
+                        if hardware:
+                            gpu_names = hardware.group(1).strip()
+                            break
+        self._raise_if_aborted()
+        checked = bool(gpu_names)
+        if not checked:
+            checked, gpu_names = _call_with_cancel(
+                self.orchestrator.adapter.exec_argv,
+                self.session_name,
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                cwd="/content",
+                timeout=30,
+                cancel_check=self._cancel_probe,
+            )
+        self._raise_if_aborted()
+        if not checked:
+            raise _OrchestratorStageError(
+                CloudErrorCode.EXEC_FAILED.value,
+                "Colab đã mở máy nhưng chưa xác minh được GPU.",
+            )
+        if not re.search(rf"\b{re.escape(self.gpu_type)}\b", str(gpu_names), re.I):
+            raise _OrchestratorStageError(
+                CloudErrorCode.ENV_GPU_MISMATCH.value,
+                f"Phiên Colab không trả về đúng GPU {self.gpu_type}.",
+            )
+        cleanup_res = self._finalize_session_once()
+        self._raise_if_aborted()
+        if not cleanup_res.get("verified_stopped"):
+            raise _OrchestratorStageError(
+                CloudErrorCode.CLEANUP_FAILED.value,
+                "Đã xác minh GPU nhưng chưa xác nhận thu hồi máy.",
+            )
+        return self._update(
+            100,
+            f"Đã xác minh GPU {self.gpu_type} và thu hồi máy ảo.",
+            state="completed",
+            cleanup_status="verified",
+            cu_actual=self._estimate_elapsed_cu(),
+            measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
+        )
 
     def _stage_upload(self):
         self._mark_stage("upload")
@@ -1124,13 +1236,27 @@ class _JobRun:
             self._raise_if_aborted()
             raise _JobAborted("lease_lost", is_lease_lost=True)
 
-        tar_ok, tar_msg = _call_with_cancel(
-            self.orchestrator.adapter.exec_argv,
-            self.session_name,
-            ["tar", "-xzf", "/content/cloud_bundle.tar.gz", "-C", "/content"],
-            cwd="/content",
-            cancel_check=self._cancel_probe,
-        )
+        self.use_monitored_exec = isinstance(self.orchestrator.adapter, ColabProviderAdapter)
+        extract_argv = ["tar", "-xzf", "/content/cloud_bundle.tar.gz", "-C", "/content"]
+        if self.use_monitored_exec:
+            tar_ok, tar_msg = self.orchestrator.adapter.run_argv_monitored(
+                self.session_name,
+                extract_argv,
+                cwd="/content",
+                timeout=90,
+                cancel_check=self._cancel_probe,
+                job_tag="extract",
+                poll_interval_seconds=2.0,
+            )
+        else:
+            tar_ok, tar_msg = _call_with_cancel(
+                self.orchestrator.adapter.exec_argv,
+                self.session_name,
+                extract_argv,
+                cwd="/content",
+                timeout=90,
+                cancel_check=self._cancel_probe,
+            )
         self._raise_if_aborted()
         if not tar_ok:
             raise _OrchestratorStageError(
@@ -1215,7 +1341,6 @@ class _JobRun:
             if not DEFAULT_CONFIG.get("cloud_cache_save_enabled", True):
                 setup_argv.append("--no-cache-save")
         setup_env_vars = _build_asr_engine_env_vars()
-        self.use_monitored_exec = isinstance(self.orchestrator.adapter, ColabProviderAdapter)
         if self.use_monitored_exec:
             env_ok, env_msg = self.orchestrator.adapter.run_argv_monitored(
                 self.session_name,
@@ -1321,6 +1446,10 @@ class _JobRun:
         if not pipe_ok:
             pipe_err_code = _extract_pipeline_error_code(safe_pipe_output)
             pipeline_result = _parse_pipeline_result(safe_pipe_output) or {}
+            self.subtitle_failure_after_setup = (
+                pipeline_result.get("status") == "error"
+                and pipe_err_code == CloudErrorCode.SUBTITLE_BUILD_FAILED.value
+            )
             pipeline_detail = str(pipeline_result.get("error") or safe_pipe_output[-2000:])
             raise _OrchestratorStageError(
                 pipe_err_code,
@@ -1401,25 +1530,24 @@ class _JobRun:
         ]
         try:
             if self.use_monitored_exec:
-            save_ok, save_output = self.orchestrator.adapter.run_argv_monitored(
-                self.session_name,
-                save_argv,
-                cwd="/content",
-                env_vars=_build_asr_engine_env_vars(),
-                timeout=save_timeout,
-                cancel_check=self._cancel_probe,
-                job_tag="cache_save",
+                save_ok, save_output = self.orchestrator.adapter.run_argv_monitored(
+                    self.session_name,
+                    save_argv,
+                    cwd="/content",
+                    env_vars=_build_asr_engine_env_vars(),
+                    timeout=save_timeout,
+                    cancel_check=self._cancel_probe,
                 )
             else:
                 save_ok, save_output = _call_with_cancel(
                     self.orchestrator.adapter.exec_argv,
-                self.session_name,
-                save_argv,
-                cwd="/content",
-                env_vars=_build_asr_engine_env_vars(),
-                timeout=save_timeout,
-                cancel_check=self._cancel_probe,
-            )
+                    self.session_name,
+                    save_argv,
+                    cwd="/content",
+                    env_vars=_build_asr_engine_env_vars(),
+                    timeout=save_timeout,
+                    cancel_check=self._cancel_probe,
+                )
             self._raise_if_aborted()
         except _JobAborted as abort_exc:
             if not abort_exc.is_budget_exceeded:
@@ -1564,7 +1692,7 @@ class _JobRun:
 
     def _stage_validate(self):
         self._mark_stage("validate")
-        # 7. Kiểm tra QC tại vùng staging & xuất thành phẩm atomic an toàn (`validating`)
+        # 7. Kiểm tra QC tại vùng staging và chuẩn bị đầu ra an toàn (`validating`)
         self._raise_if_aborted()
         if not self._update(
             95,
@@ -1606,26 +1734,51 @@ class _JobRun:
         else:
             default_cloud_dir = Path(r"D:\ToolV1_Cloud")
             final_out_dir = default_cloud_dir if Path("D:/").exists() else self.attempt_res_dir
-        self.final_video_path = self.orchestrator.export_deliverable_atomic(
-            dl_file,
-            final_out_dir,
-            job_id=self.job_id,
-            attempt=self.session_attempt,
-            video_name=self.job.video_name or self.validated_input.display_name,
-            expected_sha256=self.qc_res["sha256"],
-        )
-        try:
-            if not self.is_url and self.source_snapshot:
-                src_final = Path(self.validated_input.normalized_value)
-                if not src_final.is_file() or src_final.stat().st_size != self.source_snapshot["size_bytes"]:
-                    raise _OrchestratorStageError(
-                        CloudErrorCode.VALIDATION_FAILED.value,
-                        "File video nguồn cục bộ không còn nguyên vẹn sau quá trình xử lý Cloud.",
-                    )
+        self.final_output_dir = final_out_dir
+        if not self.is_url and self.source_snapshot:
+            src_final = Path(self.validated_input.normalized_value)
+            if not src_final.is_file() or src_final.stat().st_size != self.source_snapshot["size_bytes"]:
+                raise _OrchestratorStageError(
+                    CloudErrorCode.VALIDATION_FAILED.value,
+                    "File video nguồn cục bộ không còn nguyên vẹn sau quá trình xử lý Cloud.",
+                )
+        self._raise_if_aborted()
 
+    def _stage_cleanup(self):
+        self._mark_stage("cleanup")
+        # 8. Thu hồi & xác nhận session trước bước hoàn tất; tính lượng CU ước tính theo thời gian chạy
+        cleanup_res = self._finalize_session_once(allow_warm_reuse=True)
+        self.parked_warm = bool(cleanup_res.get("parked_warm"))
+        self.cu_spent = self._estimate_elapsed_cu()
+        self.elapsed_sec = max(
+            0.0,
+            (self.runtime_end_time if self.runtime_end_time is not None else time.time())
+            - (self.runtime_start_time or self.start_time),
+        )
+        if not cleanup_res.get("verified_stopped"):
+            raise _OrchestratorStageError(
+                CloudErrorCode.CLEANUP_FAILED.value,
+                cleanup_res.get("error") or "Cloud session cleanup is unverified.",
+            )
+        if self.cache_status == "save_skipped_budget":
+            aborted, abort_reason = self._check_abort()
+            if aborted and abort_reason not in {"budget_exceeded", "budget_uncertain"}:
+                self._raise_if_aborted()
+        else:
+            self._raise_if_aborted()
+        dl_file = Path(self.dl_path)
+        try:
+            self.final_video_path = self.orchestrator.export_deliverable_atomic(
+                dl_file,
+                self.final_output_dir,
+                job_id=self.job_id,
+                attempt=self.session_attempt,
+                video_name=self.job.video_name or self.validated_input.display_name,
+                expected_sha256=self.qc_res["sha256"],
+            )
             remote_meta = self.qc_res.get("remote_metadata") or {}
             local_probe = self.qc_res.get("local_probe") or {}
-            self.output_manifest: Dict[str, Any] = {
+            self.output_manifest = {
                 "schema_version": 1,
                 "job_id": self.job_id,
                 "attempt": self.session_attempt,
@@ -1655,75 +1808,22 @@ class _JobRun:
                 "pipeline_step_seconds": remote_meta.get("step_timings_seconds") or {},
             }
             (self.attempt_res_dir / "output_manifest.json").write_text(
-                redact_secrets(json.dumps(self.output_manifest, indent=2, ensure_ascii=False), extra_secrets=self.extra_secrets),
+                redact_secrets(
+                    json.dumps(self.output_manifest, indent=2, ensure_ascii=False),
+                    extra_secrets=self.extra_secrets,
+                ),
                 encoding="utf-8",
             )
-
             self._raise_if_aborted()
         except Exception:
             if self.parked_warm:
                 self.orchestrator.release_warm_sessions(self.gpu_type)
-            if self.final_video_path != dl_file:
+            if self.final_video_path and self.final_video_path != dl_file:
                 try:
-                    Path(self.final_video_path).unlink(missing_ok=True)
+                    self.final_video_path.unlink(missing_ok=True)
                 except OSError:
                     pass
             raise
-
-    def _stage_cleanup(self):
-        self._mark_stage("cleanup")
-        # 8. Thu hồi & xác nhận session trước bước hoàn tất; tính lượng CU ước tính theo thời gian chạy
-        self.parked_warm = False
-        if (
-            self.session_may_exist
-            and not self.cleanup_done
-            and self.orchestrator._park_warm_session_on_success(
-                self.session_name,
-                self.gpu_type,
-                source_job_id=self.job_id,
-                before_park=self._unmount_drive_before_warm_park if self.cache_mounted else None,
-                rate_per_hour=self.rate_per_hour,
-            )
-        ):
-            self.parked_warm = True
-            self.cleanup_done = True
-            self.runtime_end_time = time.time()
-            self._sync_runtime_usage(check_provider=False)
-            self.cleanup_result = {
-                "verified_stopped": True,
-                "cleanup_status": "verified",
-                "attempts": 0,
-                "error": None,
-            }
-            self.orchestrator.store.record_cleanup_result(
-                self.job_id,
-                self.raw_attempt,
-                self.session_name,
-                verified_stopped=True,
-                cleanup_status="verified",
-                attempts=0,
-                error=None,
-            )
-            cleanup_res = dict(self.cleanup_result)
-        else:
-            cleanup_res = self._finalize_session_once()
-        self.cu_spent = self._estimate_elapsed_cu()
-        self.elapsed_sec = max(
-            0.0,
-            (self.runtime_end_time if self.runtime_end_time is not None else time.time())
-            - (self.runtime_start_time or self.start_time),
-        )
-        if not cleanup_res.get("verified_stopped"):
-            raise _OrchestratorStageError(
-                CloudErrorCode.CLEANUP_FAILED.value,
-                cleanup_res.get("error") or "Cloud session cleanup is unverified.",
-            )
-        if self.cache_status == "save_skipped_budget":
-            aborted, abort_reason = self._check_abort()
-            if aborted and abort_reason not in {"budget_exceeded", "budget_uncertain"}:
-                self._raise_if_aborted()
-        else:
-            self._raise_if_aborted()
         final_cleanup_status = str(
             cleanup_res.get("cleanup_status")
             or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
@@ -1889,7 +1989,9 @@ class _JobRun:
                 )
             return False
 
-        cleanup_res = self._finalize_session_once()
+        cleanup_res = self._finalize_session_once(
+            allow_warm_reuse=self.subtitle_failure_after_setup,
+        )
         self.cu_spent = self._estimate_elapsed_cu()
         safe_exc = redact_secrets(str(exc), extra_secrets=self.extra_secrets)
         exc_error_code = (
@@ -1922,7 +2024,7 @@ class CloudOrchestrator:
         adapter: Optional[ColabProviderAdapter] = None,
         allowed_roots: Optional[Sequence[str | Path]] = None,
         *,
-        enable_warm_session_reuse: Optional[bool] = None,
+        enable_warm_session_reuse: bool = False,
         has_pending_work_callback: Optional[Callable[[str], bool]] = None,
     ):
         self.store = store or CloudJobStore()
@@ -1930,13 +2032,7 @@ class CloudOrchestrator:
         self.allowed_roots = allowed_roots
         self.backend_dir = Path(__file__).resolve().parent.parent
         self.gpu_scripts_dir = Path(__file__).resolve().parent / "gpu_scripts"
-        if enable_warm_session_reuse is None:
-            self.enable_warm_session_reuse = (
-                isinstance(self.adapter, ColabProviderAdapter)
-                and bool(DEFAULT_CONFIG.get("warm_session_reuse_enabled", True))
-            )
-        else:
-            self.enable_warm_session_reuse = bool(enable_warm_session_reuse)
+        self.enable_warm_session_reuse = bool(enable_warm_session_reuse)
         self.has_pending_work_callback = has_pending_work_callback
         self._warm_lock = threading.Lock()
         self._warm_sessions: Dict[str, Dict[str, Any]] = {}
@@ -2097,7 +2193,7 @@ class CloudOrchestrator:
                     continue
                 if self.has_waiting_work(g_type) and now_ts < exp_ts:
                     continue
-                if rem_fn(sname):
+                if rem_fn(sname, expires_at=exp_ts):
                     self._cancel_warm_timer(sname)
                     to_stop.append((sname, g_type, row.get("source_job_id"), row.get("parked_at")))
         now_mono = time.monotonic()
@@ -2245,7 +2341,7 @@ class CloudOrchestrator:
         )
         handoff_s = min(
             max_keepalive_s,
-            max(15, int(DEFAULT_CONFIG.get("warm_session_handoff_seconds", 180) or 180)),
+            max(15, int(DEFAULT_CONFIG.get("warm_session_handoff_seconds", 300) or 300)),
         )
         ttl_s = handoff_s if waiting_next else keepalive_s
         if ttl_s <= 0:
@@ -2283,28 +2379,39 @@ class CloudOrchestrator:
             return False
 
         evicted_snames: List[str] = []
-        with self._warm_lock:
-            self._warm_parked_at[session_name] = time.time()
         park_fn = getattr(self.store, "park_warm_session", None)
         rem_fn = getattr(self.store, "remove_warm_session", None)
         if callable(park_fn):
+            parked_at = time.time()
+            with self._warm_lock:
+                self._warm_parked_at[session_name] = parked_at
             evicted_snames = park_fn(
                 session_name,
                 gpu_norm,
                 ttl_seconds=float(ttl_s),
                 source_job_id=source_job_id,
                 keepalive_mode=not waiting_next,
+                now=parked_at,
             )
+        else:
+            parked_at = time.time()
+            with self._warm_lock:
+                self._warm_parked_at[session_name] = parked_at
 
         def _expire_warm() -> None:
             with _GLOBAL_WARM_LOCK:
                 _GLOBAL_WARM_TIMERS.pop((self._scope_key, session_name), None)
             should_stop = False
             if callable(rem_fn):
-                should_stop = bool(rem_fn(session_name))
+                expires_at = parked_at + float(ttl_s)
+                should_stop = bool(rem_fn(session_name, expires_at=expires_at))
             with self._warm_lock:
                 cur = self._warm_sessions.get(gpu_norm)
-                if cur and cur.get("session_name") == session_name:
+                if (
+                    cur
+                    and cur.get("session_name") == session_name
+                    and cur.get("parked_at") == parked_at
+                ):
                     self._warm_sessions.pop(gpu_norm, None)
                     should_stop = True
             if should_stop:
@@ -2323,7 +2430,7 @@ class CloudOrchestrator:
                     "session_name": session_name,
                     "gpu_type": gpu_norm,
                     "source_job_id": source_job_id,
-                    "parked_at": time.time(),
+                    "parked_at": parked_at,
                     "expires_at": time.monotonic() + float(ttl_s),
                     "keepalive_mode": not waiting_next,
                 }
@@ -2604,8 +2711,16 @@ class CloudOrchestrator:
         missing_modules: List[str] = []
         for mod_name in env_manifest.get("required_v1_modules", []):
             candidate_scripts = scripts_dir / mod_name
-            candidate_backend = backend_root / mod_name
-            target = candidate_backend if mod_name in _V1_CORE_MODULE_NAMES else candidate_scripts
+            candidate_backend = (
+                backend_root / "pipeline_v2" / mod_name
+                if mod_name == "mixer.py"
+                else backend_root / mod_name
+            )
+            target = (
+                candidate_backend
+                if mod_name in _V1_CORE_MODULE_NAMES or mod_name == "mixer.py"
+                else candidate_scripts
+            )
             if not target.is_file() or target.stat().st_size == 0:
                 missing_modules.append(mod_name)
         if missing_modules:
@@ -2957,6 +3072,8 @@ class CloudOrchestrator:
                 return False
             if not run._stage_provision():
                 return False
+            if run.is_gpu_check:
+                return run._stage_gpu_check()
             run._stage_upload()
             run._stage_setup()
             run._stage_pipeline()

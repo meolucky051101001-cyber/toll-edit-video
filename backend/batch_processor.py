@@ -266,6 +266,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
 async def _run_v2_local_video(c, verify_delivered_product):
     try:
+        from pipeline_v2.config import QCGatePolicy
         from pipeline_v2.video_pipeline import (
             VideoPipelineRequest,
             VideoPipelineRunner,
@@ -274,6 +275,8 @@ async def _run_v2_local_video(c, verify_delivered_product):
         async def v2_progress(stage: str, state: str):
             await c.notify("[pipeline v2] {}: {}".format(stage, state))
 
+        source_sha256 = fingerprint(c.video_path)
+        source_hash_short = source_sha256
         # Prevent overwriting an existing output that belongs to a different video
         default_dest_name = f"Dubbed_{c.base_name}.mp4"
         final_dest = os.path.join(c.output_dir, default_dest_name)

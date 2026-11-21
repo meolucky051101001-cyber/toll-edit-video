@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import sys
 import time
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))

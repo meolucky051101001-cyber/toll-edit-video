@@ -32,6 +32,71 @@ def test_detector_disagreement_is_unknown_not_caption_absence(monkeypatch):
         geometry.observe_caption_boxes(None, np.zeros((10,10,3)),band_top=.72,band_bottom=.78)
 
 
+def test_compact_caption_probe_prefers_spoken_rows_over_corner_badge():
+    from backend.cloud.gpu_scripts import full_pipeline
+
+    def boxes(y1, y2, text, x1=.32, x2=.68):
+        x1, x2 = (x1 * 1440, x2 * 1440)
+        y1, y2 = ((y1 * 1280 - 1049) * 2, (y2 * 1280 - 1049) * 2)
+        return ([(x1, y1), (x2, y1), (x2, y2), (x1, y2)], text, .9)
+
+    badge = boxes(.958, .976, "Blind Box Unboxing", x1=.75, x2=.96)
+    observations = iter([
+        [boxes(.88, .90, "open the package"), boxes(.92, .94, "打开盒子"), badge],
+        [boxes(.89, .91, "change her paws"), boxes(.95, .97, "换她的小爪子"), badge],
+    ])
+    reader = SimpleNamespace(readtext=lambda *args, **kwargs: next(observations))
+    segments = [{"id": 1, "start": 0., "end": 2.}, {"id": 2, "start": 2., "end": 4.}]
+    band, y_bounds, x_bounds = full_pipeline._probe_compact_caption_band(
+        reader, lambda t: (True, np.zeros((1280, 720, 3), dtype=np.uint8)),
+        [(segments[0], [1.]), (segments[1], [3.])],
+        {1: "Now we open the package", 2: "I have to change her paws"},
+        width=720, height=1280, duration=4.,
+    )
+    assert set(band.selected_by_segment) == {1, 2}
+    assert y_bounds == pytest.approx((.88, .97))
+    assert x_bounds == pytest.approx((.265, .735))
+
+
+def test_compact_caption_geometry_projects_boxes_into_the_source_frame(monkeypatch):
+    probes = []
+
+    def detect(reader, crop, *, top, bottom, scale):
+        probes.append((crop.shape[1], scale))
+        return [[.2, .9, .8, .92]]
+
+    monkeypatch.setattr(geometry, "_detect", detect)
+    measured = geometry.observe_caption_boxes(
+        object(), np.zeros((100, 100, 3)), band_top=.87, band_bottom=.98, x_bounds=(.25, .75),
+    )
+    assert probes == [(50, 1.5), (50, 2.)]
+    assert measured[0] == pytest.approx([.35, .9, .65, .92])
+
+
+@pytest.mark.parametrize("corroborated", [True, False])
+def test_larger_probe_requires_an_independent_caption_measurement(monkeypatch, corroborated):
+    boxes = {
+        1.: [[.18, .735, .60, .775]],
+        1.25: [[.71, .731, .93, .771]],
+        1.5: [[.22, .78, .64, .809]],
+        2.: [[.17, .734, .61, .777]] if corroborated else [[.68, .78, .98, .81]],
+    }
+    attempted = []
+
+    def detect(*args, scale, **kwargs):
+        attempted.append(scale)
+        return boxes[scale]
+
+    monkeypatch.setattr(geometry, "_detect", detect)
+    frame = np.zeros((10, 10, 3))
+    if corroborated:
+        assert geometry.observe_caption_boxes(object(), frame, band_top=.72, band_bottom=.82) == boxes[2.]
+    else:
+        with pytest.raises(geometry.CaptionGeometryError, match="scales disagree"):
+            geometry.observe_caption_boxes(object(), frame, band_top=.72, band_bottom=.82)
+    assert attempted == [1., 1.5, 1.25, 2.]
+
+
 def test_text_without_dialogue_anchor_is_not_masked_as_caption(monkeypatch):
     monkeypatch.setattr(geometry, "_detect", lambda *a, **kw: [[.2,.72,.8,.78]])
     with pytest.raises(geometry.CaptionGeometryError, match="no verified"):
@@ -79,6 +144,70 @@ def test_reacquisition_keeps_empty_gaps_and_source_masks_outside_speech(tmp_path
     assert max(row['end'] for row in rows)==1.
     assert all(row['end']<=.3 or row['start']>=.7 for row in rows)
     assert report['empty_samples']>0 and report['caption_samples']>0
+
+
+@pytest.mark.parametrize('variable_hint', [True, False])
+def test_caption_clock_uses_source_pts_when_opencv_timestamps_repeat(tmp_path, monkeypatch, variable_hint):
+    import cv2
+
+    pts = [0., .031, .071, .1, .137, .2, .23, .27]
+    seeks = []
+
+    class Capture:
+        position = 0
+
+        def isOpened(self):
+            return True
+
+        def release(self):
+            pass
+
+        def grab(self):
+            if self.position == len(pts):
+                return False
+            self.position += 1
+            return True
+
+        def read(self):
+            index = self.position
+            return self.grab(), np.full((1, 1, 3), index, dtype=np.uint8)
+
+        def set(self, key, position):
+            seeks.append(position)
+            self.position = position
+            return True
+
+        def get(self, key):
+            return {
+                cv2.CAP_PROP_FRAME_WIDTH: 720, cv2.CAP_PROP_FRAME_HEIGHT: 1280,
+                cv2.CAP_PROP_FPS: 10., cv2.CAP_PROP_FRAME_COUNT: len(pts),
+                cv2.CAP_PROP_POS_FRAMES: self.position, cv2.CAP_PROP_POS_MSEC: 0.,
+            }[key]
+
+    def probe(_path, *, include_frames=False):
+        if include_frames:
+            return {'format': {'start_time': '5.0'},
+                    'frames': [{'best_effort_timestamp_time': str(5. + time)} for time in pts]}
+        return {'streams': [{'r_frame_rate': '30/1', 'avg_frame_rate': '29/1' if variable_hint else '30/1'}]}
+
+    monkeypatch.setattr(cv2, 'VideoCapture', lambda _: Capture())
+    monkeypatch.setattr(geometry, '_probe_frame_clock', probe)
+    monkeypatch.setattr(geometry, 'observe_caption_boxes', lambda reader, frame, **kw:
+                        [[.1, .72, .9, .78]] if 2 <= frame[0, 0, 0] < 5 else [])
+    cues = [dict(id=1, start=0., end=.3, text='字幕')]
+    report = geometry.acquire_caption_geometry('source', cues, None, duration=.3, audit_path=tmp_path / 'pts.json')
+    assert report['frame_clock'] == 'source_presentation_timestamps'
+    assert report['passed'] and report['refinement_frames'] > 0
+    assert [(row['start'], row['end']) for row in cues[0]['tracking_blocks']] == [(pts[2], pts[5])]
+    assert bool(seeks) == (not variable_hint)
+
+
+def test_duplicate_source_presentation_timestamps_still_fail(monkeypatch):
+    monkeypatch.setattr(geometry, '_probe_frame_clock', lambda *a, **kw: {
+        'frames': [{'best_effort_timestamp_time': '0'}, {'best_effort_timestamp_time': '0'}],
+    })
+    with pytest.raises(geometry.CaptionGeometryError, match='Source presentation timestamps must increase'):
+        geometry._verified_frame_times('source', 1.)
 
 
 @pytest.mark.parametrize('change',[
@@ -133,7 +262,7 @@ def test_cloud_bundle_runs_standalone_ass_with_new_caption_contract(tmp_path):
     root=Path(__file__).resolve().parents[1]
     bundle=tmp_path/'bundle';bundle.mkdir()
     for name in _V1_CORE_MODULE_NAMES:
-        shutil.copy2(root/'backend'/name,bundle/name)
+        shutil.copy2(root/'backend'/name,bundle/Path(name).name)
     for path in (root/'backend/cloud/gpu_scripts').glob('*.py'):
         shutil.copy2(path,bundle/path.name)
     script="""import sys
@@ -226,3 +355,14 @@ def test_same_line_word_split_and_two_line_cluster_agree_across_scales(monkeypat
     assert len(res_p) == 2
     assert res_p[0][0] == pytest.approx(0.2125) and res_p[0][2] == pytest.approx(0.7903)
 
+
+
+def test_cloud_bundle_ships_the_local_mixer(tmp_path):
+    from backend.cloud.cloud_orchestrator import _V1_CORE_MODULE_NAMES
+    root = Path(__file__).resolve().parents[1]
+    assert "pipeline_v2/mixer.py" in _V1_CORE_MODULE_NAMES
+    assert not (root / "backend/cloud/gpu_scripts/mixer.py").exists()
+    names = [Path(name).name for name in _V1_CORE_MODULE_NAMES]
+    assert len(names) == len(set(names))
+    script_names = {path.name for path in (root / "backend/cloud/gpu_scripts").glob("*.py")}
+    assert not script_names.intersection(names)

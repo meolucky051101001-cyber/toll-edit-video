@@ -27,10 +27,12 @@ except Exception:
 
 try:
     from . import batch_control
+    from .config.env import env_flag
     from .subtitle_blur import blur_regions, resolve_blur_settings
     from .v1_media_streams import MainVideo, validate_video_output
 except ImportError:
     import batch_control
+    from config.env import env_flag
     from subtitle_blur import blur_regions, resolve_blur_settings
     from v1_media_streams import MainVideo, validate_video_output
 
@@ -41,7 +43,7 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt"
 
 def gpu_localized_blur_available() -> bool:
     """Return True when CUDA GPU localized blur is enabled and available."""
-    if os.getenv("V1_GPU_LOCALIZED_BLUR", "1").strip().lower() in ("0", "false", "no", "off"):
+    if not env_flag("V1_GPU_LOCALIZED_BLUR", True):
         return False
     try:
         import torch
@@ -72,7 +74,7 @@ def _use_cpu_inplace_blur() -> bool:
     """Return True when OpenCV in-place ROI boxblur is available and enabled."""
     if cv2 is None:
         return False
-    return os.getenv("V1_BLUR_CPU_INPLACE", "1").strip().lower() not in ("0", "false", "no", "off")
+    return env_flag("V1_BLUR_CPU_INPLACE", True)
 
 
 def _boxblur_plane_inplace_cv2(plane_2d: np.ndarray, radius: int, power: int = 3) -> None:
@@ -265,7 +267,7 @@ def render_video_with_gpu_localized_blur(
                 filter_script_path = output_video_path + ".gpu_post_filters.txt"
                 with open(filter_script_path, "w", encoding="utf-8") as f_scr:
                     f_scr.write(post_blur_vf)
-                enc_cmd += ["-filter_script:v", filter_script_path]
+                enc_cmd += ["-/filter:v", filter_script_path]
             else:
                 enc_cmd += ["-vf", post_blur_vf]
 

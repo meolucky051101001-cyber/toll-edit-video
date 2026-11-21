@@ -46,6 +46,8 @@ TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from telegram_access import install_access_gate, load_allowed_chat_ids
+
 try:
     from environment import load_environment
     load_environment(BACKEND_DIR)
@@ -554,6 +556,11 @@ def main():
     logger.info("==================================================")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    install_access_gate(
+        app,
+        load_allowed_chat_ids("TELEGRAM_ALLOWED_CHAT_IDS", env_file=BACKEND_DIR / ".env"),
+        bot_name="downloader",
+    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))

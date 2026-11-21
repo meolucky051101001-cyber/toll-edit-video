@@ -2,7 +2,7 @@
 
 Never loads models, never renders, never touches the live workspace: the Studio
 module is replaced by a stub whose WORKSPACE points at a TemporaryDirectory, and
-the path helpers are the real ones lifted from workflow_api.py source.
+the path helpers are the real ones lifted from workflow_api.py / workflow_helpers.py source.
 """
 import ast
 import json
@@ -14,6 +14,7 @@ import threading
 import time
 import types
 import unittest
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,13 +42,16 @@ for _directory in (WORKSPACE, OUTPUT_DIR, SX_JOBS):
 
 def _studio_stub():
     """safe_stem/artifact_stem/resolve_job_dir/format_srt_timestamp thật, gốc workspace tạm."""
-    tree = ast.parse((ROOT / "backend" / "workflow_api.py").read_text(encoding="utf-8-sig"))
+    nodes = []
+    for source_name in ("workflow_helpers.py", "workflow_api.py"):
+        source = (ROOT / "backend" / source_name).read_text(encoding="utf-8-sig")
+        nodes.extend(ast.parse(source).body)
     namespace = {"Path": Path, "Any": __import__("typing").Any,
                  "Optional": __import__("typing").Optional,
                  "HTTPException": HTTPException, "WORKSPACE": WORKSPACE,
                  "re": __import__("re")}
     body = []
-    for node in tree.body:
+    for node in nodes:
         if isinstance(node, ast.Assign):
             names = [getattr(target, "id", "") for target in node.targets]
             if any(name.startswith("_STEM_") for name in names):
@@ -107,14 +111,13 @@ def write_video(directory: Path, name: str = "source.mp4") -> Path:
     return path
 
 
-def wait_render_lock_free(timeout=10.0) -> bool:
-    end = time.time() + timeout
-    while time.time() < end:
-        if hf._RENDER_LOCK.acquire(blocking=False):
-            hf._RENDER_LOCK.release()
-            return True
-        time.sleep(0.05)
-    return False
+def wait_render_queue_idle(timeout=10.0) -> bool:
+    with hf._JOBS_LOCK:
+        worker = hf._QUEUE_WORKER
+    if worker is not None:
+        worker.join(timeout)
+        return not worker.is_alive()
+    return True
 
 
 def cue_payload(**overrides):
@@ -269,8 +272,10 @@ class ImportTests(unittest.TestCase):
 
     def test_import_writes_srt_files_and_handoff_metadata(self):
         result = hf._import_job(cue_payload(source_video=str(self.video)))
-        job_dir = self.workspace / "seed video"
-        self.assertEqual(result["stem"], "seed video")
+        self.assertRegex(result["stem"], r"^subextract_[0-9a-f]{32}$")
+        job_dir = self.workspace / result["stem"]
+        self.assertEqual(Path(result["job_dir"]), job_dir)
+        self.assertFalse((self.workspace / "seed video").exists())
         self.assertEqual(result["cue_count"], 3)
         self.assertEqual(result["translated_count"], 2)
         self.assertEqual(result["video_link"], "hardlink")
@@ -278,6 +283,7 @@ class ImportTests(unittest.TestCase):
         meta = json.loads((job_dir / "handoff.json").read_text(encoding="utf-8"))
         self.assertEqual(meta["source"], "subextract")
         self.assertEqual(meta["source_job_id"], "sx0001")
+        self.assertEqual(meta["stem"], result["stem"])
         self.assertEqual(meta["counts"], {"cues": 3, "translated": 2, "with_box": 3})
         self.assertEqual(meta["cues"][1]["box"], [0.02, 0.05, 0.62, 0.17])
         self.assertEqual(meta["cues"][2]["box"], [0.04, 0.795, 0.96, 0.885])
@@ -304,7 +310,37 @@ class ImportTests(unittest.TestCase):
         with patch("os.link", side_effect=OSError(17, "cross device")):
             result = hf._import_job(cue_payload(source_video=str(self.video), stem="seed-copy"))
         self.assertEqual(result["video_link"], "copy")
-        self.assertTrue((self.workspace / "seed-copy" / "seed-copy.mp4").is_file())
+        stem = result["stem"]
+        self.assertTrue((self.workspace / stem / f"{stem}.mp4").is_file())
+
+    def test_import_isolates_repeated_basename_without_touching_studio_artifacts(self):
+        sibling = SX_JOBS / "other-job"
+        sibling.mkdir(exist_ok=True)
+        second_video = write_video(sibling, self.video.name)
+        second_video.write_bytes(second_video.read_bytes() + b"different content")
+        studio_job = self.workspace / self.video.stem
+        studio_job.mkdir()
+        existing_srt = studio_job / "original.srt"
+        existing_srt.write_text("studio artifact", encoding="utf-8")
+
+        with patch.object(STUDIO, "resolve_job_dir", side_effect=AssertionError("legacy lookup")):
+            first, second, repeated = (
+                hf._import_job(cue_payload(stem=self.video.stem, source_video=str(source),
+                                           cues=[{"start": 0, "end": 1, "text": text}]))
+                for source, text in [(self.video, "first"), (second_video, "second"),
+                                     (self.video, "repeated")]
+            )
+
+        self.assertEqual(len({result["stem"] for result in (first, second, repeated)}), 3)
+        for result, source, text in [(first, self.video, "first"), (second, second_video, "second"),
+                                     (repeated, self.video, "repeated")]:
+            self.assertRegex(result["stem"], r"^subextract_[0-9a-f]{32}$")
+            job_dir = self.workspace / result["stem"]
+            self.assertEqual(Path(result["job_dir"]), job_dir)
+            self.assertIn(text, (job_dir / "original.srt").read_text(encoding="utf-8"))
+            self.assertEqual(Path(result["video"]).read_bytes(), source.read_bytes())
+        self.assertEqual(existing_srt.read_text(encoding="utf-8"), "studio artifact")
+        self.assertFalse((studio_job / "handoff.json").exists())
 
 
 class EndpointTests(unittest.TestCase):
@@ -315,9 +351,10 @@ class EndpointTests(unittest.TestCase):
         cls.client = TestClient(app)
 
     def setUp(self):
-        self.assertTrue(wait_render_lock_free())
+        self.assertTrue(wait_render_queue_idle())
         self.workspace = STUDIO.use_workspace(isolated_workspace(self.id()))
         with hf._JOBS_LOCK:
+            self.assertFalse(hf._RENDER_QUEUE)
             hf._HANDOFF_JOBS.clear()
         self.video = write_video(SX_JOBS, "clip.mp4")
         patcher_allow = allowlisted_env()
@@ -337,19 +374,45 @@ class EndpointTests(unittest.TestCase):
         patcher_render = patch.object(hf, "_execute_render", side_effect=recorder)
         patcher_render.start()
         self.addCleanup(patcher_render.stop)
+        patcher_ownership = patch.object(hf, "_render_ownership", nullcontext)
+        self.render_ownership = hf._render_ownership
+        patcher_ownership.start()
+        self.addCleanup(patcher_ownership.stop)
+        self.addCleanup(lambda: self.assertTrue(wait_render_queue_idle()))
 
-    def _await_status(self, job_id, wanted, timeout=5.0):
-        deadline = time.time() + timeout
-        body = {}
-        while time.time() < deadline:
-            body = self.client.get(f"/api/handoff/status?job_id={job_id}").json()
-            if body["status"] in wanted:
-                return body
-            time.sleep(0.05)
+    def _import(self, **overrides):
+        payload = cue_payload(source_video=str(self.video))
+        payload.update(overrides)
+        response = self.client.post("/api/handoff/import", json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["stem"]
+
+    def _enqueue(self, stem, **overrides):
+        response = self.client.post("/api/handoff/render", json={"stem": stem, **overrides})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "queued")
+        self.assertEqual(body["stem"], stem)
+        self.assertTrue(body["job_id"])
         return body
 
+    def _status(self, job_id):
+        response = self.client.get("/api/handoff/status", params={"job_id": job_id})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def _await_status(self, job_id, wanted, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while True:
+            body = self._status(job_id)
+            if body["status"] in wanted:
+                return body
+            if time.monotonic() >= deadline:
+                self.fail(f"Job {job_id} did not reach {wanted!r}: {body!r}")
+            time.sleep(0.02)
+
     def test_render_requires_import_and_reports_job_id(self):
-        missing = self.client.post("/api/handoff/render", json={"stem": "chua-gui"})
+        missing = self.client.post("/api/handoff/render", json={"stem": "subextract_" + "0" * 32})
         self.assertEqual(missing.status_code, 404)
         imported = self.client.post("/api/handoff/import",
                                     json=cue_payload(source_video=str(self.video)))
@@ -362,9 +425,9 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(body["status"], "done")
         self.assertEqual(body["progress"], 100)
         self.assertNotIn("proc", body)
-        self.assertEqual(self.calls[-1]["stem"], "seed video")
+        self.assertEqual(self.calls[-1]["stem"], imported.json()["stem"])
         self.assertEqual(self.calls[-1]["payload"]["voice_id"], "edge-x")
-        self.assertTrue((self.workspace / "seed video" / "handoff.json").is_file())
+        self.assertTrue((self.workspace / imported.json()["stem"] / "handoff.json").is_file())
 
     def test_cancel_stops_worker_and_marks_job_cancelled(self):
         imported = self.client.post("/api/handoff/import",
@@ -388,18 +451,117 @@ class EndpointTests(unittest.TestCase):
             body = self._await_status(job_id, {"cancelled", "error"})
         self.assertEqual(body["status"], "cancelled")
         self.assertIn("bản giao theo yêu cầu", body["stage"])
-        self.assertTrue(wait_render_lock_free())
+        self.assertTrue(wait_render_queue_idle())
 
     def test_status_and_cancel_reject_unknown_job(self):
         self.assertEqual(self.client.get("/api/handoff/status?job_id=khongco").status_code, 404)
         self.assertEqual(self.client.post("/api/handoff/cancel", json={"job_id": "khongco"}).status_code, 404)
 
-    def test_render_lock_held_returns_409(self):
-        self.client.post("/api/handoff/import", json=cue_payload(source_video=str(self.video)))
-        hf._RENDER_LOCK.acquire()
-        self.addCleanup(hf._RENDER_LOCK.release)
-        response = self.client.post("/api/handoff/render", json={"stem": "seed video"})
-        self.assertEqual(response.status_code, 409)
+    def test_busy_render_queues_in_order_and_cancel_only_removes_target(self):
+        stems = [self._import() for _ in range(3)]
+        entered = threading.Event()
+        release = threading.Event()
+        called = []
+
+        def render(job_id, stem, payload):
+            called.append(stem)
+            if stem == stems[0]:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("test did not release first job")
+            return {"stem": stem}
+
+        with patch.object(hf, "_execute_render", side_effect=render):
+            try:
+                first = self._enqueue(stems[0])["job_id"]
+                self.assertTrue(entered.wait(3))
+                second = self._enqueue(stems[1])["job_id"]
+                third = self._enqueue(stems[2])["job_id"]
+                self.assertEqual(self._status(first)["status"], "running")
+                self.assertEqual(self._status(second)["queue_position"], 1)
+                self.assertEqual(self._status(third)["queue_position"], 2)
+                with patch.object(hf, "_MAX_PENDING", 2):
+                    full = self.client.post("/api/handoff/render", json={"stem": self._import()})
+                self.assertEqual(full.status_code, 429)
+                duplicate = self.client.post("/api/handoff/render", json={"stem": stems[1]})
+                self.assertEqual(duplicate.status_code, 409)
+                cancelled = self.client.post("/api/handoff/cancel", json={"job_id": second})
+                self.assertEqual(cancelled.json()["status"], "cancelled")
+                self.assertEqual(self._status(second)["status"], "cancelled")
+                self.assertEqual(self._status(third)["queue_position"], 1)
+                self.assertEqual(called, [stems[0]])
+            finally:
+                release.set()
+                self.assertTrue(wait_render_queue_idle())
+        self.assertEqual(called, [stems[0], stems[2]])
+        self.assertEqual(self._status(third)["status"], "done")
+        self.assertNotIn("queue_position", self._status(third))
+
+    def test_worker_waits_for_studio_and_batch_lease(self):
+        stem = self._import()
+        studio = threading.Semaphore(0)
+        unverifiable = threading.Event()
+        status_ready = threading.Event()
+        lease_attempt = threading.Event()
+        batch_released = threading.Event()
+        owned = set()
+
+        class Busy(RuntimeError):
+            pass
+
+        def claim(job_id, *, exclusive):
+            self.assertTrue(exclusive)
+            lease_attempt.set()
+            if not batch_released.is_set():
+                raise Busy()
+            self.assertFalse(owned)
+            owned.add(job_id)
+
+        def read_status(*, strict):
+            from v1_integrity_errors import JobStateReadError
+            self.assertTrue(strict)
+            if not status_ready.is_set():
+                unverifiable.set()
+                raise JobStateReadError("Lease owner has not published active status")
+            return {"active": False}
+
+        tracker = types.SimpleNamespace(
+            _LOCK=threading.Lock(), JobAlreadyRunningError=Busy,
+            get_status=read_status,
+            _claim_batch_lock_unlocked=claim, release_batch=owned.remove,
+        )
+
+        def render(job_id, stem, payload):
+            self.assertEqual(owned, {job_id})
+            self.assertFalse(studio.acquire(blocking=False))
+            return {"stem": stem}
+
+        with patch.dict(sys.modules, {"job_tracker": tracker}), patch.object(
+            STUDIO, "_TIMELINE_RENDER_SEM", studio, create=True
+        ), patch.object(hf, "_render_ownership", self.render_ownership), patch.object(
+            hf, "_execute_render", side_effect=render
+        ):
+            studio_opened = False
+            try:
+                job_id = self._enqueue(stem)["job_id"]
+                self.assertTrue(unverifiable.wait(3))
+                self.assertEqual(self._status(job_id)["queue_position"], 1)
+                self.assertFalse(lease_attempt.is_set())
+                status_ready.set()
+                studio.release()
+                studio_opened = True
+                self.assertTrue(lease_attempt.wait(3))
+                self.assertEqual(self._status(job_id)["status"], "queued")
+                batch_released.set()
+                self.assertEqual(self._await_status(job_id, {"done", "error"})["status"], "done")
+            finally:
+                if not studio_opened:
+                    studio.release()
+                status_ready.set()
+                batch_released.set()
+                self.assertTrue(wait_render_queue_idle())
+        self.assertFalse(owned)
+        self.assertTrue(studio.acquire(blocking=False))
 
     def test_worker_reports_done_and_error_states(self):
         imported = self.client.post("/api/handoff/import",
@@ -415,8 +577,8 @@ class EndpointTests(unittest.TestCase):
             body = self._await_status(job_id, {"done"})
         self.assertEqual(body["status"], "done")
         self.assertEqual(body["progress"], 100)
-        self.assertTrue(body["result"]["delivered"].endswith("Dubbed_seed-worker.mp4"))
-        self.assertTrue(wait_render_lock_free())
+        self.assertTrue(body["result"]["delivered"].endswith(f"Dubbed_{imported['stem']}.mp4"))
+        self.assertTrue(wait_render_queue_idle())
 
         def boom(job_id, stem, payload):
             raise RuntimeError("FFmpeg lỗi")
@@ -426,7 +588,7 @@ class EndpointTests(unittest.TestCase):
             body = self._await_status(job_id, {"error"})
         self.assertEqual(body["status"], "error")
         self.assertIn("FFmpeg", body["error"])
-        self.assertTrue(wait_render_lock_free())
+        self.assertTrue(wait_render_queue_idle())
 
     def test_info_exposes_temp_workspace_and_defaults(self):
         with patch.object(hf, "_resolve_voice", return_value=("edge", "vi-VN-HoaiMyNeural", "edge/Hoài My")):

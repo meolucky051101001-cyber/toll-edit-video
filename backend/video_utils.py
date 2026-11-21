@@ -4,6 +4,7 @@ import subprocess
 from batch_control import run as run_batch_subprocess, stop_check as batch_stop_check
 import time
 import logging
+from typing import Optional
 from v1_integrity_errors import FrozenConfigError
 try:
     from .v1_stage_metrics import stage
@@ -668,6 +669,7 @@ def process_video(
     main_y_pct=0.75,
     delogo=True,
     timeout_seconds=None,
+    metrics: Optional[dict] = None,
     **kwargs,
 ):
     """
@@ -785,6 +787,33 @@ def process_video(
         gpu_blur_w, gpu_blur_h = orig_w, orig_h
         gpu_pre_vf = ""
         gpu_post_vf = ""
+
+        def _record_render_metrics(blur_path, enc_args, encode_seconds):
+            if metrics is None:
+                return
+            encode_seconds = max(0.0, float(encode_seconds))
+            encoder_name = str(enc_args[0])
+            preset = None
+            try:
+                preset = enc_args[enc_args.index("-preset") + 1]
+            except (ValueError, IndexError):
+                pass
+            render_metrics = dict(last_blur_metrics)
+            render_metrics.update(
+                blur_path=blur_path,
+                encoder=f"{encoder_name} preset={preset}" if preset else encoder_name,
+                encode_seconds=round(encode_seconds, 3),
+            )
+            source_duration = float(getattr(source_video, "duration", 0.0) or 0.0)
+            if source_duration > 0 and encode_seconds > 0:
+                render_metrics["realtime_factor"] = round(source_duration / encode_seconds, 3)
+            source_fps = float(getattr(source_video, "fps", 0.0) or 0.0)
+            if source_fps > 0 and source_duration > 0 and encode_seconds > 0:
+                render_metrics["render_fps"] = round(
+                    source_fps * source_duration / encode_seconds,
+                    3,
+                )
+            metrics.update(render_metrics)
 
         def _build_sub_filter(fw: int, fh: int, extra_post_blur: str = "") -> str:
             post_blur = (extra_post_blur + ",") if extra_post_blur else ""
@@ -1007,7 +1036,6 @@ def process_video(
         if (
             cover_style == "localized_blur"
             and int(last_blur_metrics.get("slots", 0) or 0) >= 2
-            and not hasattr(run_batch_subprocess, "_mock_name")
             and os.path.isfile(video_path)
             and os.path.getsize(video_path) > 20000
         ):
@@ -1018,6 +1046,7 @@ def process_video(
                 )
                 if gpu_localized_blur_available():
                     for gpu_enc_args in encoders_to_try:
+                        gpu_started = time.monotonic()
                         gpu_ok, gpu_reason = render_video_with_gpu_localized_blur(
                             video_path=video_path,
                             mixed_audio_path=mixed_audio_path,
@@ -1037,6 +1066,9 @@ def process_video(
                             deadline=render_deadline,
                         )
                         if gpu_ok:
+                            _record_render_metrics(
+                                "gpu_frame_pipe", gpu_enc_args, time.monotonic() - gpu_started
+                            )
                             print(f"Render video thành công bằng GPU CUDA Blur + encoder: {gpu_enc_args[0]}")
                             return True
                         logger.warning("GPU CUDA localized blur attempt failed (%s)", gpu_reason)
@@ -1059,7 +1091,7 @@ def process_video(
             filter_script_path = safe_sub_path + ".filters.txt"
             with open(filter_script_path, "w", encoding="utf-8") as stream:
                 stream.write(filter_complex)
-            filter_args = ["-filter_script:v", filter_script_path]
+            filter_args = ["-/filter:v", filter_script_path]
 
         for enc_idx, enc_args in enumerate(encoders_to_try):
             encoder_name = enc_args[0]
@@ -1120,8 +1152,14 @@ def process_video(
                     if tail_pad_seconds > 0.0:
                         validate_kwargs["allowed_tail_pad"] = tail_pad_seconds
                     validate_video_output(output_video_path, source_video, **validate_kwargs)
+                    encode_seconds = time.monotonic() - encoder_started
+                    _record_render_metrics(
+                        "ffmpeg_filtergraph" if cover_style == "localized_blur" else "none",
+                        enc_args,
+                        encode_seconds,
+                    )
                     logger.info("V1 render complete encoder=%s seconds=%.2f bytes=%d",
-                                encoder_name, time.monotonic()-encoder_started,
+                                encoder_name, encode_seconds,
                                 os.path.getsize(output_video_path))
                     print(f"Render video thành công bằng encoder: {encoder_name}")
                     return True

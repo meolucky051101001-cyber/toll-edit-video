@@ -14,9 +14,10 @@ import time
 import hashlib
 import tempfile
 import logging
+import math
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,16 @@ STAGES_ORDER = [
 
 def _pending_stage() -> Dict[str, Any]:
     return {"status": "pending", "started_at": None, "completed_at": None,
-            "duration_s": 0.0, "artifacts": {}, "retry_count": 0, "error": None}
+            "duration_s": 0.0, "artifacts": {}, "metrics": {},
+            "retry_count": 0, "error": None}
+
+
+def _is_json_scalar(value: Any) -> bool:
+    return (
+        value is None
+        or isinstance(value, (str, int, bool))
+        or (isinstance(value, float) and math.isfinite(value))
+    )
 
 
 @dataclass
@@ -208,8 +218,30 @@ class ManifestManager:
         manifest.current_stage = stage_id
         st = manifest.stages.setdefault(stage_id, _pending_stage())
         st.update(status="running", started_at=time.time(), completed_at=None,
-                  duration_s=0.0, error=None, retry_count=st.get("retry_count", 0) + 1)
+                  duration_s=0.0, error=None, metrics={},
+                  retry_count=st.get("retry_count", 0) + 1)
         manifest.error_message = None
+        self.save_manifest(manifest)
+
+    def record_stage_metrics(self, job_id: str, stage_id: str, metrics: Mapping[str, Any]) -> None:
+        manifest = self.load_manifest(job_id)
+        if not manifest:
+            return
+        st = manifest.stages.setdefault(stage_id, _pending_stage())
+        saved = st.get("metrics")
+        if not isinstance(saved, dict):
+            saved = {}
+            st["metrics"] = saved
+        for key, value in metrics.items():
+            if not isinstance(key, str):
+                continue
+            if _is_json_scalar(value):
+                saved[key] = value
+            elif isinstance(value, Mapping) and all(
+                isinstance(nested_key, str) and _is_json_scalar(nested_value)
+                for nested_key, nested_value in value.items()
+            ):
+                saved[key] = dict(value)
         self.save_manifest(manifest)
 
     def record_stage_complete(

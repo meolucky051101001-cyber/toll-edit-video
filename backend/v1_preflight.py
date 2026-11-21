@@ -8,12 +8,18 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+try:
+    from .telegram_access import parse_chat_ids
+except ImportError:
+    from telegram_access import parse_chat_ids
 
 
 if isinstance(sys.stdout, io.TextIOWrapper):
@@ -44,6 +50,40 @@ def _load_env(backend: Path) -> dict:
 
 def _check(name: str, status: str, message: str) -> dict:
     return {"name": name, "status": status, "message": message}
+
+
+def _ffmpeg_version_check() -> dict:
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW
+                if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
+                else 0
+            ),
+        )
+        if result.returncode != 0:
+            return _check("binary:ffmpeg_version", "warning", "version check failed")
+        first_line = (result.stdout or result.stderr).splitlines()[0] if (result.stdout or result.stderr) else ""
+        parsed = re.search(r"ffmpeg version n?(\d+)\.(\d+)", first_line)
+        version = re.search(r"ffmpeg version\s+(\S+)", first_line, re.IGNORECASE)
+        if not parsed or not version:
+            return _check("binary:ffmpeg_version", "warning", "unrecognized FFmpeg version")
+        version_string = version.group(1)
+        if int(parsed.group(1)) < 7:
+            return _check(
+                "binary:ffmpeg_version",
+                "error",
+                "{}; FFmpeg >= 7 required, 8.0.x recommended".format(version_string),
+            )
+        return _check("binary:ffmpeg_version", "pass", version_string)
+    except (OSError, subprocess.SubprocessError):
+        return _check("binary:ffmpeg_version", "warning", "version check failed")
 
 
 def _directory_check(name: str, path: Path, read_only: bool = False) -> dict:
@@ -123,10 +163,23 @@ def run_preflight(project_root: Path, interface: str, read_only: bool = False, t
     for binary in ("ffmpeg", "ffprobe"):
         path = shutil.which(binary)
         checks.append(_check("binary:{}".format(binary), "pass" if path else "error", path or "not found on PATH"))
+        if binary == "ffmpeg":
+            checks.append(_ffmpeg_version_check())
 
     if interface in {"telegram", "all"}:
         token = env.get("BOT_TOKEN", "").strip()
         checks.append(_check("secret:BOT_TOKEN", "pass" if token else "error", "configured" if token else "missing"))
+        allowlist = env.get("TELEGRAM_ALLOWED_CHAT_IDS", os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", ""))
+        try:
+            allowed_ids = parse_chat_ids(allowlist)
+        except ValueError as exc:
+            checks.append(_check("secret:TELEGRAM_ALLOWED_CHAT_IDS", "error", str(exc)))
+        else:
+            checks.append(_check(
+                "secret:TELEGRAM_ALLOWED_CHAT_IDS",
+                "pass" if allowed_ids else "warning",
+                "configured ({} ids)".format(len(allowed_ids)) if allowed_ids else "empty; bot is open to everyone",
+            ))
     gemini = env.get("GEMINI_API_KEY", "").strip()
     checks.append(_check("secret:GEMINI_API_KEY", "pass" if gemini else "warning", "configured" if gemini else "missing; free translation fallback remains"))
     if read_only:

@@ -46,13 +46,17 @@ def close_session():
 
 def close_if_idle(max_idle_s: float = 180.0) -> bool:
     """Close warm OCR worker if it has been idle for at least ``max_idle_s``."""
-    with _lock:
+    if not _lock.acquire(blocking=False):
+        return False
+    try:
         if _process is None:
             return False
         if _last_used_at > 0 and (time.monotonic() - _last_used_at) < float(max_idle_s):
             return False
         close_session()
         return True
+    finally:
+        _lock.release()
 
 
 def run_request(args, *, timeout, env, creationflags=0, **kwargs):

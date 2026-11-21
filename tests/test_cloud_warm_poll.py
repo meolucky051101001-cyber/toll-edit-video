@@ -99,10 +99,9 @@ def _run_monitored_with_poll_payloads(
     monkeypatch.setattr(colab_bridge, "_remove_wsl_temp_file", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(colab_bridge, "_wait_interruptible", lambda seconds, **_kwargs: waits.append(seconds) or False)
 
-    def fake_run(colab_args, **_kwargs):
-        args = list(colab_args)
-        script_path = args[args.index("-f") + 1]
-        if "colab_launch_" in script_path:
+    def fake_run(colab_args, **kwargs):
+        script_text = str(kwargs.get("stdin_text") or "")
+        if "AUTODUB_LAUNCH_JSON" in script_text:
             return 0, 'AUTODUB_LAUNCH_JSON:{"launched": true, "sup_pid": 4321}', ""
         payload = payloads.pop(0)
         return 0, "AUTODUB_POLL_JSON:" + json.dumps(payload), ""

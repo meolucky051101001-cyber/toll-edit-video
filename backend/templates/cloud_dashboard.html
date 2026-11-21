@@ -1,1317 +1,1481 @@
 <!DOCTYPE html>
 <html lang="vi">
 <head>
-<script>
-window.LOCAL_TOKEN = "__REPLACE_TOKEN__";
-const originalFetch = window.fetch;
-window.fetch = async function() {
-    let [resource, config] = arguments;
-    if (resource && typeof resource === 'string' && resource.startsWith('/api/')) {
-        if (!config) config = {};
-        if (!config.headers) config.headers = {};
-        if (config.headers instanceof Headers) {
-            config.headers.set('X-Local-Control-Token', window.LOCAL_TOKEN || '');
-        } else {
-            config.headers['X-Local-Control-Token'] = window.LOCAL_TOKEN || '';
-        }
-    }
-    let res;
-    try {
-        res = await originalFetch(resource, config);
-    } catch (netErr) {
-        if (resource && typeof resource === 'string' && resource.startsWith('/api/')) {
-            await new Promise(r => setTimeout(r, 600));
-            try {
-                res = await originalFetch(resource, config);
-            } catch (_) {
-                throw netErr;
-            }
-        } else {
-            throw netErr;
-        }
-    }
-    return res;
-};
-</script>
-
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tool V1 — Cloud GPU Dashboard</title>
   <style>
     :root {
-      --bg-dark: #09090b;
-      --bg-card: #121215;
-      --bg-card-hover: #17171c;
-      --bg-header: #131316;
-      --border: rgba(255, 255, 255, 0.08);
-      --border-hover: rgba(255, 255, 255, 0.15);
-      --border-focus: #38bdf8;
-      --primary: #ffffff;
-      --primary-text: #09090b;
-      --primary-hover: #e4e4e7;
-      --accent: #38bdf8;
-      --accent-dim: rgba(56, 189, 248, 0.12);
-      --success: #10b981;
-      --success-text: #34d399;
-      --warning: #f59e0b;
-      --danger: #ef4444;
-      --danger-hover: #dc2626;
-      --text: #f4f4f5;
-      --text-muted: #71717a;
-      --text-sub: #a1a1aa;
+      color-scheme: light;
+      --page: #f5f6fb;
+      --surface: #fff;
+      --muted-surface: #f7f8fc;
+      --text: #181c35;
+      --muted: #57607a;
+      --line: #e5e8f2;
+      --primary: #4935c5;
+      --primary-strong: #3b29a9;
+      --primary-soft: #efecff;
+      --green: #11674d;
+      --green-soft: #e6f6ef;
+      --orange: #8b4d08;
+      --orange-soft: #fff2df;
+      --red: #a52b42;
+      --red-soft: #fcecf0;
+      --radius: 18px;
+      --shadow: 0 4px 16px #20264b08;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-    body { background-color: var(--bg-dark); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; -webkit-font-smoothing: antialiased; }
 
-    /* Scrollbars */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; color: var(--text); background: var(--page); }
+    button, input, select { font: inherit; }
+    h1, h2, h3, p { margin: 0; }
+    a { color: inherit; }
+    [hidden] { display: none !important; }
+    :focus-visible { outline: 3px solid #8168ee; outline-offset: 3px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+    .icon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+    .mono { font-variant-numeric: tabular-nums; }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .wrap { overflow-wrap: anywhere; }
 
-    /* Header */
-    header { background: var(--bg-header); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; backdrop-filter: blur(8px); }
-    .logo-area { display: flex; align-items: center; gap: 12px; }
-    .logo-badge { background: rgba(56, 189, 248, 0.1); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.25); padding: 5px 10px; border-radius: 6px; font-weight: 700; font-size: 11px; letter-spacing: 0.8px; font-family: ui-monospace, monospace; }
-    .app-title { font-size: 16px; font-weight: 600; color: #fff; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
-    .app-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+    .topbar { background: var(--surface); border-bottom: 1px solid var(--line); }
+    .topbar-inner, main { max-width: 1440px; margin: auto; padding-inline: clamp(16px, 4vw, 56px); }
+    .topbar-inner { min-height: 68px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .brand-icon { width: 37px; height: 37px; display: grid; place-items: center; border-radius: 11px; color: white; background: #5140d2; box-shadow: 0 3px 8px #4935c534; }
+    .brand-icon .icon { width: 21px; height: 21px; }
+    .brand-name { display: block; font-size: 15px; line-height: 1.25; }
+    .brand-caption { color: var(--muted); font-size: 11px; font-weight: 650; line-height: 1.25; }
 
-    .hw-status { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
-    .badge { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
-    .badge-gpu { background: rgba(255, 255, 255, 0.04); color: var(--text-sub); border: 1px solid var(--border); }
-    .badge-online { background: rgba(56, 189, 248, 0.08); color: #93c5fd; border: 1px solid rgba(56, 189, 248, 0.2); }
-    .badge-cu { background: rgba(16, 185, 129, 0.1); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.25); }
-    .badge-warn { background: rgba(245, 158, 11, 0.1); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.25); }
-    .badge-danger { background: rgba(239, 68, 68, 0.12); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+    main { display: grid; gap: 20px; padding-top: clamp(24px, 4vw, 42px); padding-bottom: 48px; }
+    .page-heading, .toolbar, .card-heading, .status-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .page-heading { flex-wrap: wrap; }
+    h1 { font-size: clamp(26px, 3.6vw, 40px); font-weight: 730; letter-spacing: -.045em; line-height: 1.16; }
+    .page-heading p { margin-top: 6px; color: var(--muted); }
+    .toolbar { flex-wrap: wrap; justify-content: flex-start; font-size: 12px; color: var(--muted); }
+    .btn { appearance: none; display: inline-flex; gap: 7px; justify-content: center; align-items: center; padding: 8px 12px; min-height: 38px; border: 1px solid transparent; border-radius: 9px; font-weight: 650; font-size: 13px; line-height: 1.3; text-decoration: none; cursor: pointer; transition: background-color .16s, border-color .16s; }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+    .btn-outline { color: var(--text); background: var(--surface); border-color: var(--line); }
+    .btn-outline:hover:not(:disabled) { background: var(--muted-surface); border-color: #c5c9df; }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover:not(:disabled) { background: var(--primary-strong); }
+    .btn-danger { background: var(--red-soft); color: var(--red); border-color: #f5cdd6; }
+    .btn-danger:hover:not(:disabled) { background: #f9dae2; }
+    .btn-small { min-height: 34px; padding: 5px 9px; font-size: 12px; white-space: nowrap; }
+    .btn .icon { width: 15px; height: 15px; }
 
-    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-    .dot-green { background: #10b981; box-shadow: 0 0 8px rgba(16, 185, 129, 0.5); }
-    .dot-blue { background: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.5); }
-    .dot-yellow { background: #f59e0b; box-shadow: 0 0 8px rgba(245, 158, 11, 0.5); animation: pulse 1.5s infinite; }
-    .dot-red { background: #ef4444; box-shadow: 0 0 8px rgba(239, 68, 68, 0.5); }
-    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.9); } }
-
-    /* Buttons */
-    .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid transparent; font-size: 12px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s ease; text-decoration: none; user-select: none; line-height: 1.4; }
-    .btn-primary { background: var(--primary); color: var(--primary-text); font-weight: 600; }
-    .btn-primary:hover { background: var(--primary-hover); }
-    .btn-accent { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.35); }
-    .btn-accent:hover { background: rgba(56, 189, 248, 0.25); border-color: rgba(56, 189, 248, 0.5); }
-    .btn-danger { background: rgba(239, 68, 68, 0.12); color: #f87171; border-color: rgba(239, 68, 68, 0.25); }
-    .btn-danger:hover { background: rgba(239, 68, 68, 0.22); border-color: rgba(239, 68, 68, 0.45); }
-    .btn-outline { background: rgba(255, 255, 255, 0.03); border-color: var(--border); color: var(--text-sub); }
-    .btn-outline:hover { background: rgba(255, 255, 255, 0.07); border-color: var(--border-hover); color: #fff; }
-    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-
-    /* Layout */
-    .container { max-width: 1540px; margin: 0 auto; padding: 20px 24px; width: 100%; flex: 1; display: flex; flex-direction: column; gap: 18px; }
-
-    /* Hero Active Job Card */
     .hero-card {
-      background: linear-gradient(135deg, rgba(18, 18, 21, 0.95), rgba(24, 24, 30, 0.85));
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 18px 22px;
-      position: relative;
-      overflow: hidden;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      position: relative; isolation: isolate; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(245px, .75fr);
+      align-items: center; gap: clamp(20px, 4vw, 52px); padding: clamp(22px, 3vw, 38px); border-radius: 22px;
+      color: white; background: linear-gradient(117deg, #211855 5%, #3b2d9d 60%, #5444cb); box-shadow: 0 10px 24px #30198222;
     }
-    .hero-card.active-running {
-      border-color: rgba(56, 189, 248, 0.35);
-      box-shadow: 0 4px 30px rgba(56, 189, 248, 0.12);
-    }
-    .hero-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
-    .hero-title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; color: #fff; }
-    .hero-meta { display: flex; gap: 12px; font-size: 12px; color: var(--text-sub); align-items: center; }
+    .hero-card::before { content: ""; position: absolute; z-index: -1; inset: 0; pointer-events: none; background: radial-gradient(ellipse at 86% 45%, #bcaaff36 0, transparent 53%), repeating-linear-gradient(90deg, transparent 0 36px, #ffffff0d 36px 37px), repeating-linear-gradient(0deg, transparent 0 36px, #ffffff0d 36px 37px); mask-image: linear-gradient(90deg, transparent 25%, black 90%); }
+    .hero-main { min-width: 0; }
+    .hero-state { display: flex; align-items: center; gap: 8px; color: #ebe8ff; font-size: 12px; font-weight: 700; }
+    .dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .hero-state .dot { color: #d0c5fb; box-shadow: 0 0 0 4px #ffffff18; }
+    .hero-state .dot[data-tone="good"] { color: #77efc4; }
+    .hero-state .dot[data-tone="warn"] { color: #ffd28b; }
+    .hero-state .dot[data-tone="bad"] { color: #ffb1bf; }
+    .hero-card h2 { max-width: 100%; margin-block: 11px 6px; font-size: clamp(23px, 3.2vw, 35px); font-weight: 720; letter-spacing: -.035em; line-height: 1.2; overflow-wrap: anywhere; }
+    #hero-step-desc { color: #e9e3ff; line-height: 1.55; overflow-wrap: anywhere; }
+    .hero-meta { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-top: 12px; font-size: 12px; }
+    .hero-meta > span { padding: 3px 7px; border: 1px solid #ffffff35; border-radius: 7px; color: white; background: #ffffff13; }
+    .progress-track { flex: 1; height: 7px; overflow: hidden; border-radius: 999px; background: #e7e7f1; }
+    .progress-fill { height: 100%; width: 0; border-radius: inherit; background: #6651df; transition: width .25s ease-out; }
+    .hero-warning { color: #ffe4af; margin-top: 10px; font-size: 12px; overflow-wrap: anywhere; }
+    .telegram-card { display: grid; justify-items: start; gap: 6px; align-self: center; padding: clamp(15px, 2vw, 22px); border-radius: 16px; border: 1px solid #ffffff42; background: #e6dfff23; }
+    .telegram-card > .icon { width: 22px; height: 22px; }
+    .telegram-card h3 { font-size: 16px; }
+    .telegram-card p { font-size: 13px; color: #ede7ff; overflow-wrap: anywhere; }
+    .telegram-card .btn { margin-top: 5px; color: #302076; background: white; }
+    .telegram-card .btn:hover { background: #f1ecff; }
 
-    /* Pipeline Step Tracker */
-    .pipeline-steps {
-      display: grid;
-      grid-template-columns: repeat(8, 1fr);
-      gap: 6px;
-      margin: 14px 0 16px 0;
+    .metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+    .metric, .card { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+    .pipeline-card .card-heading { margin-bottom: 8px; }
+    .pipeline-caption { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .pipeline-caption p { min-width: 0; overflow-wrap: anywhere; }
+    .pipeline-caption strong { flex: none; font-size: 18px; color: var(--primary-strong); }
+    .pipeline-card .progress-track { margin-top: 8px; }
+    .pipeline-card[data-state="failed"] .progress-fill { background: var(--red); }
+    .pipeline-card[data-state="completed"] .progress-fill { background: var(--green); }
+    .pipeline-stages { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+    .pipeline-stage { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--muted-surface); }
+    .stage-title { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; line-height: 1.4; }
+    .stage-number { display: grid; place-items: center; flex: none; width: 18px; height: 18px; border-radius: 5px; background: #e8ebf5; color: var(--muted); font-size: 10px; }
+    .stage-tool, .stage-status { font-size: 11px; overflow-wrap: anywhere; }
+    .stage-tool { color: var(--muted); }
+    .stage-status { color: var(--muted); font-weight: 650; }
+    .pipeline-stage[data-state="done"] { background: var(--green-soft); border-color: #c9e9dc; }
+    .pipeline-stage[data-state="active"] { background: var(--primary-soft); border-color: #a998f2; }
+    .pipeline-stage[data-state="failed"] { background: var(--red-soft); border-color: #efbfca; }
+    .pipeline-stage[data-state="done"] .stage-status { color: var(--green); }
+    .pipeline-stage[data-state="active"] .stage-status { color: var(--primary-strong); }
+    .pipeline-stage[data-state="failed"] .stage-status { color: var(--red); }
+    .pipeline-stage[data-state="done"] .stage-number { color: var(--green); background: #d3eee4; }
+    .pipeline-stage[data-state="active"] .stage-number { color: white; background: var(--primary); }
+    .pipeline-stage[data-state="failed"] .stage-number { color: var(--red); background: #f7d7df; }
+    .metric { display: grid; align-content: start; gap: 7px; padding: 16px; }
+    .metric-label { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); font-weight: 650; }
+    .metric-label .icon { color: var(--primary); width: 16px; height: 16px; }
+    .metric-value { font-size: clamp(17px, 2vw, 24px); letter-spacing: -.035em; font-weight: 725; line-height: 1.2; overflow-wrap: anywhere; }
+    .metric-note { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .resource-list { display: grid; gap: 10px; }
+    .resource-card { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--muted-surface); }
+    .resource-card-heading, .resource-meter-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+    .resource-card-heading strong { overflow-wrap: anywhere; }
+    .resource-meters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .resource-meter { display: grid; gap: 5px; min-width: 0; }
+    .resource-meter-heading { color: var(--muted); font-size: 12px; }
+    .resource-track { height: 5px; }
+    [data-tone="good"] { color: var(--green); }
+    [data-tone="warn"] { color: var(--orange); }
+    [data-tone="bad"] { color: var(--red); }
+    .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 7px; color: var(--muted); background: #eef0f7; font-weight: 650; font-size: 12px; }
+    .status-pill[data-tone="good"], .st-completed { color: var(--green); background: var(--green-soft); }
+    .status-pill[data-tone="warn"], .st-creating, .st-stopped { color: var(--orange); background: var(--orange-soft); }
+    .status-pill[data-tone="bad"], .st-error { color: var(--red); background: var(--red-soft); }
+    .st-processing, .st-downloading { color: var(--primary-strong); background: var(--primary-soft); }
+
+    .notices:not([hidden]) { display: grid; gap: 8px; }
+    .notice { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); padding: 11px 14px; overflow-wrap: anywhere; }
+    .notice[data-tone="good"] { background: var(--green-soft); border-color: #cfeadf; }
+    .notice[data-tone="warn"] { background: var(--orange-soft); border-color: #f4ddba; }
+    .notice[data-tone="bad"] { background: var(--red-soft); border-color: #f4ccd4; }
+
+    .workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(290px, 345px); align-items: start; gap: 16px; }
+    .card { padding: clamp(15px, 2vw, 22px); }
+    .card-heading { margin-bottom: 14px; flex-wrap: wrap; }
+    .card-heading h2, .side h2 { font-size: 17px; font-weight: 725; letter-spacing: -.02em; }
+    .queue-filters { display: flex; gap: 5px; flex-wrap: wrap; padding-bottom: 12px; }
+    .queue-filters .btn { min-height: 34px; border-color: transparent; color: var(--muted); background: transparent; padding-inline: 9px; }
+    .queue-filters .btn[aria-pressed="true"] { background: var(--primary-soft); color: var(--primary-strong); }
+    .queue-filters .btn:hover { background: var(--muted-surface); color: var(--primary-strong); }
+    .table-frame { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: left; }
+    th { padding: 10px; color: var(--muted); background: var(--muted-surface); font-size: 12px; font-weight: 650; }
+    th:first-child { width: 39%; }
+    th:nth-child(2) { width: 25%; }
+    th:nth-child(3) { width: 13%; }
+    th:nth-child(4) { width: 13%; }
+    th:last-child { width: 10%; }
+    td { padding: 12px 10px; border-top: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+    tr:hover td { background: #fafaff; }
+    .job-title { display: block; line-height: 1.4; overflow-wrap: anywhere; }
+    .job-sub { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .job-progress { margin-top: 7px; min-width: 0; }
+    .job-progress .progress-track { height: 4px; margin-top: 4px; }
+    .job-details { margin-top: 7px; color: var(--muted); font-size: 12px; }
+    .job-details summary { cursor: pointer; color: var(--primary-strong); font-weight: 650; }
+    .job-details p { margin-top: 5px; }
+    .job-actions { text-align: right; }
+    .job-actions .btn { white-space: normal; }
+    .empty-cell { text-align: center; color: var(--muted); padding: 32px 16px; }
+
+    .side { display: grid; gap: 12px; min-width: 0; }
+    .side .card-heading { margin-bottom: 10px; }
+    .form-stack { display: grid; gap: 12px; }
+    .field { display: grid; gap: 4px; min-width: 0; }
+    label { font-size: 12px; color: var(--text); font-weight: 650; }
+    input:not([type="checkbox"]), select { width: 100%; min-width: 0; padding: 8px 10px; min-height: 38px; color: var(--text); background: var(--muted-surface); border: 1px solid #dce0ef; border-radius: 8px; }
+    .checkbox { display: flex; align-items: flex-start; gap: 7px; color: var(--muted); cursor: pointer; }
+    .checkbox input { accent-color: var(--primary); }
+    .rollout-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+    .gpu-evidence { display: grid; gap: 8px; margin: 0 0 10px; padding: 0; list-style: none; }
+    .advanced summary { cursor: pointer; color: var(--text); font-weight: 725; }
+    .advanced[open] summary { margin-bottom: 12px; }
+    .control-row { display: flex; align-items: center; gap: 8px; }
+    .control-row .btn { flex-shrink: 0; }
+    .danger-zone { display: grid; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .danger-zone .btn { justify-self: start; }
+
+    @media (max-width: 1110px) and (min-width: 881px) {
+      .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      th:nth-child(4), td:nth-child(4) { display: none; }
+      th:last-child { width: 16%; }
     }
-    @media (max-width: 1024px) {
-      .pipeline-steps { grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    @media (max-width: 880px) {
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pipeline-stages { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .workspace-grid { grid-template-columns: minmax(0, 1fr); }
+      .side { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
     }
     @media (max-width: 640px) {
-      .pipeline-steps { grid-template-columns: repeat(2, 1fr); }
+      main { gap: 14px; }
+      .hero-card, .side { grid-template-columns: minmax(0, 1fr); }
+      .hero-card { gap: 17px; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .pipeline-stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metric { padding: 12px; gap: 5px; }
+      .resource-meters { grid-template-columns: minmax(0, 1fr); }
+      .table-frame { border-radius: 9px; }
+      table { display: block; }
+      thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+      tbody { display: block; }
+      tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 10px; gap: 6px 9px; }
+      tbody tr + tr { border-top: 1px solid var(--line); }
+      td { display: block; border: 0; padding: 0; }
+      td:first-child { grid-column: 1 / -1; }
+      td:nth-child(2) { grid-column: 1 / -1; }
+      .job-actions { grid-row: 3 / span 2; grid-column: 2; align-self: center; }
+      .empty-cell { grid-column: 1 / -1; }
     }
-    .step-box {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      padding: 8px 6px;
-      text-align: center;
-      transition: all 0.2s ease;
-    }
-    .step-num { font-size: 10px; font-weight: 700; color: var(--text-muted); font-family: ui-monospace, monospace; }
-    .step-name { font-size: 11px; font-weight: 500; color: var(--text-sub); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .step-box.step-completed {
-      background: rgba(16, 185, 129, 0.08);
-      border-color: rgba(16, 185, 129, 0.25);
-    }
-    .step-box.step-completed .step-name { color: #34d399; }
-    .step-box.step-completed .step-num { color: #10b981; }
-    .step-box.step-current {
-      background: rgba(56, 189, 248, 0.12);
-      border-color: var(--accent);
-      box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
-    }
-    .step-box.step-current .step-name { color: #fff; font-weight: 600; }
-    .step-box.step-current .step-num { color: var(--accent); }
-
-    /* Big Progress Bar */
-    .progress-track {
-      width: 100%;
-      height: 8px;
-      background: rgba(255, 255, 255, 0.06);
-      border-radius: 999px;
-      overflow: hidden;
-      position: relative;
-    }
-    .progress-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #0284c7, #38bdf8);
-      border-radius: 999px;
-      transition: width 0.4s ease;
-      box-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
-    }
-
-    /* Grid Layout */
-    .main-grid {
-      display: grid;
-      grid-template-columns: 420px 1fr;
-      gap: 18px;
-    }
-    @media (max-width: 1100px) {
-      .main-grid { grid-template-columns: 1fr; }
-    }
-
-    /* Card */
-    .card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-    .card-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 12px;
-    }
-    .card-title {
-      font-size: 14px;
-      font-weight: 600;
-      color: #fff;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    /* Forms */
-    .form-group { display: flex; flex-direction: column; gap: 6px; }
-    label { font-size: 11px; font-weight: 600; color: var(--text-sub); text-transform: uppercase; letter-spacing: 0.5px; }
-    input[type="text"], select {
-      background: rgba(0, 0, 0, 0.4);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 9px 12px;
-      font-size: 12px;
-      color: #fff;
-      outline: none;
-      transition: all 0.15s;
-    }
-    input[type="text"]:focus, select:focus {
-      border-color: var(--border-focus);
-      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
-    }
-
-    /* Spec Pill */
-    .spec-box {
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px 12px;
-      font-size: 11px;
-      color: var(--text-muted);
-      line-height: 1.6;
-    }
-    .spec-tag {
-      background: rgba(56, 189, 248, 0.08);
-      color: #7dd3fc;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-weight: 600;
-      font-family: ui-monospace, monospace;
-      font-size: 10px;
-      margin-right: 4px;
-    }
-
-    /* Table */
-    table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
-    th {
-      background: rgba(255, 255, 255, 0.02);
-      padding: 10px 12px;
-      color: var(--text-muted);
-      font-weight: 600;
-      font-size: 11px;
-      border-bottom: 1px solid var(--border);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    td {
-      padding: 10px 12px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-      vertical-align: middle;
-    }
-    tr:hover td { background: var(--bg-card-hover); }
-
-    /* State Badges */
-    .st-queued { background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border: 1px solid var(--border); }
-    .st-creating { background: rgba(245, 158, 11, 0.12); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-    .st-processing { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
-    .st-downloading { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
-    .st-completed { background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-    .st-error { background: rgba(239, 68, 68, 0.12); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-    .st-stopped { background: rgba(249, 115, 22, 0.12); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.3); }
-
-    /* Session Alert Box */
-    .session-alert-box {
-      background: rgba(239, 68, 68, 0.08);
-      border: 1px solid rgba(239, 68, 68, 0.25);
-      border-radius: 8px;
-      padding: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
     }
   </style>
 </head>
 <body>
-
-  <!-- Header -->
-  <header>
-    <div class="logo-area">
-      <div class="logo-badge" style="background: rgba(56, 189, 248, 0.12); color: #38bdf8; border-color: rgba(56, 189, 248, 0.35);">TOOL V1 // CLOUD [TẠM THỜI]</div>
-      <div>
-        <div class="app-title">
-          Cloud GPU On-Demand Node
-          <span class="badge badge-warn" style="font-size: 10px; padding: 2px 7px;"><span class="dot dot-yellow"></span>Chế độ phụ tạm thời</span>
-        </div>
-        <div class="app-subtitle">Hoàn toàn tách biệt với luồng Local RTX 4050 — Tận dụng Colab T4/L4 khi cần cày video nặng</div>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 1-7.9 6 6 0 0 0-11.6-1A4.5 4.5 0 0 0 7 18Z"/></svg></span>
+        <div><strong class="brand-name">Cloud GPU</strong><div class="brand-caption">Tool V1</div></div>
       </div>
-    </div>
-
-    <div class="hw-status">
-      <div class="badge badge-cu" id="header-cu-balance-badge" title="Số CU còn lại theo lần đọc số dư Colab gần nhất">
-        <span class="dot dot-green" id="header-cu-balance-dot"></span>
-        CU còn lại: <b id="header-cu-balance">--</b>
-        <span id="header-cu-balance-age" style="font-size: 10px; color: var(--text-sub);">Chưa có dữ liệu</span>
-      </div>
-      <div class="badge badge-online" id="header-budget-badge" title="Hạn mức tiêu thụ CU trong ngày">
-        🛡️ CU hôm nay: <b id="header-cu-budget">0.00 / 10.0 CU</b>
-      </div>
-      <div class="badge badge-gpu" title="Tốc độ tiêu thụ CU hiện thời">
-        Tải: <b id="header-cu-rate">0.00 CU/h</b>
-      </div>
-      <div class="badge badge-gpu" id="header-session-badge" title="Số máy ảo Colab đang chạy">
-        <span class="dot dot-blue"></span>
-        Máy ảo: <b id="header-session-count">0</b>
-      </div>
-      <div class="badge badge-gpu" id="header-worker-badge" title="Background Worker tự động lấy job">
-        Worker: <b id="header-worker-text">Đang chạy</b>
-      </div>
-      <div class="badge badge-online" id="header-provider-cache-badge" title="Độ tươi dữ liệu kết nối Colab">
-        Colab: <b id="header-provider-cache-text">--</b>
-      </div>
-      <div class="badge badge-gpu" id="header-telebot-badge" style="display: none;" title="Bot Telegram riêng của Cloud GPU">
-        <span class="dot dot-green" id="header-telebot-dot"></span>
-        Telebot: <b id="header-telebot-text">--</b>
-      </div>
-      <a href="http://127.0.0.1:8088/" class="btn btn-outline" style="margin-left: 6px;" title="Quay lại giao diện Tool V1 Local chính thức">💻 Về Local (8088)</a>
+      <a href="http://127.0.0.1:8088/" class="btn btn-outline"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg> Mở Tool Local</a>
     </div>
   </header>
 
-  <div class="container">
-
-    <!-- Active Job Hero Card (Dynamic) -->
-    <div class="hero-card" id="hero-card">
-      <div class="hero-top">
-        <div class="hero-title">
-          <span class="dot dot-green" id="hero-status-dot"></span>
-          <span id="hero-status-heading">Trạng Thái Hệ Thống: Sẵn sàng</span>
-        </div>
-        <div class="hero-meta">
-          <span id="hero-job-id">ID: --</span>
-          <span id="hero-gpu-tag" class="badge badge-gpu">GPU: --</span>
-          <span id="hero-voice-tag" class="badge badge-gpu">Giọng: --</span>
-          <button class="btn btn-danger" id="hero-btn-stop" style="display: none;" onclick="cancelActiveJob()">🛑 Huỷ Job</button>
-        </div>
+  <main>
+    <div class="page-heading">
+      <div>
+        <h1>Tổng quan Cloud GPU</h1>
+        <p>Theo dõi video, phiên Colab và hạn mức sử dụng.</p>
       </div>
-
-      <!-- 8-Step Visual Pipeline Tracker -->
-      <div class="pipeline-steps" id="hero-step-tracker">
-        <div class="step-box" id="step-1"><div class="step-num">01</div><div class="step-name">Trích Audio</div></div>
-        <div class="step-box" id="step-2"><div class="step-num">02</div><div class="step-name">Demucs Tách Âm</div></div>
-        <div class="step-box" id="step-3"><div class="step-num">03</div><div class="step-name">Whisper Large-v3</div></div>
-        <div class="step-box" id="step-4"><div class="step-num">04</div><div class="step-name">Dịch Gemini AI</div></div>
-        <div class="step-box" id="step-5"><div class="step-num">05</div><div class="step-name">TTS CapCut Mai</div></div>
-        <div class="step-box" id="step-6"><div class="step-num">06</div><div class="step-name">EBU R128 Ducking</div></div>
-        <div class="step-box" id="step-7"><div class="step-num">07</div><div class="step-name">Render Video</div></div>
-        <div class="step-box" id="step-8"><div class="step-num">08</div><div class="step-name">Nghiệm Thu</div></div>
+      <div class="toolbar">
+        <span id="refresh-status" class="mono">Đang kết nối…</span>
+        <button type="button" class="btn btn-outline" id="btn-refresh"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5m-4.5-.5a7.5 7.5 0 0 1 13-4.8l2.5 3.1m-16 4.4 2.5 3.1a7.5 7.5 0 0 0 13-4.8"/></svg> Làm mới</button>
       </div>
-
-      <!-- Progress bar & details -->
-      <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px;">
-        <span id="hero-step-desc" style="color: var(--text-sub);">Hàng đợi trống. Máy ảo Colab đang ở trạng thái ngủ (0.00 CU/h).</span>
-        <b id="hero-percent-text" style="color: var(--accent); font-family: ui-monospace, monospace;">0%</b>
-      </div>
-      <div class="progress-track">
-        <div class="progress-fill" id="hero-progress-fill" style="width: 0%;"></div>
-      </div>
-      <div id="hero-alert-banner" style="display: none; margin-top: 10px; font-size: 11px; padding: 8px 10px; border-radius: 6px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: #fcd34d;"></div>
     </div>
 
-    <!-- Active Sessions & Unrecovered Cleanup Alert -->
-    <div id="session-alert-container" style="display: none;"></div>
-    <div id="cleanup-alert-container" style="display: none;"></div>
-    <div id="rollout-alerts" role="status" class="spec-box" hidden></div>
+    <div class="notices" hidden>
+      <div id="connection-notice" class="notice" data-tone="warn" role="status" hidden></div>
+      <div id="action-notice" class="notice" role="status" hidden></div>
+    </div>
 
-    <!-- Main Grid -->
-    <div class="main-grid">
-
-      <!-- Left Panel: Enqueue & Controls -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Phát hành Cloud</div>
+    <section class="hero-card" aria-labelledby="hero-status-heading">
+      <div class="hero-main">
+        <div class="hero-state">
+          <span class="dot" id="hero-status-dot" aria-hidden="true"></span><span id="hero-state">Trạng thái xử lý</span>
         </div>
-
-        <p id="rollout-status" role="status">Đang kiểm tra lượt Cloud…</p>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <button type="button" class="btn btn-outline" id="btn-arm-rollout" onclick="setRollout('arm')">
-            Mở một lượt Cloud
-          </button>
-          <button type="button" class="btn btn-outline" id="btn-pause-rollout" onclick="setRollout('pause')">
-            Khóa nhận job Cloud
-          </button>
+        <h2 id="hero-status-heading">Đang kiểm tra hàng đợi…</h2>
+        <p id="hero-step-desc">Đang tải trạng thái Cloud.</p>
+        <div id="hero-job-meta" class="hero-meta" hidden>
+          <span id="hero-gpu-tag"></span>
+          <span id="hero-voice-tag"></span>
+          <span id="hero-job-id" class="mono"></span>
+          <button type="button" class="btn btn-danger btn-small" id="hero-btn-stop" onclick="cancelActiveJob()">Hủy video</button>
         </div>
-
-        <form id="form-enqueue" style="display: flex; flex-direction: column; gap: 12px;">
-          <div class="form-group">
-            <label>Link Video (URL) hoặc Đường Dẫn File:</label>
-            <input type="text" id="input-video-path" placeholder="Dán link TikTok, Douyin, YouTube, Facebook... hoặc D:\video\sample.mp4" required autocomplete="off">
-            <div style="font-size: 11px; color: #38bdf8; margin-top: 2px;">⚡ Hỗ trợ dán thẳng link video. Máy ảo Colab sẽ tự tải trực tiếp siêu tốc bằng mạng 1Gbps!</div>
-          </div>
-
-          <div style="display: flex; flex-direction: column; gap: 10px;">
-            <div class="form-group">
-              <label>Bộ Tăng Tốc (GPU / TPU / CPU):</label>
-              <select id="select-gpu">
-                <optgroup label="GPU Khuyên Dùng (Tối Ưu Nhất Cho Video)">
-                  <option value="T4" selected>NVIDIA T4 (16GB · 1.15 CU/h - Tiết kiệm)</option>
-                  <option value="L4">NVIDIA L4 (24GB · 1.94 CU/h - Siêu tốc)</option>
-                </optgroup>
-                <optgroup label="GPU Cao Cấp (Khi Có Sẵn / Giờ Thấp Điểm)">
-                  <option value="A100">NVIDIA A100 (40GB · ~3.85 CU/h)</option>
-                  <option value="H100">NVIDIA H100 (80GB · ~8.00 CU/h - Pro+)</option>
-                </optgroup>
-                <optgroup label="Google TPU (Tensor Processing Unit)">
-                  <option value="V5E1">Google TPU v5e (v5e1 · ~2.00 CU/h)</option>
-                  <option value="V6E1">Google TPU v6e Trillium (v6e1 · ~3.50 CU/h)</option>
-                </optgroup>
-                <optgroup label="CPU Runtimes">
-                  <option value="CPU">CPU High-RAM (~0.10 CU/h - Tiết kiệm CU)</option>
-                </optgroup>
-              </select>
-            </div>
-
-            <div class="form-group">
-              <label>Giọng Đọc AI (TTS):</label>
-              <select id="select-voice">
-                <option value="auto" selected>Tự động Nam/Nữ (Chuẩn Tool V1 · Mai / Thanh Niên)</option>
-                <option value="BV562_streaming">CapCut · Mai (Nữ Chuẩn V1)</option>
-                <option value="BV075_streaming">CapCut · Thanh Niên Tự Tin (Nam)</option>
-                <option value="BV421_vivn_streaming">CapCut · Cô Gái Tươi Vui</option>
-                <option value="vi-VN-HoaiMyNeural">Edge · Hoài My (Nữ)</option>
-                <option value="vi-VN-NamMinhNeural">Edge · Nam Minh (Nam)</option>
-              </select>
-            </div>
-
-            <label style="display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-sub); text-transform: none; cursor: pointer;">
-              <input type="checkbox" id="chk-allow-no-speech" style="width: auto;">
-              Cho phép xuất video không lời thoại (giữ nhạc nền nếu ASR rỗng)
-            </label>
-          </div>
-
-          <!-- Specs Info Box -->
-          <div class="spec-box">
-            <div style="font-weight: 600; color: #fff; margin-bottom: 4px;">Quy trình chuẩn Tool V1 (100% đồng bộ):</div>
-            <div>
-              <span class="spec-tag">Auto Voice</span> Tự khóa giọng Nam/Nữ theo người nói đầu<br>
-              <span class="spec-tag">Localized Blur</span> Xóa mờ cục bộ chữ Trung & viền chữ nét<br>
-              <span class="spec-tag">Canvas 9:16</span> Tự chuyển khung dọc 1080×1920 nền mờ<br>
-              <span class="spec-tag">EBU R128</span> Tách nhạc sạch & hòa âm Sidechain Ducking
-            </div>
-          </div>
-
-          <button type="submit" class="btn btn-primary" id="btn-submit-enqueue" disabled style="padding: 10px; justify-content: center; font-size: 13px;">
-            Chạy video này trên Cloud
-          </button>
-        </form>
-
-        <!-- CU Budget Limit Card -->
-        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div style="font-size: 11px; font-weight: 600; color: #fff; text-transform: uppercase;">🛡️ Hạn Mức Sử Dụng CU Hôm Nay:</div>
-            <span id="budget-percent-tag" class="badge badge-cu" style="font-size: 10px;">0%</span>
-          </div>
-
-          <div style="display: flex; gap: 8px; align-items: center;">
-            <input type="number" id="input-cu-budget" min="0.5" max="200" step="0.5" style="width: 90px; padding: 6px 8px; font-size: 12px;" value="10.0">
-            <span style="font-size: 12px; color: var(--text-sub);">CU / ngày</span>
-            <button type="button" class="btn btn-outline" onclick="saveCuBudget()" style="margin-left: auto; padding: 6px 12px;">💾 Lưu Hạn Mức</button>
-          </div>
-
-          <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-sub); margin-top: 2px;">
-            <span>Đã dùng: <b id="budget-spent-text" style="color: #fff;">0.00 CU</b></span>
-            <span>Còn lại: <b id="budget-remaining-text" style="color: #34d399;">10.00 CU</b></span>
-          </div>
-          <div class="progress-track" style="height: 5px; margin-top: 2px;">
-            <div class="progress-fill" id="budget-progress-fill" style="width: 0%; background: #10b981;"></div>
-          </div>
-          <div style="font-size: 10px; color: var(--text-muted);">
-            Hệ thống tự động ngắt nhận video khi chạm ngưỡng hạn mức để bảo vệ 100% số dư Colab.
-          </div>
-        </div>
-
-        <!-- System Controls Box -->
-        <div style="border-top: 1px solid var(--border); padding-top: 14px; display: flex; flex-direction: column; gap: 8px;">
-          <div style="font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase;">Quản Lý Hệ Thống & Bảo Vệ CU:</div>
-          <div style="display: flex; gap: 8px;">
-            <button class="btn btn-outline" id="btn-toggle-worker" onclick="toggleWorker()" style="flex: 1; justify-content: center;">
-              Tạm Dừng Worker
-            </button>
-            <button class="btn btn-danger" onclick="emergencyStopAll()" style="flex: 1; justify-content: center;">
-              🛑 Thu Hồi Mọi Máy Colab
-            </button>
-          </div>
-        </div>
+        <p id="hero-alert-banner" class="hero-warning" hidden></p>
       </div>
+      <div class="telegram-card">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 4-7 16-3.6-6.4L4 10l17-6ZM10.4 13.6l5.1-4.3"/></svg>
+        <h3>Gửi video qua Telegram</h3>
+        <p id="telegram-cta-note">Dán link video vào bot Cloud để xếp hàng tự động.</p>
+        <a class="btn" id="telegram-link" href="https://t.me/autodubcloud_bot" target="_blank" rel="noopener noreferrer">Mở @autodubcloud_bot</a>
+      </div>
+    </section>
 
-      <!-- Right Panel: Queue & History -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">
-            📋 Hàng Đợi Cloud (Độc Lập Với Hàng Đợi Local)
-            <span class="badge badge-gpu" id="jobs-count-badge">0 jobs</span>
-          </div>
-          <div style="display: flex; gap: 6px;">
-            <button class="btn btn-outline" onclick="manualRefresh()" title="Làm mới ngay">🔄 Làm mới</button>
-          </div>
+    <section class="card pipeline-card" id="pipeline-card" aria-labelledby="pipeline-heading">
+      <div class="card-heading">
+        <h2 id="pipeline-heading">Tiến độ xử lý</h2>
+        <span id="pipeline-status" class="status-pill">Đang tải…</span>
+      </div>
+      <label class="small muted" id="active-job-picker-wrap" for="active-job-picker" hidden>
+        Video đang chạy
+        <select id="active-job-picker" aria-label="Chọn video đang chạy để xem tiến độ"></select>
+      </label>
+      <div class="pipeline-caption">
+        <p id="pipeline-caption" class="muted small"></p>
+        <strong id="pipeline-percent" class="mono" hidden></strong>
+      </div>
+      <div class="progress-track" id="pipeline-track" role="progressbar" aria-label="Tiến độ video" aria-valuemin="0" aria-valuemax="100" hidden>
+        <div class="progress-fill" id="pipeline-fill"></div>
+      </div>
+      <ol class="pipeline-stages" id="pipeline-stages" aria-label="Các công đoạn xử lý"></ol>
+    </section>
+
+    <section class="metrics" aria-label="Trạng thái dịch vụ, bộ nhớ và Compute Units">
+      <article class="metric">
+        <h2 class="metric-label"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 4-7 16-3.6-6.4L4 10l17-6ZM10.4 13.6l5.1-4.3"/></svg> Bot Telegram</h2>
+        <div id="telegram-value" class="metric-value">Đang kiểm tra</div>
+        <div id="telegram-note" class="metric-note">Đang lấy trạng thái bot</div>
+      </article>
+      <article class="metric">
+        <h2 class="metric-label"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3m6-3v3M3 9h3m-3 6h3m3 3v3m6-3v3m3-12h3m-3 6h3"/><rect x="10" y="10" width="4" height="4" rx=".5"/></svg> Máy ảo Colab</h2>
+        <div id="session-value" class="metric-value">Đang kiểm tra</div>
+        <div id="session-note" class="metric-note">Đang lấy trạng thái Colab</div>
+      </article>
+      <article class="metric">
+        <h2 class="metric-label"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 9v4m5-4v4m5-4v4M7 18v3m5-3v3m5-3v3"/></svg> RAM máy local</h2>
+        <div id="ram-value" class="metric-value mono">—</div>
+        <div id="ram-note" class="metric-note">Đang lấy RAM máy local chạy Cloud Node</div>
+        <div class="progress-track" id="ram-progress-track" role="progressbar" aria-label="Mức sử dụng RAM máy local chạy Cloud Node" aria-valuemin="0" aria-valuemax="100" hidden>
+          <div id="ram-progress-fill" class="progress-fill"></div>
         </div>
+      </article>
+      <article class="metric">
+        <h2 class="metric-label"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 8V6a2 2 0 0 0-2-2H6a3 3 0 0 0 0 6h12m-12 0a3 3 0 0 1-3-3v11a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-2m-4-4h5v4h-5a2 2 0 0 1 0-4Z"/></svg> Số dư Colab</h2>
+        <div id="balance-value" class="metric-value mono">—</div>
+        <div id="balance-note" class="metric-note">Đang lấy số dư</div>
+      </article>
+      <article class="metric">
+        <h2 class="metric-label"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M6 15v-4m6 4V5m6 10V8"/></svg> Ngân sách hôm nay</h2>
+        <div id="budget-value" class="metric-value mono">—</div>
+        <div id="budget-note" class="metric-note">Đang lấy hạn mức</div>
+        <div class="progress-track" id="budget-progress-track" role="progressbar" aria-label="Mức sử dụng ngân sách" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="budget-progress-fill" class="progress-fill"></div>
+        </div>
+      </article>
+    </section>
 
-        <div style="overflow-x: auto;">
-          <table>
-            <thead>
-              <tr>
-                <th>Video & Job ID</th>
-                <th>Cấu Hình</th>
-                <th>Trạng Thái</th>
-                <th>Tiến Độ & Bước</th>
-                <th>Tiêu Thụ</th>
-                <th>Thời Gian</th>
-                <th style="text-align: right;">Thao Tác</th>
-              </tr>
+    <section class="card" id="colab-resource-section" aria-labelledby="colab-resource-heading">
+      <div class="card-heading">
+        <h2 id="colab-resource-heading">Theo dõi từng job</h2>
+        <span id="colab-job-count" class="small muted">Đang tải danh sách job…</span>
+      </div>
+      <div class="resource-list" id="colab-resource-list"></div>
+    </section>
+
+    <section id="operational-notices" class="notices" aria-label="Cảnh báo Cloud" hidden>
+      <div id="session-alert-container" class="notice" data-tone="warn" hidden>
+        <p id="session-alert-message"></p>
+        <button type="button" class="btn btn-danger btn-small" onclick="emergencyStopAll()">Thu hồi tất cả máy ảo</button>
+      </div>
+      <div id="cleanup-alert-container" class="notice" data-tone="warn" hidden>
+        <p id="cleanup-alert-message"></p>
+        <button type="button" class="btn btn-danger btn-small" onclick="emergencyStopAll()">Thu hồi tất cả máy ảo</button>
+      </div>
+      <p id="rollout-alerts" class="notice" data-tone="warn" hidden></p>
+    </section>
+
+    <div class="workspace-grid">
+      <section class="card" id="queue" aria-labelledby="queue-heading">
+        <div class="card-heading">
+          <h2 id="queue-heading">Hàng đợi và lịch sử</h2>
+          <span class="status-pill mono" id="jobs-count-badge">Đang tải…</span>
+        </div>
+        <div class="queue-filters" role="group" aria-label="Lọc công việc">
+          <button type="button" class="btn" data-filter="all" aria-pressed="true">Tất cả</button>
+          <button type="button" class="btn" data-filter="running" aria-pressed="false">Đang chạy / chờ</button>
+          <button type="button" class="btn" data-filter="completed" aria-pressed="false">Hoàn tất</button>
+          <button type="button" class="btn" data-filter="failed" aria-pressed="false">Có lỗi</button>
+        </div>
+        <p id="queue-error" class="notice small" data-tone="warn" role="status" hidden></p>
+        <div class="table-frame">
+          <table aria-label="Danh sách video Cloud" role="table">
+            <thead role="rowgroup">
+              <tr role="row"><th scope="col" role="columnheader">Video</th><th scope="col" role="columnheader">Trạng thái</th><th scope="col" role="columnheader">Chi phí</th><th scope="col" role="columnheader">Thời gian</th><th scope="col" role="columnheader"><span class="sr-only">Thao tác</span></th></tr>
             </thead>
-            <tbody id="table-jobs-body">
-              <tr>
-                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 24px;">
-                  Đang tải danh sách công việc...
-                </td>
-              </tr>
+            <tbody id="table-jobs-body" role="rowgroup">
+              <tr role="row"><td role="cell" colspan="5" class="empty-cell">Đang tải công việc…</td></tr>
             </tbody>
           </table>
         </div>
-      </div>
+      </section>
 
+      <aside class="side" aria-label="Gửi video và vận hành">
+        <section class="card" aria-labelledby="submit-heading">
+          <div class="card-heading"><h2 id="submit-heading">Gửi từ Dashboard</h2></div>
+          <form id="form-enqueue" class="form-stack">
+            <div class="field">
+              <label for="input-video-path">Link hoặc đường dẫn video</label>
+              <input type="text" id="input-video-path" placeholder="https://… hoặc D:\video.mp4" required autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="select-gpu">Bộ tăng tốc</label>
+              <select id="select-gpu">
+                <optgroup label="NVIDIA GPU">
+                  <option value="T4" selected>T4 · 16 GB</option>
+                  <option value="L4">L4 · 24 GB</option>
+                  <option value="A100">A100 · 40 GB</option>
+                  <option value="H100">H100 · 80 GB</option>
+                </optgroup>
+              </select>
+              <div class="rollout-actions">
+                <button type="button" id="btn-save-gpu" class="btn btn-outline btn-small" hidden>Thử lưu lại</button>
+              </div>
+              <p id="gpu-default-note" class="small muted" role="status"></p>
+              <details class="advanced" id="gpu-check-details">
+                <summary>Kiểm tra GPU Colab</summary>
+                <ul id="gpu-evidence" class="gpu-evidence small" aria-label="Kết quả cấp máy"></ul>
+                <button type="button" id="btn-check-gpu" class="btn btn-outline btn-small" disabled>Thử cấp GPU đang chọn</button>
+                <p id="gpu-check-note" class="small muted">Mở một lượt để thử. Phiên thử có thể tính CU và được thu hồi sau khi kiểm tra.</p>
+                <p id="gpu-check-notice" class="small" role="status" hidden></p>
+              </details>
+            </div>
+            <div class="field">
+              <label for="select-voice">Giọng đọc</label>
+              <select id="select-voice">
+                <option value="auto" selected>Tự động chọn giọng nam / nữ</option>
+                <option value="BV562_streaming">CapCut · Mai</option>
+                <option value="BV075_streaming">CapCut · Thanh Niên Tự Tin</option>
+                <option value="BV421_vivn_streaming">CapCut · Cô Gái Tươi Vui</option>
+                <option value="vi-VN-HoaiMyNeural">Edge · Hoài My</option>
+                <option value="vi-VN-NamMinhNeural">Edge · Nam Minh</option>
+              </select>
+            </div>
+            <label class="checkbox"><input type="checkbox" id="chk-allow-no-speech"> Cho phép xuất video không có lời thoại</label>
+            <p id="rollout-status" class="small muted" role="status">Đang kiểm tra lượt gửi từ web…</p>
+            <div class="rollout-actions">
+              <button type="button" class="btn btn-outline btn-small" id="btn-arm-rollout" onclick="setRollout('arm')" disabled>Mở một lượt</button>
+              <button type="button" class="btn btn-outline btn-small" id="btn-pause-rollout" onclick="setRollout('pause')" disabled>Khóa lượt gửi</button>
+            </div>
+            <button type="submit" class="btn btn-primary" id="btn-submit-enqueue" aria-describedby="rollout-status" disabled>Gửi lên Cloud</button>
+            <p id="form-notice" class="small" role="status" hidden></p>
+          </form>
+        </section>
+
+        <details class="card advanced">
+          <summary>Cài đặt vận hành</summary>
+          <div class="field">
+            <label for="input-cu-budget">Hạn mức CU mỗi ngày</label>
+            <div class="control-row">
+              <input type="number" id="input-cu-budget" min="0.01" step="0.01" inputmode="decimal">
+              <button type="button" class="btn btn-outline" id="btn-budget-save" onclick="saveCuBudget()">Lưu hạn mức</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="input-concurrency">Số job đồng thời của GPU đã chọn (1–4)</label>
+            <div class="control-row">
+              <input type="number" id="input-concurrency" min="1" max="4" step="1" inputmode="numeric">
+              <button type="button" class="btn btn-outline" id="btn-concurrency-save" onclick="saveConcurrency()">Lưu số luồng</button>
+            </div>
+            <p id="concurrency-note" class="small muted">Đang lấy giới hạn chạy đồng thời</p>
+            <p class="small muted">Dashboard và Telegram dùng chung giới hạn. Mỗi job chạy trên một máy ảo riêng.</p>
+            <p id="concurrency-feedback" class="small" role="status" hidden></p>
+          </div>
+          <div class="danger-zone">
+            <button type="button" class="btn btn-outline" id="btn-toggle-worker" onclick="toggleWorker()" disabled>Đang kiểm tra worker web…</button>
+            <button type="button" class="btn btn-danger" onclick="emergencyStopAll()">Thu hồi tất cả máy ảo</button>
+          </div>
+        </details>
+      </aside>
     </div>
-  </div>
+  </main>
 
   <script>
-    let workerActive = true;
-    let currentActiveJobId = null;
-    let rolloutPermit = null;
-    let enqueuePending = false;
+    const byId = id => document.getElementById(id);
+    const runningStates = new Set([
+      'provisioning', 'creating_session', 'uploading', 'preparing', 'processing', 'downloading', 'validating',
+    ]);
+    const stoppingStates = new Set(['cancel_requested', 'cancelling']);
+    const failureStates = new Set(['failed', 'error']);
+    const jobStates = {
+      queued: ['Chờ xử lý', 'st-queued'],
+      provisioning: ['Đang cấp máy', 'st-creating'],
+      creating_session: ['Đang cấp máy', 'st-creating'],
+      uploading: ['Đang tải lên', 'st-processing'],
+      preparing: ['Chuẩn bị môi trường', 'st-processing'],
+      processing: ['Đang xử lý', 'st-processing'],
+      downloading: ['Đang tải về', 'st-downloading'],
+      validating: ['Kiểm tra đầu ra', 'st-downloading'],
+      completed: ['Hoàn tất', 'st-completed'],
+      cancel_requested: ['Chờ hủy', 'st-stopped'],
+      cancelling: ['Đang thu hồi', 'st-stopped'],
+      cancelled: ['Đã hủy', 'st-stopped'],
+      failed: ['Có lỗi', 'st-error'],
+      error: ['Có lỗi', 'st-error'],
+      stopped: ['Đã dừng', 'st-stopped'],
+    };
+    const pipelineStages = [
+      ['Audio', 'Trích âm bằng FFmpeg'],
+      ['Tách lời', 'Tách giọng và nhạc nền'],
+      ['ASR', 'Nhận giọng nói bằng Whisper'],
+      ['OCR', 'Đọc phụ đề và vị trí chữ'],
+      ['Dịch thuật', 'Dịch phụ đề bằng Gemini'],
+      ['Lồng tiếng', 'Tạo giọng đọc và căn thời lượng'],
+      ['Trộn âm', 'Hòa âm và cân mức EBU R128'],
+      ['Render video', 'Kết xuất và kiểm tra video'],
+    ];
+    const failedPipelineStages = {
+      TRANSLATION_FAILED: 5,
+      TTS_GENERATION_FAILED: 6,
+      RENDER_FAILED: 8,
+    };
+    const remoteStepPrefix = /^\[([1-8])\/8\]\s*/;
+    const rolloutAlertNames = {
+      CLEANUP_PENDING: 'Chờ thu hồi máy ảo',
+      LEDGER_UNRECONCILED: 'Chờ đối soát CU',
+      DEADLINE_EXCEEDED: 'Video quá hạn xử lý',
+      QC_FAILED: 'Video không đạt kiểm tra đầu ra',
+      DUPLICATE_SUBMISSION: 'Đã gộp yêu cầu gửi lặp',
+      STATUS_SLOW: 'Colab phản hồi chậm',
+    };
+    const voiceLabels = new Map([...byId('select-voice').options].map(option => [option.value, option.text]));
+    const enqueueFields = ['input-video-path', 'select-gpu', 'select-voice', 'chk-allow-no-speech'];
+    const shortTime = new Intl.DateTimeFormat('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const jobTime = new Intl.DateTimeFormat('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    let latestJobs = [];
+    let jobFilter = 'all';
+    let lastRows = '';
+    let lastPipelineStages = '';
+    let lastStatusAt = null;
+    let refreshInFlight = null;
+    let localResourcesInFlight = null;
+    let activeJobId = null;
+    let selectedActiveJobId = null;
+    let workerActive = false;
+    let rollout = {};
     let rolloutPending = false;
-    let latestJobsById = {};
+    let enqueuePending = false;
+    let enqueueAttempt = null;
+    let budgetPending = false;
+    let concurrencyPending = false;
+    let concurrencyRevision = 0;
+    let stopPending = false;
+    const checkableGpus = new Set(['T4', 'L4', 'A100', 'H100']);
+    let defaultGpu = null;
+    let gpuSavePending = false;
+    let gpuSaveFailed = false;
+    let gpuRevision = 0;
+    let gpuCheckSubmitting = false;
+    let gpuRefreshing = null;
+    let gpuCheckTracked = false;
+    let activeJobCount = 0;
+    let activeGpuCounts = {};
+    let gpuConcurrencyLimits = {};
+    let maxConcurrency = 1;
+    let queuedDashboardJobs = 0;
 
-    function isHealthyRunningJob(j) {
-      if (!j) return false;
-      const runningStates = [
-        'provisioning',
-        'creating_session',
-        'uploading',
-        'preparing',
-        'processing',
-        'downloading',
-        'validating',
-      ];
-      if (!runningStates.includes(j.state)) return false;
-      if (j.cancel_requested_at) return false;
-      if (j.lease_expires_at && (Number(j.lease_expires_at) * 1000) < (Date.now() - 15000)) {
-        return false;
+    function write(id, value) {
+      const el = byId(id);
+      if (el.textContent !== value) el.textContent = value;
+    }
+
+    function tone(id, value) {
+      byId(id).dataset.tone = value;
+    }
+
+    function notice(id, message, level) {
+      const el = byId(id);
+      write(id, message);
+      tone(id, level);
+      el.hidden = !message;
+      if (el.parentElement.classList.contains('notices')) {
+        el.parentElement.hidden = [...el.parentElement.children].every(child => child.hidden);
       }
-      return true;
     }
 
-    function syncEnqueueButton() {
-      document.getElementById('btn-submit-enqueue').disabled =
-        enqueuePending || !(rolloutPermit || pendingEnqueueIdempotencyKey);
+    function escapeHtml(value) {
+      const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+      return String(value ?? '').replace(/[&<>"']/g, char => entities[char]);
     }
 
-    function renderRollout(data) {
-      const rollout = data.rollout || {};
-      rolloutPermit = rollout.phase === 'armed' ? rollout.permit_id : null;
-      document.getElementById('rollout-status').textContent = {
-        armed: 'Đã mở một lượt cho Dashboard hoặc lệnh /cloud trên Telegram.',
-        admitted: rollout.job_id ? `Đã dùng lượt cho ${rollout.job_id}.` : 'Đã dùng lượt Cloud.',
-        paused: 'Cloud đang khóa.',
-      }[rollout.phase] || 'Chưa đọc được trạng thái Cloud.';
-      document.getElementById('btn-arm-rollout').disabled = rolloutPending || rollout.phase === 'armed';
-      document.getElementById('btn-pause-rollout').disabled = rolloutPending || rollout.phase === 'paused';
-      syncEnqueueButton();
-
-      const alertBox = document.getElementById('rollout-alerts');
-      const alertLabels = {
-        CLEANUP_PENDING: 'Chờ thu hồi session',
-        LEDGER_UNRECONCILED: 'Chờ đối soát CU',
-        DEADLINE_EXCEEDED: 'Quá hạn',
-        QC_FAILED: 'QC thất bại',
-        DUPLICATE_SUBMISSION: 'Đã gộp yêu cầu gửi lặp',
-        STATUS_SLOW: 'Phản hồi trạng thái chậm',
-      };
-      const healthyJob = isHealthyRunningJob(data.active_job) ? data.active_job : null;
-      const alerts = (data.rollout_alerts || [])
-        .filter(({code, job_id}) => !(
-          code === 'CLEANUP_PENDING' &&
-          healthyJob &&
-          job_id === healthyJob.job_id &&
-          healthyJob.cleanup_status === 'pending'
-        ))
-        .map(({code, job_id}) => `${alertLabels[code] || code}${job_id ? ` · ${job_id}` : ''}`);
-      alertBox.textContent = alerts.join(' | ');
-      alertBox.hidden = !alerts.length;
+    function percent(value) {
+      return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
     }
+
+    function formatAmount(value, digits = 2) {
+      return (Number(value) || 0).toLocaleString('vi-VN', {
+        minimumFractionDigits: digits, maximumFractionDigits: digits,
+      });
+    }
+
+    function cu(value, digits = 2) {
+      return formatAmount(value, digits) + ' CU';
+    }
+
+    function setProgress(fillId, trackId, value) {
+      const amount = percent(value);
+      byId(fillId).style.width = `${amount}%`;
+      byId(trackId).setAttribute('aria-valuenow', amount);
+    }
+
+    function healthy(job) {
+      return job && runningStates.has(job.state) && !job.cancel_requested_at &&
+        (!job.lease_expires_at || Number(job.lease_expires_at) * 1000 >= Date.now() - 15000);
+    }
+
+    async function request(path, payload, headers = {}) {
+      const auth = { 'X-Local-Control-Token': '__REPLACE_TOKEN__' };
+      const config = payload === undefined
+        ? { headers: auth, signal: AbortSignal.timeout(10000) }
+        : {
+            method: 'POST',
+            headers: { ...auth, 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify(payload),
+          };
+      const response = await fetch(path, config);
+      const data = await response.json();
+      if (!response.ok || data.status === 'error') {
+        const message = [data.detail, data.message].find(value => typeof value === 'string');
+        const error = new Error(message || `Yêu cầu thất bại (HTTP ${response.status}).`);
+        error.httpStatus = response.status;
+        throw error;
+      }
+      return data;
+    }
+
+    function renderRollout() {
+      const occupiedDashboardSlots = activeJobCount + queuedDashboardJobs;
+      const pickedGpu = byId('select-gpu').value;
+      const gpuFree = (gpuConcurrencyLimits[pickedGpu] || maxConcurrency) - (activeGpuCounts[pickedGpu] || 0) - queuedDashboardJobs;
+      const freeSlots = Math.min(maxConcurrency - occupiedDashboardSlots, gpuFree);
+      const canArmNext = rollout.phase === 'admitted' && freeSlots > 0;
+      write('rollout-status', {
+        armed: 'Đã mở một lượt gửi từ web.',
+        admitted: canArmNext
+          ? `Lượt trước đã dùng · còn ${freeSlots} luồng ${pickedGpu} trống, có thể mở lượt tiếp theo.`
+          : 'Lượt gửi đã dùng. Mở lượt mới khi còn luồng trống.',
+        paused: 'Mở một lượt để gửi video từ Dashboard.',
+      }[rollout.phase] || 'Đang kiểm tra lượt gửi từ web…');
+      byId('btn-arm-rollout').disabled = !rollout.phase || rolloutPending || enqueuePending || gpuCheckSubmitting || rollout.phase === 'armed' ||
+        (rollout.phase === 'admitted' && !canArmNext);
+      byId('btn-pause-rollout').disabled = !rollout.phase || rolloutPending || enqueuePending || gpuCheckSubmitting || rollout.phase === 'paused';
+      byId('btn-submit-enqueue').disabled = enqueuePending || gpuCheckSubmitting || rolloutPending || gpuSavePending || gpuSaveFailed ||
+        !byId('input-video-path').value.trim() || !(rollout.permit_id || enqueueAttempt);
+      const canCheck = checkableGpus.has(pickedGpu);
+      byId('select-gpu').disabled = gpuSavePending;
+      byId('btn-save-gpu').hidden = !gpuSaveFailed;
+      byId('btn-save-gpu').disabled = !canCheck || gpuSavePending;
+      byId('btn-check-gpu').disabled = !canCheck || !rollout.permit_id || rolloutPending || enqueuePending ||
+        gpuCheckSubmitting || gpuCheckTracked || gpuSavePending || gpuSaveFailed;
+    }
+
+    function applyDefaultGpu(gpu) {
+      if (!checkableGpus.has(gpu) && gpu !== 'G4') return;
+      const select = byId('select-gpu');
+      if (gpuSaveFailed && select.value !== gpu) return;
+      gpuSaveFailed = false;
+      defaultGpu = gpu;
+      const legacy = select.querySelector('option[value="G4"]');
+      if (gpu === 'G4' && !legacy) select.add(new Option('G4', 'G4'));
+      if (select.value !== gpu) {
+        select.value = gpu;
+        delete byId('input-concurrency').dataset.edited;
+        byId('concurrency-feedback').hidden = true;
+        enqueueAttempt = null;
+      }
+      if (gpu !== 'G4') legacy?.remove();
+      write('gpu-default-note', `Mặc định Dashboard và Telegram: ${gpu}`);
+    }
+
+    function refreshGpuSettings() {
+      if (gpuRefreshing) return gpuRefreshing;
+      const limitRevision = concurrencyRevision;
+      const selectionRevision = gpuRevision;
+      gpuRefreshing = request('/api/cloud/gpu-settings').then(data => {
+        if (!gpuSavePending && selectionRevision === gpuRevision) applyDefaultGpu(data.default_gpu);
+        if (!concurrencyPending && limitRevision === concurrencyRevision) {
+          gpuConcurrencyLimits = data.gpu_concurrency_limits || {};
+        }
+        const items = data.gpus || [];
+        gpuCheckTracked = items.some(({ evidence }) =>
+          evidence && !['completed', 'failed', 'cancelled', 'stopped', 'error'].includes(evidence.state));
+        byId('gpu-evidence').replaceChildren(...items.map(item => {
+          const evidence = item.evidence;
+          let outcome = 'Chưa kiểm tra';
+          if (evidence) {
+            outcome = {
+              GPU_ALLOCATION_REFUSED: 'Colab từ chối cấp GPU',
+              PROVIDER_503: 'Tạm thời chưa cấp được máy',
+              CLEANUP_FAILED: 'Đang chờ xác nhận thu hồi',
+              ENV_GPU_MISMATCH: 'Máy trả về GPU khác',
+            }[evidence.error_code] || ({
+              queued: 'Đang chờ thử',
+              completed: 'Đã xác nhận cấp được',
+              failed: 'Chưa xác nhận được',
+              cancelled: 'Đã hủy lượt thử',
+            }[evidence.state] || 'Đang thử cấp máy');
+          }
+          const timestamp = evidence?.completed_at ? jobTime.format(evidence.completed_at * 1000) : '';
+          const row = document.createElement('li');
+          row.textContent = `${item.gpu_type} · ${outcome}${timestamp ? ' · ' + timestamp : ''} · ~${formatAmount(item.estimated_cu_per_hour)} CU/giờ`;
+          return row;
+        }));
+        renderConcurrency();
+        renderRollout();
+      }).catch(() => {
+        if (!defaultGpu && !gpuSavePending && !gpuSaveFailed) {
+          write('gpu-default-note', 'Chưa lấy được cấu hình GPU đã lưu.');
+        }
+      }).finally(() => {
+        gpuRefreshing = null;
+      });
+      return gpuRefreshing;
+    }
+
+    byId('select-gpu').addEventListener('change', () => {
+      delete byId('input-concurrency').dataset.edited;
+      byId('concurrency-feedback').hidden = true;
+      renderConcurrency();
+      saveGpuSelection();
+    });
+    byId('gpu-check-details').addEventListener('toggle', event => {
+      if (event.currentTarget.open) refreshGpuSettings();
+    });
+    async function saveGpuSelection() {
+      const gpu = byId('select-gpu').value;
+      if (gpuSavePending) return;
+      if (gpu === defaultGpu) {
+        applyDefaultGpu(gpu);
+        renderRollout();
+        return;
+      }
+      if (!checkableGpus.has(gpu)) return;
+      gpuSavePending = true;
+      gpuSaveFailed = false;
+      gpuRevision += 1;
+      write('gpu-default-note', `Đang lưu ${gpu} cho Dashboard và Telegram…`);
+      renderRollout();
+      try {
+        const data = await request('/api/cloud/gpu-settings', { gpu_type: gpu });
+        applyDefaultGpu(data.default_gpu);
+      } catch (error) {
+        gpuSaveFailed = true;
+        write('gpu-default-note', `Chưa đồng bộ GPU: ${error.message}`);
+      } finally {
+        gpuSavePending = false;
+        gpuRevision += 1;
+        renderRollout();
+      }
+    }
+    byId('btn-save-gpu').addEventListener('click', saveGpuSelection);
+    byId('btn-check-gpu').addEventListener('click', async () => {
+      if (byId('btn-check-gpu').disabled) return;
+      gpuCheckSubmitting = true;
+      renderRollout();
+      try {
+        const data = await request('/api/cloud/gpu-check', {
+          gpu_type: byId('select-gpu').value,
+          rollout_permit: rollout.permit_id,
+        });
+        gpuCheckTracked = true;
+        rollout = {};
+        enqueueAttempt = null;
+        notice('gpu-check-notice', `Đã xếp lượt thử ${data.gpu_type}.`, 'good');
+      } catch (error) {
+        notice('gpu-check-notice', error.message, 'bad');
+      } finally {
+        gpuCheckSubmitting = false;
+        await Promise.allSettled([refreshDashboard(), refreshGpuSettings()]);
+        renderRollout();
+      }
+    });
 
     async function setRollout(action) {
       rolloutPending = true;
-      document.getElementById('btn-arm-rollout').disabled = true;
-      document.getElementById('btn-pause-rollout').disabled = true;
+      renderRollout();
+      notice('form-notice', '', '');
       try {
-        const res = await fetch('/api/cloud/rollout', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({action}),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Không thể cập nhật lượt Cloud.');
-        renderRollout(data);
-      } catch (err) {
-        alert(err.message);
+        const data = await request('/api/cloud/rollout', { action });
+        rollout = data.rollout;
+        enqueueAttempt = null;
+      } catch (error) {
+        notice('form-notice', error.message, 'bad');
       } finally {
         rolloutPending = false;
-        await loadStatus();
+        renderRollout();
       }
     }
 
-    // Helper map state class
-    function getStateBadge(state) {
-      const map = {
-        'queued': { label: 'Chờ chạy', cls: 'st-queued' },
-        'provisioning': { label: 'Tạo máy ảo', cls: 'st-creating' },
-        'creating_session': { label: 'Tạo máy ảo', cls: 'st-creating' },
-        'uploading': { label: 'Đang upload', cls: 'st-processing' },
-        'preparing': { label: 'Chuẩn bị AI', cls: 'st-processing' },
-        'processing': { label: 'Đang xử lý', cls: 'st-processing' },
-        'downloading': { label: 'Đang tải về', cls: 'st-downloading' },
-        'validating': { label: 'Kiểm tra file', cls: 'st-downloading' },
-        'completed': { label: 'Hoàn tất', cls: 'st-completed' },
-        'cancel_requested': { label: 'Đang huỷ', cls: 'st-stopped' },
-        'cancelling': { label: 'Đang thu hồi GPU', cls: 'st-stopped' },
-        'cancelled': { label: 'Đã huỷ', cls: 'st-stopped' },
-        'failed': { label: 'Lỗi', cls: 'st-error' },
-        'error': { label: 'Lỗi', cls: 'st-error' },
-        'stopped': { label: 'Đã dừng', cls: 'st-stopped' }
-      };
-      const info = map[state] || { label: state, cls: 'st-queued' };
-      return `<span class="badge ${info.cls}">${info.label}</span>`;
+    function renderBudget(budget) {
+      if (!budget) return;
+      const { budget_daily, spent_today, committed_today, remaining_today, reserved_today, percent_used } = budget;
+      const spent = committed_today ?? spent_today;
+      write('budget-value', `${formatAmount(spent)} / ${formatAmount(budget_daily)} CU`);
+      const qualifier = budget.has_uncertain_budget
+        ? ' · Chờ đối soát'
+        : reserved_today > 0
+          ? ' · Gồm CU giữ chỗ'
+          : budget.cost_is_estimated && spent > 0 ? ' · Ước tính' : '';
+      write('budget-note', `Còn ${cu(remaining_today)}${qualifier}`);
+      const level = percent_used >= 90 ? 'bad' : percent_used >= 70 ? 'warn' : '';
+      tone('budget-value', level);
+      byId('budget-progress-fill').style.backgroundColor = level === 'bad' ? '#bb4159' : level === 'warn' ? '#b36b16' : '';
+      setProgress('budget-progress-fill', 'budget-progress-track', percent_used);
+      const input = byId('input-cu-budget');
+      if (!input.dataset.edited && document.activeElement !== input) input.value = budget_daily ?? '';
     }
 
-    // Helper highlight pipeline steps
-    function updatePipelineTracker(percent, stepName) {
-      const steps = [
-        { id: 'step-1', min: 10 },
-        { id: 'step-2', min: 25 },
-        { id: 'step-3', min: 40 },
-        { id: 'step-4', min: 55 },
-        { id: 'step-5', min: 70 },
-        { id: 'step-6', min: 82 },
-        { id: 'step-7', min: 92 },
-        { id: 'step-8', min: 100 },
-      ];
-
-      // Reset all
-      steps.forEach(s => {
-        const el = document.getElementById(s.id);
-        if (el) el.className = 'step-box';
-      });
-
-      if (!percent || percent <= 0) return;
-
-      let currentAssigned = false;
-      for (let i = steps.length - 1; i >= 0; i--) {
-        const el = document.getElementById(steps[i].id);
-        if (!el) continue;
-        if (percent >= steps[i].min) {
-          if (!currentAssigned && percent < 100) {
-            el.className = 'step-box step-current';
-            currentAssigned = true;
-          } else {
-            el.className = 'step-box step-completed';
-          }
-        }
-      }
-      if (percent >= 100) {
-        const lastEl = document.getElementById('step-8');
-        if (lastEl) lastEl.className = 'step-box step-completed';
-      }
-    }
-
-    // Fetch Status
-    async function loadStatus() {
-      try {
-        const res = await fetch('/api/cloud/status');
-        const data = await res.json();
-        if (data.status !== 'ok') return;
-        if (data.active_job && latestJobsById[data.active_job.job_id]) {
-          const fresher = latestJobsById[data.active_job.job_id];
-          if (
-            Number(fresher.version || 0) >= Number(data.active_job.version || 0) ||
-            Number(fresher.updated_at || 0) >= Number(data.active_job.updated_at || 0)
-          ) {
-            data.active_job = fresher;
-          }
-        }
-        renderRollout(data);
-
-        // Balance & Quota
-        const rate = (data.usage?.usage_rate ?? 0).toFixed(2);
-        const activeCount = data.usage?.active_assignments ?? 0;
-
-        const pCache = data.provider_cache || {};
-        const balanceEl = document.getElementById('header-cu-balance');
-        const balanceAgeEl = document.getElementById('header-cu-balance-age');
-        const balanceBadge = document.getElementById('header-cu-balance-badge');
-        const balanceDot = document.getElementById('header-cu-balance-dot');
-        if (pCache.balance_available && Number.isFinite(Number(data.usage?.balance))) {
-          const balanceAge = pCache.balance_age_seconds;
-          balanceEl.innerText = Number(data.usage.balance).toFixed(2) + ' CU';
-          balanceAgeEl.innerText = balanceAge == null
-            ? 'Đã nhận số liệu'
-            : `Cập nhật ${Math.round(balanceAge)}s trước${pCache.balance_stale ? ' · dữ liệu cũ' : ''}`;
-          balanceBadge.className = pCache.balance_stale ? 'badge badge-warn' : 'badge badge-cu';
-          balanceDot.className = pCache.balance_stale ? 'dot dot-yellow' : 'dot dot-green';
-        } else {
-          balanceEl.innerText = '--';
-          balanceAgeEl.innerText = pCache.in_flight ? 'Đang lấy số dư' : 'Chưa có dữ liệu';
-          balanceBadge.className = pCache.provider_unreachable ? 'badge badge-danger' : 'badge badge-warn';
-          balanceDot.className = 'dot dot-yellow';
-        }
-        document.getElementById('header-cu-rate').innerText = rate + ' CU/h';
-        document.getElementById('header-session-count').innerText = activeCount;
-
-        // Provider cache freshness indicator
-        const pBadge = document.getElementById('header-provider-cache-badge');
-        const pText = document.getElementById('header-provider-cache-text');
-        if (pBadge && pText) {
-          if (pCache.provider_unreachable || pCache.stale) {
-            const ageTxt = pCache.age_seconds != null ? `${Math.round(pCache.age_seconds)}s trước` : 'mất kết nối';
-            pBadge.className = pCache.provider_unreachable ? 'badge badge-danger' : 'badge badge-warn';
-            pText.innerText = pCache.in_flight ? `Đang đồng bộ (${ageTxt})` : `Cũ (${ageTxt})`;
-          } else {
-            pBadge.className = 'badge badge-cu';
-            pText.innerText = pCache.age_seconds != null ? `Trực tuyến (${Math.round(pCache.age_seconds)}s)` : 'Trực tuyến';
-          }
-        }
-
-        // Dedicated Cloud Telegram Bot indicator
-        const tbInfo = data.telegram_bot;
-        const tbBadge = document.getElementById('header-telebot-badge');
-        const tbText = document.getElementById('header-telebot-text');
-        const tbDot = document.getElementById('header-telebot-dot');
-        if (tbBadge && tbText && tbDot) {
-          if (tbInfo && tbInfo.configured) {
-            tbBadge.style.display = 'inline-flex';
-            if (tbInfo.running) {
-              tbBadge.className = 'badge badge-cu';
-              tbDot.className = 'dot dot-green';
-              tbText.innerText = tbInfo.bot_username ? `@${tbInfo.bot_username}` : 'Đang bật';
-            } else {
-              tbBadge.className = 'badge badge-warn';
-              tbDot.className = 'dot dot-yellow';
-              tbText.innerText = 'Đang kết nối…';
-            }
-          } else {
-            tbBadge.style.display = 'none';
-          }
-        }
-
-        // Budget & Quota Limit
-        if (data.budget) {
-          updateBudgetUI(data.budget);
-        }
-
-        // Session count badge styling
-        const sBadge = document.getElementById('header-session-badge');
-        if (activeCount > 0) {
-          sBadge.className = 'badge badge-warn';
-        } else {
-          sBadge.className = 'badge badge-gpu';
-        }
-
-        // Worker status
-        workerActive = data.worker_running;
-        const wText = document.getElementById('header-worker-text');
-        const wBadge = document.getElementById('header-worker-badge');
-        const toggleBtn = document.getElementById('btn-toggle-worker');
-        if (workerActive) {
-          wText.innerText = 'Đang chạy';
-          wBadge.className = 'badge badge-cu';
-          toggleBtn.innerText = 'Tạm Dừng Worker';
-          toggleBtn.className = 'btn btn-outline';
-        } else if (tbInfo && tbInfo.running) {
-          wText.innerText = 'Sẵn sàng (Bot)';
-          wBadge.className = 'badge badge-cu';
-          toggleBtn.innerText = 'Bật Worker Web';
-          toggleBtn.className = 'btn btn-outline';
-        } else {
-          wText.innerText = 'Đã dừng';
-          wBadge.className = 'badge badge-danger';
-          toggleBtn.innerText = 'Bật Worker';
-          toggleBtn.className = 'btn btn-accent';
-        }
-
-        // Dangling vs Warm Sessions Check
-        const sessions = data.sessions || [];
-        const warmList = data.warm_sessions || [];
-        const warmNames = new Set(warmList.map(w => w.session_name).filter(Boolean));
-        const warmRate = warmList.reduce((total, w) => total + Number(w.cu_rate_per_hour || 0), 0);
-        const warmIdleCu = warmList.reduce((total, w) => total + Number(w.idle_cu_estimate || 0), 0);
-        const warmMinutesRemaining = warmList.length
-          ? Math.ceil(Math.min(...warmList.map(w => Number(w.expires_in_seconds || 0))) / 60)
-          : 0;
-        const alertBox = document.getElementById('session-alert-container');
-        const hasActiveJob = !!data.active_job;
-
-        if (sessions.length > 0 && !hasActiveJob) {
-          const orphanSessions = sessions.filter(s => !warmNames.has(s.name || s.id));
-          alertBox.style.display = 'block';
-          if (orphanSessions.length > 0) {
-            alertBox.innerHTML = `
-              <div class="session-alert-box">
-                <div style="display: flex; align-items: center; gap: 8px;">
-                  <span class="dot dot-yellow"></span>
-                  <span style="font-weight: 600; color: #f87171;">CẢNH BÁO: Có ${orphanSessions.length} máy ảo Colab đang mở nhưng không có job nào chạy (${escapeHtml(orphanSessions.map(s => s.name || s.id).join(', '))}).</span>
-                  <span style="font-size: 11px; color: var(--text-muted);">(Hao phí ~${(orphanSessions.length * 1.15).toFixed(2)} CU/h nếu để quên)</span>
-                </div>
-                <button class="btn btn-danger" onclick="emergencyStopAll()">🛑 Dừng Ngay Tất Cả</button>
-              </div>
-            `;
-          } else {
-            alertBox.innerHTML = `
-              <div class="session-alert-box" style="background: rgba(56, 189, 248, 0.09); border-color: rgba(56, 189, 248, 0.35);">
-                <div style="display: flex; align-items: center; gap: 8px;">
-                  <span class="dot dot-green"></span>
-                  <span style="font-weight: 600; color: #38bdf8;">♻️ Đang giữ ấm ${sessions.length} máy ảo Colab (${escapeHtml(sessions.map(s => s.name || s.id).join(', '))}) chờ chuyển giao cho video kế tiếp · ~${warmRate.toFixed(2)} CU/h, đã tốn ~${warmIdleCu.toFixed(3)} CU, còn ${warmMinutesRemaining} phút.</span>
-                </div>
-                <button class="btn btn-outline" onclick="emergencyStopAll()">🧹 Thu hồi ngay</button>
-              </div>
-            `;
-          }
-        } else {
-          alertBox.style.display = 'none';
-        }
-
-        // Unrecovered Cloud Cleanup Resources Alert (bỏ qua VM đang chạy khoẻ mạnh của job hiện tại)
-        const healthyActive = isHealthyRunningJob(data.active_job) ? data.active_job : null;
-        const pendingCleanup = (data.pending_cleanup_events || []).filter(ev => !(
-          healthyActive &&
-          ev.job_id === healthyActive.job_id &&
-          ev.status === 'pending' &&
-          Number(ev.attempts || 0) === 0
-        ));
-        const cleanupBox = document.getElementById('cleanup-alert-container');
-        if (cleanupBox) {
-          if (pendingCleanup.length > 0) {
-            const itemsSummary = pendingCleanup.slice(0, 3).map(ev =>
-              `${ev.session_name} (job ${String(ev.job_id || '').slice(-8)}: ${ev.status}, lần thử ${ev.attempts || 0})`
-            ).join(' · ');
-            cleanupBox.style.display = 'block';
-            cleanupBox.innerHTML = `
-              <div class="session-alert-box" style="background: rgba(245, 158, 11, 0.09); border-color: rgba(245, 158, 11, 0.35);">
-                <div style="display: flex; flex-direction: column; gap: 2px;">
-                  <span style="font-weight: 600; color: #fbbf24;">⚠️ TÀI NGUYÊN CHƯA THU HỒI (${pendingCleanup.length} session):</span>
-                  <span style="font-size: 11px; color: var(--text-sub);">${escapeHtml(itemsSummary)}</span>
-                </div>
-                <button class="btn btn-danger" onclick="emergencyStopAll()">🧹 Thu Hồi Khẩn Cấp</button>
-              </div>
-            `;
-          } else {
-            cleanupBox.style.display = 'none';
-          }
-        }
-
-        // Active Job Hero Card
-        const job = data.active_job;
-        const heroCard = document.getElementById('hero-card');
-        const stopBtn = document.getElementById('hero-btn-stop');
-        const heroBanner = document.getElementById('hero-alert-banner');
-
-        if (job) {
-          currentActiveJobId = job.job_id;
-          heroCard.className = 'hero-card active-running';
-          const isPendingCancel = job.state === 'cancel_requested' || job.state === 'cancelling';
-          const isHealthy = isHealthyRunningJob(job);
-          document.getElementById('hero-status-heading').innerText = isPendingCancel
-            ? `Đang Huỷ / Thu Hồi GPU: ${job.video_name}`
-            : `Đang Xử Lý: ${job.video_name}`;
-          document.getElementById('hero-job-id').innerText = `ID: ${job.job_id.slice(-8)}`;
-          document.getElementById('hero-gpu-tag').innerText = `GPU: ${job.gpu_type}`;
-          document.getElementById('hero-voice-tag').innerText = `Giọng: ${job.voice || 'Mai'}`;
-          const baseStepDesc = job.step_name || 'Đang thực thi...';
-          document.getElementById('hero-step-desc').innerText = (
-            job.state === 'preparing' && isHealthy && !baseStepDesc.includes('2–4 phút')
-          )
-            ? `${baseStepDesc} (Máy ảo mới cài môi trường AI lần đầu thường mất ~2–4 phút)`
-            : baseStepDesc;
-          document.getElementById('hero-percent-text').innerText = (job.percent || 0) + '%';
-          document.getElementById('hero-progress-fill').style.width = (job.percent || 0) + '%';
-          stopBtn.style.display = 'inline-flex';
-          if (isPendingCancel) {
-            stopBtn.disabled = true;
-            stopBtn.innerText = job.state === 'cancelling' ? '⏳ Đang thu hồi GPU...' : '⏳ Đang chờ huỷ...';
-          } else {
-            stopBtn.disabled = false;
-            stopBtn.innerText = '🛑 Huỷ Job';
-          }
-          if (heroBanner) {
-            const parts = [];
-            if (isPendingCancel) {
-              parts.push(`Trạng thái: ${job.state} (thu hồi VM: ${job.cleanup_status || 'pending'})`);
-            } else if (!isHealthy && !job.error) {
-              parts.push('⚠️ Tiến trình nền bị gián đoạn (quá hạn lease) — hệ thống đang tự thu hồi VM hoặc bấm Huỷ Job.');
-            } else if (job.cleanup_status && !['none', 'verified', 'pending'].includes(job.cleanup_status)) {
-              parts.push(`Thu hồi VM: ${job.cleanup_status}`);
-            }
-            if (job.error) parts.push(`Lỗi: ${job.error}`);
-            if (job.error_remediation) parts.push(`Gợi ý: ${job.error_remediation}`);
-            if (parts.length > 0) {
-              heroBanner.style.display = 'block';
-              heroBanner.innerText = parts.join(' | ');
-            } else {
-              heroBanner.style.display = 'none';
-            }
-          }
-          updatePipelineTracker(job.percent || 0, job.step_name || '');
-        } else {
-          currentActiveJobId = null;
-          heroCard.className = 'hero-card';
-          document.getElementById('hero-status-heading').innerText = 'Trạng Thái Hệ Thống: Sẵn sàng';
-          document.getElementById('hero-job-id').innerText = 'ID: --';
-          document.getElementById('hero-gpu-tag').innerText = 'GPU: --';
-          document.getElementById('hero-voice-tag').innerText = 'Giọng: --';
-          document.getElementById('hero-step-desc').innerText = 'Hàng đợi trống. Máy ảo Colab đang ở trạng thái ngủ (0.00 CU/h), sẵn sàng nhận video mới.';
-          document.getElementById('hero-percent-text').innerText = '0%';
-          document.getElementById('hero-progress-fill').style.width = '0%';
-          stopBtn.style.display = 'none';
-          stopBtn.disabled = false;
-          stopBtn.innerText = '🛑 Huỷ Job';
-          if (heroBanner) heroBanner.style.display = 'none';
-          updatePipelineTracker(0, '');
-        }
-
-      } catch (err) {
-        console.error('Error fetching cloud status:', err);
-      }
-    }
-
-    // Fetch Jobs List
-    async function loadJobs() {
-      try {
-        const res = await fetch('/api/cloud/jobs?limit=25');
-        const data = await res.json();
-        if (data.status !== 'ok') return;
-
-        const jobs = data.jobs || [];
-        latestJobsById = {};
-        jobs.forEach(item => {
-          if (item && item.job_id) latestJobsById[item.job_id] = item;
-        });
-        document.getElementById('jobs-count-badge').innerText = `${jobs.length} jobs`;
-
-        const tbody = document.getElementById('table-jobs-body');
-        if (jobs.length === 0) {
-          tbody.innerHTML = `
-            <tr>
-              <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 24px;">
-                Chưa có công việc nào trong hàng đợi. Nhập đường dẫn video bên trái để bắt đầu!
-              </td>
-            </tr>
-          `;
-          return;
-        }
-
-        tbody.innerHTML = jobs.map(j => {
-          const timeStr = j.created_at ? new Date(j.created_at * 1000).toLocaleTimeString('vi-VN') : '--';
-          const estTxt = j.cu_estimated ? `${Number(j.cu_estimated).toFixed(2)} dự kiến` : '';
-          let cuMain = '--';
-          if (j.cu_actual && Number(j.cu_actual) > 0) {
-            cuMain = `~${Number(j.cu_actual).toFixed(3)} CU (ước tính/đối soát)`;
-          } else if (j.cu_reserved && Number(j.cu_reserved) > 0) {
-            cuMain = `${Number(j.cu_reserved).toFixed(2)} CU (giữ chỗ)`;
-          } else if (j.cu_estimated) {
-            cuMain = `~${Number(j.cu_estimated).toFixed(2)} CU (ước tính)`;
-          }
-          const cuStr = estTxt && (j.cu_actual || j.cu_reserved)
-            ? `<div>${cuMain}</div><div style="font-size:10px;color:var(--text-muted);">${estTxt}</div>`
-            : cuMain;
-
-          const isPendingCancel = ['cancel_requested', 'cancelling'].includes(j.state);
-          const isCancellable = [
-            'queued',
-            'provisioning',
-            'creating_session',
-            'uploading',
-            'preparing',
-            'processing',
-            'downloading',
-            'validating'
-          ].includes(j.state);
-          const isHealthyRow = isHealthyRunningJob(j);
-          const hasUnrecoveredCleanup = Boolean(
-            j.cleanup_status && !['none', 'verified'].includes(j.cleanup_status) && !(isHealthyRow && j.cleanup_status === 'pending')
-          );
-
-          let cleanupBadge = '';
-          if (isHealthyRow && j.cleanup_status === 'pending') {
-            cleanupBadge = `<div style="margin-top:4px;"><span class="badge badge-cu" style="font-size:10px;">🖥️ VM đang chạy${j.session_name ? ': ' + escapeHtml(j.session_name) : ''}</span></div>`;
-          } else if (hasUnrecoveredCleanup) {
-            cleanupBadge = `<div style="margin-top:4px;"><span class="badge badge-danger" style="font-size:10px;">⚠️ Thu hồi VM: ${escapeHtml(j.cleanup_status)}</span></div>`;
-          }
-
-          let detailHtml = '';
-          if (j.error || j.error_code) {
-            const codePrefix = j.error_code ? `[${escapeHtml(j.error_code)}] ` : '';
-            detailHtml += `<div style="font-size:10px;color:#fca5a5;margin-top:4px;">${codePrefix}${escapeHtml(j.error || '')}</div>`;
-            if (j.error_remediation) {
-              detailHtml += `<div style="font-size:10px;color:#fcd34d;margin-top:2px;">💡 ${escapeHtml(j.error_remediation)}</div>`;
-            }
-          } else if (j.state === 'completed' && (j.output_manifest || j.result_path)) {
-            const m = j.output_manifest || {};
-            const delivery = m.delivery_path || j.result_path || '';
-            const qcBadge = m.qc_passed === false
-              ? `<span class="badge badge-danger" style="font-size:10px;">QC Lỗi</span>`
-              : `<span class="badge badge-cu" style="font-size:10px;">QC Đạt</span>`;
-            detailHtml += `<div style="font-size:10px;color:var(--text-sub);margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${qcBadge}<span>${escapeHtml(delivery)}</span></div>`;
-          }
-
-          let actionHtml = '';
-          if (isPendingCancel) {
-            actionHtml = `<span class="badge st-stopped" style="font-size: 10px;">⏳ Chờ thu hồi</span>`;
-          } else if (isCancellable) {
-            actionHtml = `<button class="btn btn-danger" style="padding: 3px 8px; font-size: 11px;" onclick="cancelJob('${j.job_id}')">Huỷ</button>`;
-          } else if (hasUnrecoveredCleanup) {
-            actionHtml = `<button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" disabled title="Chưa thu hồi xong VM Colab">Đợi thu hồi</button>`;
-          } else {
-            actionHtml = `<button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="deleteJob('${j.job_id}')">Xoá</button>`;
-          }
-
-          return `
-            <tr>
-              <td>
-                <div style="font-weight: 600; color: #fff;">${escapeHtml(j.video_name)}</div>
-                <div style="font-size: 10px; color: var(--text-muted); font-family: ui-monospace, monospace;">${escapeHtml(j.job_id)}</div>
-              </td>
-              <td>
-                <span class="badge badge-gpu" style="font-weight: 600;">${escapeHtml(j.gpu_type)}</span>
-                <div style="font-size: 10px; color: var(--text-sub); margin-top: 2px;">${escapeHtml(j.voice || 'Mai')}</div>
-              </td>
-              <td>${getStateBadge(j.state)}${cleanupBadge}</td>
-              <td style="min-width: 170px;">
-                <div style="font-size: 11px; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 6px;">
-                  <span>${escapeHtml(j.step_name || '')}</span>
-                  <b style="color: var(--accent); font-family: ui-monospace, monospace;">${j.percent || 0}%</b>
-                </div>
-                <div class="progress-track" style="height: 4px;">
-                  <div class="progress-fill" style="width: ${j.percent || 0}%;"></div>
-                </div>
-                ${detailHtml}
-              </td>
-              <td style="font-family: ui-monospace, monospace; font-size: 11px;">${cuStr}</td>
-              <td style="color: var(--text-sub); font-size: 11px;">${timeStr}</td>
-              <td style="text-align: right;">${actionHtml}</td>
-            </tr>
-          `;
-        }).join('');
-
-      } catch (err) {
-        console.error('Error fetching jobs:', err);
-      }
-    }
-
-    function escapeHtml(text) {
-      if (!text) return '';
-      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-
-    let pendingEnqueueIdempotencyKey = null;
-    let pendingEnqueuePermit = null;
-    function _makeIdempotencyKey() {
-      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-        return 'dash-' + window.crypto.randomUUID();
-      }
-      return 'dash-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
-    }
-    function _resetIdempotencyKey() {
-      pendingEnqueueIdempotencyKey = null;
-      pendingEnqueuePermit = null;
-      syncEnqueueButton();
-    }
-    ['input-video-path', 'select-gpu', 'select-voice', 'chk-allow-no-speech'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.addEventListener('change', _resetIdempotencyKey);
-      if (el && el.tagName === 'INPUT') el.addEventListener('input', _resetIdempotencyKey);
-    });
-
-    // Submit Enqueue
-    document.getElementById('form-enqueue').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const pathInput = document.getElementById('input-video-path');
-      const videoPath = pathInput.value.trim();
-      const gpuType = document.getElementById('select-gpu').value;
-      const voice = document.getElementById('select-voice').value;
-      const allowNoSpeech = Boolean(document.getElementById('chk-allow-no-speech')?.checked);
-
-      if (!videoPath || enqueuePending || !(rolloutPermit || pendingEnqueueIdempotencyKey)) return;
-      if (!pendingEnqueueIdempotencyKey) {
-        pendingEnqueueIdempotencyKey = _makeIdempotencyKey();
-        pendingEnqueuePermit = rolloutPermit;
-      }
-
-      const btn = document.getElementById('btn-submit-enqueue');
-      enqueuePending = true;
-      syncEnqueueButton();
-      btn.innerText = 'Đang gửi lên Cloud...';
-
-      try {
-        const res = await fetch('/api/cloud/enqueue', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Idempotency-Key': pendingEnqueueIdempotencyKey
-          },
-          body: JSON.stringify({
-            video_path: videoPath,
-            gpu_type: gpuType,
-            voice: voice,
-            task_type: 'full_pipeline',
-            idempotency_key: pendingEnqueueIdempotencyKey,
-            rollout_permit: pendingEnqueuePermit,
-            options: {
-              execution_mode: 'cloud',
-              allow_no_speech: allowNoSpeech
-            }
-          })
-        });
-        const data = await res.json();
-        if (data.status === 'ok') {
-          pathInput.value = '';
-          _resetIdempotencyKey();
-          await loadJobs();
-          await loadStatus();
-        } else {
-          if (res.status >= 400 && res.status < 500) _resetIdempotencyKey();
-          alert('Không thể tạo job: ' + (data.detail || data.message || 'Lỗi không xác định'));
-        }
-      } catch (err) {
-        alert('Lỗi kết nối: ' + err.message);
-      } finally {
-        enqueuePending = false;
-        syncEnqueueButton();
-        btn.innerText = 'Chạy video này trên Cloud';
-      }
-    });
-
-    // Toggle Worker
-    async function toggleWorker() {
-      const endpoint = workerActive ? '/api/cloud/worker/stop' : '/api/cloud/worker/start';
-      try {
-        await fetch(endpoint, { method: 'POST' });
-        await loadStatus();
-      } catch (err) {
-        alert('Lỗi thao tác worker: ' + err.message);
-      }
-    }
-
-    // Emergency Stop All
-    async function emergencyStopAll() {
-      if (!confirm('XÁC NHẬN: Bạn có chắc chắn muốn DỪNG KHẨN CẤP mọi máy ảo Colab đang chạy để bảo toàn Compute Units?')) return;
-      try {
-        const res = await fetch('/api/cloud/stop', { method: 'POST' });
-        const data = await res.json();
-        alert(data.message || 'Đã gửi lệnh thu hồi máy ảo Colab.');
-        await loadStatus();
-        await loadJobs();
-      } catch (err) {
-        alert('Lỗi: ' + err.message);
-      }
-    }
-
-    // Save CU Budget Limit
-    async function saveCuBudget() {
-      const input = document.getElementById('input-cu-budget');
-      const val = parseFloat(input.value);
-      if (isNaN(val) || val <= 0) {
-        alert('Vui lòng nhập số CU hợp lệ (> 0).');
+    function renderHostMemory(memory) {
+      const valid = memory && Number.isFinite(memory.used_bytes) && Number.isFinite(memory.total_bytes) &&
+        memory.total_bytes > 0 && memory.used_bytes >= 0 && memory.used_bytes <= memory.total_bytes;
+      const track = byId('ram-progress-track');
+      track.hidden = !valid;
+      if (!valid) {
+        write('ram-value', '—');
+        tone('ram-value', '');
+        write('ram-note', 'Chưa có số liệu RAM máy local');
+        track.removeAttribute('aria-valuenow');
         return;
       }
+      const used = 100 * memory.used_bytes / memory.total_bytes;
+      const level = used >= 90 ? 'bad' : used >= 75 ? 'warn' : '';
+      write('ram-value', `${formatAmount(memory.used_bytes / 1073741824, 1)} / ${formatAmount(memory.total_bytes / 1073741824, 1)} GiB`);
+      write('ram-note', `${percent(used)}% · Máy local chạy Cloud Node`);
+      tone('ram-value', level);
+      byId('ram-progress-fill').style.backgroundColor = level === 'bad' ? 'var(--red)' : level === 'warn' ? 'var(--orange)' : '';
+      setProgress('ram-progress-fill', 'ram-progress-track', used);
+    }
+
+    function renderConcurrency() {
+      const input = byId('input-concurrency');
+      const gpu = byId('select-gpu').value;
+      const max = gpuConcurrencyLimits[gpu] || maxConcurrency;
+      const occupied = activeGpuCounts[gpu] || 0;
+      if (!input.dataset.edited && document.activeElement !== input) input.value = max;
+      byId('btn-concurrency-save').disabled = concurrencyPending;
+      write('concurrency-note', occupied > max
+        ? `${gpu} · ${occupied} job đang chạy · job mới chờ khi còn dưới giới hạn ${max}.`
+        : `${gpu} · ${occupied} / ${max} job đang chạy.`);
+    }
+
+    async function saveConcurrency() {
+      const input = byId('input-concurrency');
+      const limit = Number(input.value);
+      const gpu = byId('select-gpu').value;
+      if (concurrencyPending) return;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 4) {
+        notice('concurrency-feedback', 'Nhập số nguyên từ 1 đến 4.', 'bad');
+        return;
+      }
+      concurrencyPending = true;
+      concurrencyRevision += 1;
+      input.disabled = true;
+      byId('btn-concurrency-save').disabled = true;
       try {
-        const res = await fetch('/api/cloud/budget', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ budget_daily: val })
-        });
-        const data = await res.json();
-        if (data.status === 'ok') {
-          updateBudgetUI(data.budget);
-          alert('Đã cập nhật hạn mức CU thành công: ' + val + ' CU/ngày');
-        } else {
-          alert('Lỗi: ' + (data.detail || data.message));
+        const data = await request('/api/cloud/concurrency', { gpu_type: gpu, max_concurrent_jobs: limit });
+        delete input.dataset.edited;
+        gpuConcurrencyLimits[gpu] = data.max_concurrent_jobs;
+        notice('concurrency-feedback', `Đã lưu ${gpu} tối đa ${data.max_concurrent_jobs} job đồng thời.`, 'good');
+      } catch (error) {
+        notice('concurrency-feedback', error.message, 'bad');
+      } finally {
+        concurrencyPending = false;
+        concurrencyRevision += 1;
+        input.disabled = false;
+        renderConcurrency();
+        renderRollout();
+        refreshLocalResources();
+      }
+    }
+
+    function renderActiveJobPicker(jobs) {
+      const active = Array.isArray(jobs) ? jobs : [];
+      const wrap = byId('active-job-picker-wrap');
+      const picker = byId('active-job-picker');
+      wrap.hidden = active.length < 2;
+      if (!active.length) {
+        selectedActiveJobId = null;
+        return null;
+      }
+      const selected = active.find(job => job.job_id === selectedActiveJobId) || active[0];
+      selectedActiveJobId = selected.job_id;
+      const options = active.map(job => `<option value="${escapeHtml(job.job_id)}"${job.job_id === selected.job_id ? ' selected' : ''}>${escapeHtml(job.video_name || job.job_id)}</option>`).join('');
+      if (picker.innerHTML !== options) picker.innerHTML = options;
+      return selected;
+    }
+
+    function measuredGpu(session) {
+      if (session?.stale) return '';
+      return (session?.gpus || []).map(gpu => gpu.name).filter(Boolean).join(', ');
+    }
+
+    function renderSessionResources(resources, jobs) {
+      const list = byId('colab-resource-list');
+      const measured = new Map(resources.filter(session => session.job_id).map(session => [session.job_id, session]));
+      const isWaiting = job => ['queued', 'intake'].includes(job.state);
+      const waiting = jobs.filter(isWaiting).length;
+      write('colab-job-count', `${jobs.length - waiting} đang xử lý · ${waiting} đang chờ hoặc tải nguồn`);
+      const sessions = [
+        ...jobs.map(job => ({
+          state: 'pending', ...measured.get(job.job_id),
+          job_id: job.job_id, job_name: job.video_name, requested_gpu: job.gpu_type,
+          job_state: job.state, session_name: job.session_name, percent: job.percent,
+          step_name: job.step_name, source: job.source,
+        })),
+        ...resources.filter(session => session.warm),
+      ];
+
+      const formatBytes = value => `${formatAmount(Number(value) / 1073741824, 1)} GiB`;
+      const meter = (label, value, total, usedPercent, ariaLabel) => {
+        const amount = percent(usedPercent);
+        const level = amount >= 90 ? 'bad' : amount >= 75 ? 'warn' : '';
+        const color = level === 'bad' ? 'var(--red)' : level === 'warn' ? 'var(--orange)' : '';
+        return `<div class="resource-meter">
+          <div class="resource-meter-heading"><span>${escapeHtml(label)}</span><strong class="mono" ${level ? `data-tone="${level}"` : ''}>${escapeHtml(value)} / ${escapeHtml(total)}</strong></div>
+          <div class="progress-track resource-track" role="progressbar" aria-label="${escapeHtml(ariaLabel)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${amount}"><div class="progress-fill" style="width:${amount}%;${color ? `background-color:${color};` : ''}"></div></div>
+        </div>`;
+      };
+
+      const markup = sessions.map(session => {
+        const title = session.job_name || (session.warm ? 'Máy ảo giữ ấm' : 'Phiên Colab');
+        const state = session.state || 'unavailable';
+        const waiting = isWaiting({state: session.job_state});
+        const status = waiting ? (session.job_state === 'intake' ? 'Đang tải nguồn' : 'Đang chờ')
+          : state === 'stale' ? `Dữ liệu cũ${session.age_seconds == null ? '' : ` · ${Math.round(session.age_seconds)} giây`}`
+          : state === 'unavailable' ? 'Không lấy được số liệu'
+          : state === 'pending' ? (session.session_name ? 'Đang lấy số liệu' : 'Đang chờ cấp máy')
+          : `Cập nhật ${Math.round(session.age_seconds || 0)} giây trước`;
+        const actual = measuredGpu(session);
+        const details = [
+          session.job_id ? `#${String(session.job_id).slice(-6)}` : '',
+          session.source,
+          session.requested_gpu ? `Yêu cầu ${session.requested_gpu}` : '',
+          actual ? `GPU thực cấp ${actual}` : '',
+          !waiting && session.job_state ? jobStates[session.job_state]?.[0] : '',
+        ].filter(Boolean).join(' · ');
+        const amount = !waiting && Number.isFinite(session.percent) ? percent(session.percent) : null;
+        const progress = session.step_name || amount !== null ? `<div class="resource-meter">
+          <div class="resource-meter-heading"><span>${escapeHtml(session.step_name)}</span>${amount === null ? '' : `<strong class="mono">${amount}%</strong>`}</div>
+          ${amount === null ? '' : `<div class="progress-track resource-track" role="progressbar" aria-label="${escapeHtml(`Tiến độ ${title}`)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${amount}"><div class="progress-fill" style="width:${amount}%"></div></div>`}
+        </div>` : '';
+        const meters = [];
+        if (session.job_id && !waiting) {
+          const value = session.job_ram?.used_bytes;
+          meters.push(`<p class="small muted">RAM tiến trình job: <strong class="mono">${Number.isFinite(value) ? escapeHtml(formatBytes(value)) : '—'}</strong></p>`);
         }
-      } catch (e) {
-        alert('Lỗi kết nối khi lưu hạn mức: ' + e.message);
-      }
-    }
-
-    function updateBudgetUI(b) {
-      if (!b) return;
-      const spent = (b.spent_today || 0).toFixed(2);
-      const reserved = (b.reserved_today || 0).toFixed(2);
-      const committed = (b.committed_today !== undefined ? b.committed_today : (b.spent_today || 0)).toFixed(2);
-      const budget = (b.budget_daily || 10).toFixed(1);
-      const remaining = (b.remaining_today || 0).toFixed(2);
-      const pct = b.percent_used || 0;
-      const estTag = b.cost_is_estimated !== false ? ' (ước tính)' : '';
-
-      const headEl = document.getElementById('header-cu-budget');
-      if (headEl) headEl.innerText = `${committed} / ${budget} CU${estTag}`;
-      const spentEl = document.getElementById('budget-spent-text');
-      if (spentEl) {
-        spentEl.innerText = Number(reserved) > 0
-          ? `${spent} CU${estTag} + ${reserved} giữ chỗ`
-          : `${spent} CU${estTag}`;
-      }
-      const remEl = document.getElementById('budget-remaining-text');
-      if (remEl) {
-        remEl.innerText = b.has_uncertain_budget
-          ? `${remaining} CU (chờ đối soát)`
-          : `${remaining} CU`;
-      }
-      const pctEl = document.getElementById('budget-percent-tag');
-      if (pctEl) pctEl.innerText = `${pct}%`;
-
-      const fill = document.getElementById('budget-progress-fill');
-      if (fill) {
-        fill.style.width = Math.min(100, pct) + '%';
-        if (pct >= 90) {
-          fill.style.background = '#ef4444';
-          if (pctEl) pctEl.className = 'badge badge-danger';
-        } else if (pct >= 70) {
-          fill.style.background = '#f59e0b';
-          if (pctEl) pctEl.className = 'badge badge-warn';
-        } else {
-          fill.style.background = '#10b981';
-          if (pctEl) pctEl.className = 'badge badge-cu';
+        if (!waiting && session.ram && Number.isFinite(session.ram.used_bytes) && Number.isFinite(session.ram.total_bytes) && session.ram.total_bytes > 0) {
+          const used = Number(session.ram.used_bytes), total = Number(session.ram.total_bytes);
+          meters.push(meter('RAM máy ảo', formatBytes(used), formatBytes(total), 100 * used / total, `RAM của phiên ${session.session_name || ''}`));
+        } else if (!waiting) {
+          meters.push(`<p class="small muted">RAM: ${state === 'pending' ? 'Đang đo…' : state === 'unavailable' ? 'Không có số liệu' : 'Chưa có số liệu'}</p>`);
         }
+        const gpus = Array.isArray(session.gpus) ? session.gpus : [];
+        if (gpus.length) {
+          gpus.forEach((gpu, index) => {
+            const total = Number(gpu.total_bytes), used = Number(gpu.used_bytes);
+            if (!Number.isFinite(total) || !Number.isFinite(used) || total <= 0 || used < 0 || used > total) return;
+            const label = gpus.length > 1 ? `${gpu.name || 'GPU'} ${index + 1}` : (gpu.name || 'VRAM');
+            const usage = gpu.utilization_percent == null ? '—' : `${percent(gpu.utilization_percent)}%`;
+            meters.push(meter(`VRAM · Tải GPU ${usage}`, formatBytes(used), formatBytes(total), 100 * used / total, `VRAM ${label} của phiên ${session.session_name || ''}`));
+          });
+        } else if (!waiting) {
+          const gpuMessage = session.gpu_status === 'no_gpu'
+            ? 'Không phát hiện GPU trong phiên'
+            : state === 'pending' ? 'Đang kiểm tra GPU…'
+              : session.gpu_status === 'unavailable' ? 'Không lấy được số liệu GPU/VRAM'
+                : 'Chưa có số liệu GPU/VRAM';
+          meters.push(`<p class="small muted">VRAM: ${gpuMessage}</p>`);
+        }
+        return `<article class="resource-card" data-state="${escapeHtml(state)}">
+          <div class="resource-card-heading"><strong>${escapeHtml(title)}</strong><span class="small muted">${escapeHtml(status)}</span></div>
+          <p class="small muted">${escapeHtml(details)}</p>
+          ${progress}
+          ${meters.length ? `<div class="resource-meters">${meters.join('')}</div>` : ''}
+        </article>`;
+      }).join('') || '<p class="small muted">Không có job đang chạy hoặc chờ.</p>';
+      if (list.innerHTML !== markup) list.innerHTML = markup;
+    }
+
+    function renderBot(bot) {
+      const username = /^[a-z0-9_]{5,32}$/i.test(bot.bot_username || '') ? bot.bot_username : 'autodubcloud_bot';
+      byId('telegram-link').href = `https://t.me/${username}`;
+      write('telegram-link', `Mở @${username}`);
+      write('telegram-value', bot.running ? 'Đang nhận link' : bot.configured ? 'Đang kết nối' : 'Chưa cấu hình');
+      tone('telegram-value', bot.running ? 'good' : 'warn');
+      write('telegram-note', bot.running
+        ? [`${Number(bot.queued_count) || 0} video đang chờ`, bot.default_gpu && `GPU mặc định ${bot.default_gpu}`].filter(Boolean).join(' · ')
+        : `@${username}`);
+      write('telegram-cta-note', bot.running ? 'Dán link video vào bot để xếp hàng tự động.' : 'Gửi link qua bot khi trạng thái Telegram sẵn sàng.');
+    }
+
+    function renderProvider(usage, cache, gpuCount, warmCount, fresh, cleanupCount, warmSessions) {
+      const disconnected = cache.provider_unreachable && !cache.in_flight;
+      const status = disconnected ? 'Mất kết nối Colab' : 'Đang đồng bộ Colab';
+      write('session-value', fresh ? `${gpuCount} đang chạy` : warmCount > 0 ? `${warmCount} đang giữ ấm` : 'Đang kiểm tra');
+      tone('session-value', disconnected ? 'warn' : '');
+      const rate = `${cu(usage.usage_rate)}/h`;
+      const warmIdleCu = (warmSessions || []).reduce((total, item) => {
+        const amount = Number(item.idle_cu_estimate);
+        return total + (Number.isFinite(amount) ? amount : 0);
+      }, 0);
+      const sessionNote = warmCount > 0
+        ? `${warmCount} phiên giữ ấm · ~${cu(warmIdleCu)} CU nhàn rỗi`
+        : cleanupCount > 0
+          ? 'Đang chờ xác nhận thu hồi'
+          : gpuCount > 0
+            ? rate
+            : 'Tự thu hồi sau 5 phút chờ video';
+      write('session-note', fresh ? sessionNote : status);
+
+      const hasBalance = cache.balance_available && usage.balance != null && Number.isFinite(Number(usage.balance));
+      write('balance-value', hasBalance ? cu(usage.balance) : '—');
+      tone('balance-value', cache.balance_stale ? 'warn' : '');
+      const age = cache.balance_age_seconds == null ? null : Math.max(0, Math.round(cache.balance_age_seconds));
+      const ageLabel = age === null ? '' : age >= 60 ? `${Math.floor(age / 60)} phút trước` : `${age} giây trước`;
+      write('balance-note', hasBalance ? (
+        cache.balance_stale ? `Số dư cũ${ageLabel ? ' · ' + ageLabel : ''}` : ageLabel ? `Cập nhật ${ageLabel}` : 'Đã nhận số dư'
+      ) : status);
+    }
+
+    function renderHero(job, bot, fresh, gpuCount, warmCount, cleanupCount, actualGpu) {
+      activeJobId = job?.job_id || null;
+      const meta = byId('hero-job-meta');
+      const stop = byId('hero-btn-stop');
+      meta.hidden = !job;
+      byId('hero-step-desc').hidden = Boolean(job);
+
+      if (job) {
+        const stopping = stoppingStates.has(job.state);
+        const state = jobStates[job.state]?.[0] || 'Đang xử lý';
+        write('hero-state', state);
+        tone('hero-status-dot', stopping || !healthy(job) ? 'warn' : 'good');
+        write('hero-status-heading', job.video_name || 'Video đang xử lý');
+        write('hero-job-id', `#${String(job.job_id).slice(-8)}`);
+        write('hero-gpu-tag', actualGpu || (job.gpu_type ? `Yêu cầu ${job.gpu_type}` : 'Colab'));
+        const voiceName = voiceLabels.get(job.voice);
+        write('hero-voice-tag', voiceName || job.voice || 'Mai');
+        stop.disabled = stopping;
+        write('hero-btn-stop', stopping ? 'Đang hủy' : 'Hủy video');
+        const warning = [job.error, job.error_remediation].filter(Boolean).join(' · ') ||
+          (!healthy(job) && !stopping ? 'Đã gián đoạn cập nhật tiến độ. Đang kiểm tra phiên Colab.' : '');
+        write('hero-alert-banner', warning);
+        byId('hero-alert-banner').hidden = !warning;
+        return;
       }
 
-      const input = document.getElementById('input-cu-budget');
-      if (input && document.activeElement !== input) {
-        input.value = budget;
+      byId('hero-alert-banner').hidden = true;
+      const verifiedIdle = fresh && gpuCount === 0 && warmCount === 0 && cleanupCount === 0;
+      write('hero-state', verifiedIdle ? 'GPU đang rảnh' : cleanupCount > 0 ? 'Đang kiểm tra thu hồi' : 'Đang chờ video');
+      tone('hero-status-dot', verifiedIdle ? 'good' : cleanupCount > 0 ? 'warn' : '');
+      write('hero-status-heading', bot.running ? 'Sẵn sàng nhận video' : 'Gửi video lên Cloud');
+      write('hero-step-desc', warmCount > 0
+        ? 'Đang giữ máy ảo cho video tiếp theo.'
+        : verifiedIdle
+          ? 'Máy ảo sẽ được cấp khi có video cần xử lý.'
+          : 'Trạng thái phiên GPU sẽ cập nhật khi có phản hồi từ Colab.');
+    }
+
+    function renderPipeline(job, isRecent) {
+      const state = job?.state || '';
+      const completed = state === 'completed';
+      const failed = failureStates.has(state);
+      const stopped = ['cancelled', 'stopped'].includes(state) || stoppingStates.has(state);
+      const stepName = job?.step_name || '';
+      const activeStepMatch = state === 'processing' ? remoteStepPrefix.exec(stepName) : null;
+      const remoteStep = Number(activeStepMatch?.[1]);
+      // Colab reports ASR and OCR under step 3. OCR starts at 64%.
+      const activeStage = remoteStep === 3 && job.percent >= 64
+        ? 4 : remoteStep === 8 ? 0 : remoteStep >= 4 ? remoteStep + 1 : remoteStep || 0;
+      const failedStage = failed ? (failedPipelineStages[job.error_code] || 0) : 0;
+      const allStagesDone = completed || remoteStep === 8 || ['downloading', 'validating'].includes(state);
+      const lastDone = allStagesDone ? pipelineStages.length : Math.max(0, activeStage - 1, failedStage - 1);
+      const hasProgress = job && (!(failed || stopped) || job.percent > 0);
+      const amount = completed ? 100 : hasProgress ? percent(job.percent) : null;
+      const started = Number(job?.started_at);
+      const ended = Number(job?.completed_at) || (!isRecent ? Date.now() / 1000 : 0);
+      const elapsed = started > 0 && ended >= started ? Math.floor(ended - started) : null;
+      const duration = elapsed === null ? '' : elapsed < 60 ? `${elapsed} giây` : `${Math.floor(elapsed / 60)} phút ${elapsed % 60} giây`;
+
+      byId('pipeline-card').dataset.state = failed ? 'failed' : state;
+      const [status, badge] = jobStates[state] || ['Chờ video', 'st-queued'];
+      byId('pipeline-status').className = `status-pill ${badge}`;
+      write('pipeline-status', status);
+      const gpuCheck = job?.task_type === 'gpu_check';
+      write('pipeline-heading', gpuCheck ? 'Kiểm tra GPU Colab' : isRecent ? 'Tiến độ video gần nhất' : 'Tiến độ xử lý');
+      byId('pipeline-stages').hidden = gpuCheck;
+      const caption = isRecent ? [job.video_name, failed && (job.error_code || stepName)].filter(Boolean).join(' · ') :
+        stepName.replace(remoteStepPrefix, '') || 'Các công đoạn sẽ sáng lên khi Cloud bắt đầu xử lý video.';
+      write('pipeline-caption', [caption, duration && `Tổng thời gian ${duration}`].filter(Boolean).join(' · '));
+      byId('pipeline-track').hidden = amount === null;
+      byId('pipeline-percent').hidden = amount === null;
+      if (amount !== null) {
+        write('pipeline-percent', `${amount}%`);
+        setProgress('pipeline-fill', 'pipeline-track', amount);
+      }
+
+      const stages = pipelineStages.map(([title, tool], index) => {
+        const number = index + 1;
+        const stageState = number === failedStage ? 'failed' : number <= lastDone ? 'done' :
+          number === activeStage ? 'active' : 'waiting';
+        const label = {
+          failed: 'Có lỗi', done: 'Hoàn tất', active: 'Đang chạy',
+          waiting: failed || stopped ? '—' : 'Chờ',
+        }[stageState];
+        const indicator = stageState === 'done' ? '✓' : stageState === 'failed' ? '!' : number;
+        return `<li class="pipeline-stage" data-state="${stageState}"${stageState === 'active' ? ' aria-current="step"' : ''}>
+          <strong class="stage-title"><span class="stage-number" aria-hidden="true">${indicator}</span>${title}</strong>
+          <span class="stage-tool">${tool}</span><span class="stage-status">${label}</span>
+        </li>`;
+      }).join('');
+      if (lastPipelineStages !== stages) {
+        byId('pipeline-stages').innerHTML = stages;
+        lastPipelineStages = stages;
       }
     }
 
-    // Cancel Active Job
-    async function cancelActiveJob() {
-      if (!currentActiveJobId) return;
-      if (!confirm(`Xác nhận huỷ job ${currentActiveJobId} và thu hồi máy ảo?`)) return;
-      await cancelJob(currentActiveJobId);
+    function renderOperationalNotices(data, sessions, fresh, cleanup) {
+      const activeJobs = Array.isArray(data.active_jobs) ? data.active_jobs : (data.active_job ? [data.active_job] : []);
+      const activeNames = new Set(activeJobs.map(job => job.session_name).filter(Boolean));
+      const warmNames = new Set((data.warm_sessions || []).map(item => item.session_name));
+      const unmanaged = fresh ? sessions.filter(item => !warmNames.has(item.name || item.id) && !activeNames.has(item.name || item.id)) : [];
+      const sessionBox = byId('session-alert-container');
+      sessionBox.hidden = unmanaged.length === 0;
+      write('session-alert-message', `Có ${unmanaged.length} máy ảo đang mở ngoài công việc hiện tại.`);
+
+      const cleanupBox = byId('cleanup-alert-container');
+      cleanupBox.hidden = cleanup.length === 0;
+      write('cleanup-alert-message', `${cleanup.length} phiên chưa xác nhận thu hồi.${
+        cleanup.slice(0, 3).map(item => item.session_name).filter(Boolean).map(name => ' · ' + name).join('')
+      }`);
+
+      const alerts = (data.rollout_alerts || [])
+        .filter(item => item.code !== 'CLEANUP_PENDING' || cleanup.length > 0)
+        .map(item => `${rolloutAlertNames[item.code] || item.code}${item.job_id ? ' · #' + item.job_id.slice(-8) : ''}`);
+      write('rollout-alerts', [...new Set(alerts)].join(' • '));
+      byId('rollout-alerts').hidden = alerts.length === 0;
+      byId('operational-notices').hidden = sessionBox.hidden && cleanupBox.hidden && !alerts.length;
     }
 
-    // Cancel specific job
-    async function cancelJob(jobId) {
+    function renderStatus(data, limitRevision, selectionRevision) {
+      if (!rolloutPending && !enqueuePending) rollout = data.rollout || {};
+      if (!gpuSavePending && selectionRevision === gpuRevision) applyDefaultGpu(data.default_gpu);
+      const activeJobs = Array.isArray(data.active_jobs) ? data.active_jobs : (data.active_job ? [data.active_job] : []);
+      activeJobCount = Number(data.active_job_count) || activeJobs.length;
+      activeGpuCounts = {};
+      for (const job of activeJobs) activeGpuCounts[job.gpu_type] = (activeGpuCounts[job.gpu_type] || 0) + 1;
+      if (!concurrencyPending && limitRevision === concurrencyRevision) {
+        maxConcurrency = Number(data.max_concurrent_jobs) || 1;
+        gpuConcurrencyLimits = data.gpu_concurrency_limits || gpuConcurrencyLimits;
+      }
+      renderRollout();
+      const bot = data.telegram_bot || {};
+      const usage = data.usage || {};
+      const cache = data.provider_cache || {};
+      const fresh = Boolean(usage.ok && !cache.stale && !cache.provider_unreachable);
+      const sessions = (data.sessions || []).filter(item => item && item.is_active !== false);
+      const gpuCount = Math.max(Number(usage.active_assignments) || 0, sessions.length);
+      const warmCount = (data.warm_sessions || []).length;
+      const job = renderActiveJobPicker(activeJobs) || data.active_job;
+      const cleanup = (data.pending_cleanup_events || []).filter(item => !(
+        activeJobs.some(active => healthy(active) && item.job_id === active.job_id) &&
+        item.status === 'pending' && !Number(item.attempts)
+      ));
+
+      renderBot(bot);
+      renderHostMemory(data.host_memory);
+      const resources = data.session_resources || [];
+      renderSessionResources(resources, data.tracked_jobs || activeJobs);
+      renderProvider(usage, cache, gpuCount, warmCount, fresh, cleanup.length, data.warm_sessions);
+      renderBudget(data.budget);
+      renderConcurrency();
+      const actualGpu = job && measuredGpu(resources.find(item => item.job_id === job.job_id));
+      renderHero(job, bot, fresh, gpuCount, warmCount, cleanup.length, actualGpu);
+      renderOperationalNotices(data, sessions, fresh, cleanup);
+
+      const webWorkerKnown = !(activeJobs.some(active => (active.options || {}).source_channel !== 'cloud_telegram_bot') &&
+        bot.running && data.worker_running && !data.accepting_jobs);
+      if (webWorkerKnown) workerActive = Boolean(data.worker_running);
+      byId('btn-toggle-worker').disabled = !webWorkerKnown || byId('btn-toggle-worker').dataset.pending === 'yes';
+      write('btn-toggle-worker', !webWorkerKnown ? 'Worker web · đang chờ bot' : workerActive ? 'Tạm dừng worker web' : 'Bật worker web');
+    }
+
+    function jobDetails(job) {
+      const manifest = job.output_manifest || {};
+      const delivery = manifest.delivery_path || job.result_path;
+      const messages = [];
+      if (job.state === 'completed' && delivery) messages.push(`Tệp: ${delivery}`);
+      if (typeof manifest.qc_passed === 'boolean') messages.push(manifest.qc_passed ? 'Kiểm tra đầu ra đạt' : 'Kiểm tra đầu ra có lỗi');
+      if (job.error_code) messages.push(job.error_code);
+      if (job.error) messages.push(job.error);
+      if (job.error_remediation) messages.push(job.error_remediation);
+      if (job.cleanup_status === 'verified' && job.session_name) messages.push('Đã đối soát phiên Colab');
+      if (!messages.length) return '';
+      return `<details class="job-details" data-details-id="${escapeHtml(job.job_id)}"><summary>Chi tiết</summary>
+        ${messages.map(message => `<p>${escapeHtml(message)}</p>`).join('')}</details>`;
+    }
+
+    function rowHtml(job) {
+      const queued = job.state === 'queued';
+      const ongoing = runningStates.has(job.state);
+      const stopping = stoppingStates.has(job.state);
+      const needsCleanup = job.cleanup_status && !['none', 'verified'].includes(job.cleanup_status) &&
+        !(healthy(job) && job.cleanup_status === 'pending');
+      const [label, badge] = jobStates[job.state] || [job.state || 'Chưa có trạng thái', 'st-queued'];
+      const amount = percent(job.percent);
+      const progress = ongoing || stopping
+        ? `<div class="job-progress small"><span class="muted wrap">${escapeHtml(job.step_name)}</span>
+          <strong class="mono"> ${amount}%</strong><div class="progress-track" aria-hidden="true">
+          <div class="progress-fill" style="width:${amount}%"></div></div></div>` : '';
+      const actual = job.cu_actual > 0;
+      const reserved = job.cu_reserved > 0;
+      const cost = actual ? job.cu_actual : reserved ? job.cu_reserved : job.cu_estimated;
+      const costNote = actual ? 'Ước tính / đối soát' : reserved ? 'Giữ chỗ' : cost > 0 ? 'Dự kiến' : '';
+      const time = Number(job.created_at) > 0 ? jobTime.format(new Date(job.created_at * 1000)) : '—';
+      const action = queued || ongoing ? 'cancel' : !stopping && !needsCleanup ? 'delete' : '';
+      const buttonText = action === 'cancel' ? 'Hủy' : 'Xóa';
+      const title = job.video_name || 'Video';
+      const config = [job.gpu_type, job.task_type === 'gpu_check' ? '' : (voiceLabels.get(job.voice) || job.voice)]
+        .filter(Boolean).map(escapeHtml).join(' · ');
+
+      return `<tr role="row">
+        <td role="cell"><strong class="job-title">${escapeHtml(title)}</strong>
+          <span class="job-sub">${config} · #${escapeHtml(String(job.job_id || '').slice(-8))}</span>${jobDetails(job)}</td>
+        <td role="cell"><span class="status-pill ${badge}">${escapeHtml(label)}</span>${progress}
+          ${needsCleanup && !stopping ? '<span class="job-sub" data-tone="warn">Chờ thu hồi phiên</span>' : ''}</td>
+        <td role="cell" class="mono small">${cost > 0 ? cu(cost, actual ? 3 : 2) : '—'}<span class="job-sub">${costNote}</span></td>
+        <td role="cell" class="muted small mono">${time}</td>
+        <td role="cell" class="job-actions">${action ? `<button type="button" class="btn btn-small ${action === 'cancel' ? 'btn-danger' : 'btn-outline'}"
+          data-job-id="${escapeHtml(job.job_id)}" data-action="${action}" aria-label="${buttonText} ${escapeHtml(title)}">${buttonText}</button>` : ''}</td>
+      </tr>`;
+    }
+
+    function renderJobs() {
+      const filters = {
+        all: () => true,
+        running: job => job.state === 'queued' || runningStates.has(job.state) || stoppingStates.has(job.state),
+        completed: job => job.state === 'completed',
+        failed: job => failureStates.has(job.state),
+      };
+      const jobs = latestJobs.filter(filters[jobFilter]);
+      write('jobs-count-badge', `${jobs.length} ${jobs.some(job => job.task_type === 'gpu_check') ? 'công việc' : 'video'}`);
+      const empty = latestJobs.length ? 'Không có video phù hợp với bộ lọc.' : 'Chưa có video. Gửi link qua Telegram hoặc Dashboard để bắt đầu.';
+      const html = jobs.length ? jobs.map(rowHtml).join('') :
+        `<tr role="row"><td role="cell" colspan="5" class="empty-cell">${empty}</td></tr>`;
+      if (html === lastRows) return;
+
+      const table = byId('table-jobs-body');
+      const open = new Set([...table.querySelectorAll('details[open]')].map(item => item.dataset.detailsId));
+      const focus = table.contains(document.activeElement) ? document.activeElement : null;
+      const focusedKey = focus?.dataset.jobId || focus?.parentElement.dataset.detailsId;
+      table.innerHTML = html;
+      lastRows = html;
+      for (const details of table.querySelectorAll('details')) {
+        if (open.has(details.dataset.detailsId)) details.open = true;
+      }
+      if (focusedKey) {
+        const target = [...table.querySelectorAll('button[data-job-id], summary')].find(el =>
+          (el.dataset.jobId || el.parentElement.dataset.detailsId) === focusedKey &&
+          el.tagName === focus.tagName && el.dataset.action === focus.dataset.action
+        );
+        target?.focus({ preventScroll: true });
+      }
+    }
+
+    function refreshLocalResources() {
+      if (localResourcesInFlight) return localResourcesInFlight;
+      const limitRevision = concurrencyRevision;
+      localResourcesInFlight = request('/api/cloud/local-resources').then(data => {
+        if (data.status !== 'ok') return;
+        renderHostMemory(data.host_memory);
+        if (!concurrencyPending && limitRevision === concurrencyRevision) {
+          maxConcurrency = Number(data.max_concurrent_jobs) || 1;
+        }
+        activeJobCount = Number(data.active_job_count) || 0;
+        renderConcurrency();
+        renderRollout();
+      }).catch(() => {
+        // The full status response remains a fallback for older Cloud nodes.
+      }).finally(() => {
+        localResourcesInFlight = null;
+      });
+      return localResourcesInFlight;
+    }
+
+    function refreshDashboard() {
+      refreshLocalResources();
+      if (gpuCheckTracked) refreshGpuSettings();
+      if (refreshInFlight) return refreshInFlight;
+      const limitRevision = concurrencyRevision;
+      const selectionRevision = gpuRevision;
+      byId('btn-refresh').disabled = true;
+      refreshInFlight = (async () => {
+        const [status, jobs] = await Promise.allSettled([
+          request('/api/cloud/status'), request('/api/cloud/jobs?limit=25'),
+        ]);
+        const statusAvailable = status.status === 'fulfilled' && status.value.status === 'ok';
+        if (statusAvailable) {
+          renderStatus(status.value, limitRevision, selectionRevision);
+          lastStatusAt = new Date();
+          write('refresh-status', `Đã cập nhật ${shortTime.format(lastStatusAt)}`);
+          notice('connection-notice', '', 'warn');
+        } else {
+          write('refresh-status', lastStatusAt ? `Lần cuối ${shortTime.format(lastStatusAt)}` : 'Chưa kết nối');
+          notice('connection-notice', 'Mất kết nối với Dashboard Cloud. Trang sẽ tự thử lại.', 'warn');
+        }
+        const available = jobs.status === 'fulfilled' && jobs.value.status === 'ok';
+        if (available) {
+          latestJobs = jobs.value.jobs || [];
+          queuedDashboardJobs = latestJobs.filter(job => job.state === 'queued' &&
+            !String(job.idempotency_key || '').startsWith('cloudbot:') &&
+            (job.options || {}).source_channel !== 'cloud_telegram_bot').length;
+          renderJobs();
+          renderRollout();
+        }
+        if (statusAvailable) {
+          const currentJobs = Array.isArray(status.value.active_jobs) ? status.value.active_jobs : [];
+          const active = currentJobs.find(job => job.job_id === selectedActiveJobId) || status.value.active_job;
+          const recent = latestJobs.find(job => job.task_type !== 'gpu_check' && job.state !== 'queued' &&
+            !runningStates.has(job.state) && !stoppingStates.has(job.state));
+          renderPipeline(active || recent, !active && Boolean(recent));
+        }
+        notice('queue-error', available ? '' : 'Không tải được hàng đợi. Hãy thử làm mới.', 'warn');
+      })().catch(error => {
+        console.error('Không thể cập nhật Dashboard', error);
+        notice('connection-notice', 'Không thể hiển thị trạng thái Cloud. Trang sẽ tự thử lại.', 'warn');
+      }).finally(() => {
+        byId('btn-refresh').disabled = false;
+        refreshInFlight = null;
+      });
+      return refreshInFlight;
+    }
+
+    for (const id of enqueueFields) {
+      byId(id).addEventListener('input', () => {
+        enqueueAttempt = null;
+        notice('form-notice', '', '');
+        renderRollout();
+      });
+    }
+
+    byId('input-concurrency').addEventListener('input', () => {
+      byId('input-concurrency').dataset.edited = 'yes';
+    });
+    byId('active-job-picker').addEventListener('change', event => {
+      selectedActiveJobId = event.target.value;
+      refreshDashboard();
+    });
+
+    byId('form-enqueue').addEventListener('submit', async event => {
+      event.preventDefault();
+      const input = byId('input-video-path');
+      const videoPath = input.value.trim();
+      if (!videoPath || enqueuePending || rolloutPending || !(rollout.permit_id || enqueueAttempt)) return;
+      if (!enqueueAttempt) {
+        const id = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        enqueueAttempt = { key: 'dash-' + id, permit: rollout.permit_id };
+      }
+      const payload = {
+        video_path: videoPath,
+        gpu_type: byId('select-gpu').value,
+        voice: byId('select-voice').value,
+        task_type: 'full_pipeline',
+        idempotency_key: enqueueAttempt.key,
+        rollout_permit: enqueueAttempt.permit,
+        options: { execution_mode: 'cloud', allow_no_speech: byId('chk-allow-no-speech').checked },
+      };
+      enqueuePending = true;
+      for (const id of enqueueFields) byId(id).disabled = true;
+      renderRollout();
+      write('btn-submit-enqueue', 'Đang gửi…');
+      notice('form-notice', '', '');
       try {
-        const res = await fetch('/api/cloud/job/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ job_id: jobId })
-        });
-        const data = await res.json();
-        if (data.status === 'ok') {
-          await loadStatus();
-          await loadJobs();
-        } else {
-          alert('Lỗi: ' + (data.detail || data.message));
-        }
-      } catch (err) {
-        alert('Lỗi: ' + err.message);
+        const data = await request('/api/cloud/enqueue', payload, { 'X-Idempotency-Key': enqueueAttempt.key });
+        if (data.status !== 'ok') throw new Error(data.message || 'Không thể gửi video.');
+        enqueueAttempt = null;
+        rollout = { phase: 'admitted' };
+        input.value = '';
+        notice('form-notice', 'Đã thêm video vào hàng đợi.', 'good');
+        await refreshDashboard();
+      } catch (error) {
+        if (error.httpStatus >= 400 && error.httpStatus < 500) enqueueAttempt = null;
+        notice('form-notice', error.message, 'bad');
+      } finally {
+        enqueuePending = false;
+        for (const id of enqueueFields) byId(id).disabled = false;
+        write('btn-submit-enqueue', 'Gửi lên Cloud');
+        renderRollout();
       }
-    }
+    });
 
-    // Delete job from history
-    async function deleteJob(jobId) {
-      if (!confirm('Xoá bản ghi job này khỏi nhật ký?')) return;
+    async function toggleWorker() {
+      const btn = byId('btn-toggle-worker');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.dataset.pending = 'yes';
       try {
-        const res = await fetch('/api/cloud/job/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ job_id: jobId })
-        });
-        const data = await res.json();
-        if (data.status === 'ok') {
-          await loadJobs();
-        }
-      } catch (err) {
-        alert('Lỗi: ' + err.message);
+        const data = await request(workerActive ? '/api/cloud/worker/stop' : '/api/cloud/worker/start', {});
+        notice('action-notice', data.message || 'Đã cập nhật worker web.', data.status === 'ok' ? 'good' : 'warn');
+      } catch (error) {
+        notice('action-notice', error.message, 'bad');
+      } finally {
+        delete btn.dataset.pending;
+        await refreshDashboard();
       }
     }
 
-    async function manualRefresh() {
-      await loadJobs();
-      await loadStatus();
+    async function emergencyStopAll() {
+      if (stopPending || !confirm('Thu hồi tất cả máy ảo Colab? Các công việc Cloud đang chạy sẽ bị gián đoạn.')) return;
+      stopPending = true;
+      try {
+        const data = await request('/api/cloud/stop', {});
+        notice('action-notice', data.message || 'Đã gửi yêu cầu thu hồi máy ảo.', data.status === 'ok' ? 'good' : 'warn');
+        await refreshDashboard();
+      } catch (error) {
+        notice('action-notice', error.message, 'bad');
+      } finally {
+        stopPending = false;
+      }
     }
 
-    // Auto Refresh Loop (Every 3 seconds)
-    manualRefresh();
+    byId('input-cu-budget').addEventListener('input', event => {
+      event.currentTarget.dataset.edited = 'yes';
+    });
+
+    async function saveCuBudget() {
+      const input = byId('input-cu-budget');
+      const value = input.valueAsNumber;
+      if (budgetPending) return;
+      if (!Number.isFinite(value) || value <= 0) {
+        notice('action-notice', 'Nhập hạn mức lớn hơn 0 CU.', 'warn');
+        input.focus();
+        return;
+      }
+      budgetPending = true;
+      input.disabled = true;
+      byId('btn-budget-save').disabled = true;
+      try {
+        const data = await request('/api/cloud/budget', { budget_daily: value });
+        delete input.dataset.edited;
+        renderBudget(data.budget);
+        notice('action-notice', `Đã lưu hạn mức ${cu(value)} mỗi ngày.`, 'good');
+      } catch (error) {
+        notice('action-notice', error.message, 'bad');
+      } finally {
+        budgetPending = false;
+        input.disabled = false;
+        byId('btn-budget-save').disabled = false;
+      }
+    }
+
+    async function changeJob(action, jobId) {
+      const deleting = action === 'delete';
+      if (!confirm(deleting ? 'Xóa bản ghi video khỏi lịch sử?' : 'Hủy video này? Tool sẽ thu hồi phiên GPU nếu cần.')) return;
+      try {
+        const data = await request(deleting ? '/api/cloud/job/delete' : '/api/cloud/job/cancel', { job_id: jobId });
+        const fallback = deleting ? 'Đã xóa bản ghi.' : 'Đã yêu cầu hủy video.';
+        notice('action-notice', data.message || fallback, data.status === 'ok' ? 'good' : 'warn');
+        await refreshDashboard();
+      } catch (error) {
+        notice('action-notice', error.message, 'bad');
+      }
+    }
+
+    function cancelActiveJob() {
+      if (activeJobId) changeJob('cancel', activeJobId);
+    }
+
+    byId('table-jobs-body').addEventListener('click', event => {
+      const button = event.target.closest('button[data-action][data-job-id]');
+      if (button) changeJob(button.dataset.action, button.dataset.jobId);
+    });
+
+    for (const button of document.querySelectorAll('.queue-filters button')) {
+      button.addEventListener('click', () => {
+        document.querySelector('.queue-filters [aria-pressed="true"]').setAttribute('aria-pressed', 'false');
+        jobFilter = button.dataset.filter;
+        button.setAttribute('aria-pressed', 'true');
+        if (lastRows) renderJobs();
+      });
+    }
+
+    byId('btn-refresh').addEventListener('click', refreshDashboard);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) refreshDashboard();
+    });
+    refreshDashboard();
+    refreshGpuSettings();
     setInterval(() => {
-      manualRefresh();
+      if (!document.hidden) refreshDashboard();
     }, 3000);
   </script>
 </body>

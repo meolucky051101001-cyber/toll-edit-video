@@ -173,6 +173,21 @@ class TestClipVocalModeWhitelist(unittest.TestCase):
             fc = nvenc[nvenc.index("-filter_complex") + 1]
             audio_line = next(ln for ln in fc.split(";") if ln.startswith("[0:a]"))
             self.assertIn("volume=0", audio_line)
+            temp = base / "_temp_edit_out.mp4"
+            self.assertEqual(cmds, [
+                [
+                    "ffmpeg", "-y", "-i", str(video), "-filter_complex", fc,
+                    "-map", "[outv]", "-map", "[outa]", "-c:a", "aac", "-b:a", "192k",
+                    "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4500k",
+                    "-shortest", "-movflags", "+faststart", str(temp),
+                ],
+                [
+                    "ffmpeg", "-y", "-i", str(video), "-filter_complex", fc,
+                    "-map", "[outv]", "-map", "[outa]", "-c:a", "aac", "-b:a", "192k",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-shortest", "-movflags", "+faststart", str(temp),
+                ],
+            ])
 
 
 class TestBatchCpuFallbackSource(unittest.TestCase):
@@ -225,6 +240,113 @@ class TestBatchCpuFallbackSource(unittest.TestCase):
             cpu = next(c for c in cmds if "libx264" in c)
             for cmd in (nvenc, cpu):
                 self.assertEqual(cmd[cmd.index("-i") + 1], str(phoi))
+            fc = nvenc[nvenc.index("-filter_complex") + 1]
+            output = output_dir / "ChongReup_clip.mp4"
+            self.assertEqual(cmds, [
+                [
+                    "ffmpeg", "-y", "-i", str(phoi), "-filter_complex", fc,
+                    "-map", "[outv]", "-map", "0:a?",
+                    "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "7500k",
+                    "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+                    "-shortest", str(output),
+                ],
+                [
+                    "ffmpeg", "-y", "-i", str(phoi), "-filter_complex", fc,
+                    "-map", "[outv]", "-map", "0:a?",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                    "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+                    "-shortest", str(output),
+                ],
+            ])
+
+
+class TestEncoderFallbackCallSites(unittest.TestCase):
+    def test_thumbnail_prep_commands_match_legacy_argv(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            video = root / "source.mp4"
+            thumb = root / "thumb.jpg"
+            video.write_bytes(b"video")
+            thumb.write_bytes(b"image")
+            temp_out = root / "_prep_source.mp4"
+            probe = subprocess.CompletedProcess([], 0, json.dumps({"streams": [
+                {"codec_type": "video", "width": 720, "height": 1280, "r_frame_rate": "30/1"},
+                {"codec_type": "audio", "sample_rate": "44100", "channels": 2, "channel_layout": "stereo"},
+            ]}), "")
+            commands = []
+
+            def fake_ffmpeg(cmd, job_ctl=None, timeout=900):
+                commands.append(cmd)
+                if "libx264" in cmd:
+                    Path(cmd[-1]).write_bytes(b"o" * 1100)
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+
+            with patch.object(wf.subprocess, "run", return_value=probe), \
+                 patch.object(wf, "_run_ffmpeg_ctl", side_effect=fake_ffmpeg):
+                self.assertTrue(wf._prepend_thumbnail_file(video, thumb, duration_s=0.8))
+
+            graph = (
+                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=30/1[thumb_v];"
+                "[1:v]setsar=1,fps=30/1[main_v];"
+                "[thumb_v][main_v]concat=n=2:v=1:a=0[outv];"
+                "aevalsrc=0:d=0.8:s=44100[silent_raw];"
+                "[silent_raw]aformat=sample_rates=44100:channel_layouts=stereo[silent_a];"
+                "[1:a]aformat=sample_rates=44100:channel_layouts=stereo[main_a];"
+                "[silent_a][main_a]concat=n=2:v=0:a=1[outa]"
+            )
+            self.assertEqual(commands, [
+                [
+                    "ffmpeg", "-y", "-loop", "1", "-t", "0.8", "-i", str(thumb),
+                    "-i", str(video), "-filter_complex", graph, "-map", "[outv]",
+                    "-map", "[outa]", "-c:a", "aac", "-b:a", "192k",
+                    "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4000k",
+                    "-shortest", "-movflags", "+faststart", str(temp_out),
+                ],
+                [
+                    "ffmpeg", "-y", "-loop", "1", "-t", "0.8", "-i", str(thumb),
+                    "-i", str(video), "-filter_complex", graph, "-map", "[outv]",
+                    "-map", "[outa]", "-c:a", "aac", "-b:a", "192k",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                    "-shortest", "-movflags", "+faststart", str(temp_out),
+                ],
+            ])
+
+    def test_proxy_commands_match_legacy_argv(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source.mp4"
+            proxy = root / "proxy.mp4"
+            temp = root / "tmp_proxy.mp4"
+            source.write_bytes(b"source")
+            commands = []
+
+            def fake_run(cmd, **kwargs):
+                commands.append(cmd)
+                if "libx264" in cmd:
+                    Path(cmd[-1]).write_bytes(b"o" * 1100)
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+
+            with patch.object(wf, "_is_gpu_busy_with_pipeline", return_value=False), \
+                 patch.object(wf.subprocess, "run", side_effect=fake_run):
+                wf._proxy_generate_worker(source, proxy, "job")
+
+            temp = commands[0][-1]
+            self.assertEqual(commands, [
+                [
+                    "ffmpeg", "-y", "-v", "error", "-hwaccel", "cuda", "-i", str(source),
+                    "-vf", "scale='min(540,iw)':-2,format=yuv420p",
+                    "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "28",
+                    "-c:a", "copy", "-movflags", "+faststart", str(temp),
+                ],
+                [
+                    "ffmpeg", "-y", "-v", "error", "-i", str(source),
+                    "-vf", "scale='min(540,iw)':-2",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                    "-c:a", "copy", "-movflags", "+faststart", str(temp),
+                ],
+            ])
 
 
 class TestManualRawResolver(unittest.TestCase):
