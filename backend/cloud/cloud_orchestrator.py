@@ -8,6 +8,7 @@ Quản lý chu kỳ sống có lease, hủy thực sự và thu hồi session th
 from __future__ import annotations
 
 import errno
+from dataclasses import dataclass, field
 from functools import lru_cache
 import hashlib
 import inspect
@@ -354,6 +355,1206 @@ def clear_warm_registry_for_store(store: Any, gpu_type: Optional[str] = None) ->
                 except Exception:
                     pass
     return snames
+
+
+@dataclass
+class _JobRun:
+    orchestrator: Any
+    job: CloudJob
+    progress_callback: Optional[Callable[[int, str], None]]
+    cancel_event: Optional[threading.Event]
+    job_id: str
+    raw_attempt: int
+    session_attempt: int
+    effective_owner: Optional[str]
+    ownership_attempt: Optional[int]
+    session_name: str
+    gemini_key: str
+    extra_secrets: Sequence[str]
+    start_time: float
+    last_budget_check_ts: float
+    budget_abort_reason: str
+    budget_abort_code: str
+    rate_per_hour: float
+    latest_provider_balance: Optional[float]
+    warm_idle_ledgered: bool
+    session_may_exist: bool
+    cleanup_done: bool
+    cleanup_result: Optional[Dict[str, Any]]
+    runtime_end_time: Optional[float]
+    cu_accrued: float
+    cu_accrual_ts: Optional[float]
+    provider_rate_used: bool
+    provider_rate_eligible: bool
+    setup_phase_seconds: Dict[str, Any]
+    stage_timings: Dict[str, float]
+    stage_state: Dict[str, Any]
+    runtime_start_time: Optional[float] = None
+    gpu_type: Optional[str] = None
+    voice_choice: Optional[str] = None
+    validated_input: Any = None
+    preflight_info: Dict[str, Any] = field(default_factory=dict)
+    source_snapshot: Optional[Dict[str, Any]] = None
+    reused_warm_session: Optional[str] = None
+    warm_parked_at: Optional[float] = None
+    is_url: bool = False
+    input_arg: Optional[str] = None
+    use_monitored_exec: bool = False
+    attempt_res_dir: Optional[Path] = None
+    dl_path: Optional[str] = None
+    qc_res: Optional[Dict[str, Any]] = None
+    parked_warm: bool = False
+    final_video_path: Optional[Path] = None
+    output_manifest: Dict[str, Any] = field(default_factory=dict)
+    cu_spent: float = 0.0
+    elapsed_sec: float = 0.0
+
+    @classmethod
+    def from_job(
+        cls,
+        orchestrator: Any,
+        job: CloudJob,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+        *,
+        owner_id: Optional[str] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> "_JobRun":
+        job_id = job.job_id
+        raw_attempt = int(getattr(job, "attempt", 0) or 0)
+        session_attempt = raw_attempt if raw_attempt > 0 else 1
+        effective_owner = owner_id if owner_id is not None else getattr(job, "owner_id", None)
+        ownership_attempt = raw_attempt if raw_attempt > 0 else None
+
+        clean_id = re.sub(r"[^a-zA-Z0-9]", "", job_id)[-8:] or uuid.uuid4().hex[:6]
+        session_name = validate_session_name(f"cjob{clean_id}a{session_attempt}")
+        gemini_key, extra_secrets = _resolve_gemini_key_and_secrets()
+        start_time = time.time()
+        runtime_start_time: Optional[float] = None
+        last_budget_check_ts = start_time
+        budget_abort_reason = ""
+        budget_abort_code = ""
+        rate_per_hour = GPU_CU_RATES.get("T4", 1.15)
+        latest_provider_balance: Optional[float] = None
+        warm_idle_ledgered = False
+
+        session_may_exist = False
+        cleanup_done = False
+        cleanup_result: Optional[Dict[str, Any]] = None
+        runtime_end_time: Optional[float] = None
+
+        cu_accrued = 0.0
+        cu_accrual_ts: Optional[float] = None
+        provider_rate_used = False
+        provider_rate_eligible = False
+        setup_phase_seconds: Dict[str, Any] = {}
+        stage_timings: Dict[str, float] = {}
+        stage_state: Dict[str, Any] = {"name": None, "started": None}
+        return cls(
+            orchestrator=orchestrator, job=job, progress_callback=progress_callback, cancel_event=cancel_event,
+            job_id=job_id, raw_attempt=raw_attempt, session_attempt=session_attempt,
+            effective_owner=effective_owner, ownership_attempt=ownership_attempt, session_name=session_name,
+            gemini_key=gemini_key, extra_secrets=extra_secrets, start_time=start_time,
+            last_budget_check_ts=last_budget_check_ts, budget_abort_reason=budget_abort_reason,
+            budget_abort_code=budget_abort_code, rate_per_hour=rate_per_hour,
+            latest_provider_balance=latest_provider_balance, warm_idle_ledgered=warm_idle_ledgered,
+            session_may_exist=session_may_exist, cleanup_done=cleanup_done, cleanup_result=cleanup_result,
+            runtime_end_time=runtime_end_time, cu_accrued=cu_accrued, cu_accrual_ts=cu_accrual_ts,
+            provider_rate_used=provider_rate_used, provider_rate_eligible=provider_rate_eligible,
+            setup_phase_seconds=setup_phase_seconds, stage_timings=stage_timings, stage_state=stage_state,
+        )
+
+    def _mark_stage(self, name: Optional[str]) -> None:
+        now_m = time.monotonic()
+        prev, started = self.stage_state["name"], self.stage_state["started"]
+        if prev is not None and started is not None:
+            self.stage_timings[prev] = round(self.stage_timings.get(prev, 0.0) + (now_m - started), 3)
+        self.stage_state["name"], self.stage_state["started"] = name, (now_m if name else None)
+
+    def _raw_elapsed_cu(self, at_ts: Optional[float] = None) -> float:
+        if not self.session_may_exist or self.runtime_start_time is None:
+            return 0.0
+        end_ts = at_ts if at_ts is not None else (self.runtime_end_time if self.runtime_end_time is not None else time.time())
+        base_ts = self.cu_accrual_ts if self.cu_accrual_ts is not None else self.runtime_start_time
+        return self.cu_accrued + (max(0.0, end_ts - base_ts) / 3600.0) * self.rate_per_hour
+
+    def _estimate_elapsed_cu(self) -> float:
+        return round(self._raw_elapsed_cu(), 4)
+
+    def _adopt_provider_rate(self, snap: Dict[str, Any]) -> None:
+        if (
+            not self.provider_rate_eligible
+            or not self.session_may_exist
+            or self.runtime_start_time is None
+            or self.runtime_end_time is not None
+        ):
+            return
+        now_ts = time.time()
+        try:
+            candidate_rate = float(snap.get("usage_rate"))
+        except (TypeError, ValueError):
+            candidate_rate = 0.0
+        rate_is_valid = math.isfinite(candidate_rate) and candidate_rate > 0.0
+        if snap.get("active_assignments") == 1 and rate_is_valid:
+            self.cu_accrued = self._raw_elapsed_cu(now_ts)
+            self.cu_accrual_ts = now_ts
+            self.rate_per_hour = candidate_rate
+            self.provider_rate_used = True
+            return
+        if self.provider_rate_used:
+            self.cu_accrued = self._raw_elapsed_cu(now_ts)
+            self.cu_accrual_ts = now_ts
+            self.rate_per_hour = GPU_CU_RATES.get(self.gpu_type, 1.15)
+
+    def _cu_measurement_source(self) -> str:
+        if self.provider_rate_used:
+            return CloudCostMeasurementSource.PROVIDER_RATE_ESTIMATE.value
+        return CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value
+
+    def _sync_runtime_usage(self, *, check_provider: bool = False) -> Tuple[bool, str]:
+        if not hasattr(self.orchestrator.store, "record_runtime_usage"):
+            return True, "ok"
+        est_cu = self._estimate_elapsed_cu()
+        prov_bal: Optional[float] = None
+        if check_provider:
+            try:
+                u = self.orchestrator.adapter.get_usage()
+                if hasattr(self.orchestrator.store, "record_provider_usage_snapshot"):
+                    snap = self.orchestrator.store.record_provider_usage_snapshot(u)
+                    if not snap.get("ok") or snap.get("is_stale"):
+                        self.budget_abort_reason = (
+                            "Mất kết nối hoặc số dư Colab bị cũ trong lúc đang chạy session."
+                        )
+                        self.budget_abort_code = "budget_uncertain"
+                        return False, "budget_uncertain"
+                    prov_bal = snap.get("balance")
+                    if prov_bal is not None:
+                        self.latest_provider_balance = float(prov_bal)
+                    self._adopt_provider_rate(snap)
+                elif u.get("ok") and u.get("balance") is not None:
+                    prov_bal = float(u["balance"])
+                    self.latest_provider_balance = prov_bal
+            except Exception as probe_exc:
+                self.budget_abort_reason = redact_secrets(str(probe_exc), extra_secrets=self.extra_secrets)
+                self.budget_abort_code = "budget_uncertain"
+                return False, "budget_uncertain"
+
+        res = self.orchestrator.store.record_runtime_usage(
+            self.job_id,
+            self.session_attempt,
+            est_cu,
+            measurement_source=self._cu_measurement_source(),
+            provider_balance=prov_bal,
+        )
+        if not res.get("within_budget", True):
+            self.budget_abort_reason = (
+                "Đã vượt hạn mức CU trong ngày hoặc hết số dư trong khi đang chạy."
+            )
+            self.budget_abort_code = "budget_exceeded"
+            return False, "budget_exceeded"
+        return True, "ok"
+
+    def _check_abort(self) -> Tuple[bool, str]:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            return True, "cancel_event"
+        lost, reason = self.orchestrator.store.is_cancel_or_lease_lost(
+            self.job_id,
+            owner_id=self.effective_owner,
+            attempt=self.ownership_attempt,
+        )
+        if lost:
+            return True, reason
+        if self.budget_abort_code:
+            return True, self.budget_abort_code
+
+        now_ts = time.time()
+        interval = max(0.01, float(DEFAULT_CONFIG.get("runtime_budget_check_interval_seconds", 15)))
+        if self.session_may_exist and (now_ts - self.last_budget_check_ts) >= interval:
+            self.last_budget_check_ts = now_ts
+            ok_budget, b_reason = self._sync_runtime_usage(check_provider=True)
+            if not ok_budget:
+                return True, b_reason
+        return False, "ok"
+
+    def _cancel_probe(self) -> bool:
+        aborted, _ = self._check_abort()
+        return aborted
+
+    def _raise_if_aborted(self) -> None:
+        aborted, reason = self._check_abort()
+        if aborted:
+            is_lost = reason in _LEASE_LOST_REASONS
+            is_budget = reason in ("budget_exceeded", "budget_uncertain")
+            raise _JobAborted(
+                reason,
+                is_lease_lost=is_lost,
+                is_budget_exceeded=is_budget,
+            )
+
+    def _upload_with_retry(self, local_path: str | Path, remote_filename: str) -> Tuple[bool, str]:
+        retry_delays = DEFAULT_CONFIG.get("cloud_upload_retry_delays_seconds", [5, 15])
+        try:
+            delays = [max(0.0, float(delay)) for delay in retry_delays][:2]
+        except (TypeError, ValueError):
+            delays = [5.0, 15.0]
+        for attempt_idx in range(len(delays) + 1):
+            self._raise_if_aborted()
+            if _is_session_aborted(self.session_name):
+                self._raise_if_aborted()
+                raise _JobAborted("cancel_event")
+            up_ok, up_msg = _call_with_cancel(
+                self.orchestrator.adapter.upload_file,
+                self.session_name,
+                local_path,
+                remote_filename,
+                cancel_check=self._cancel_probe,
+            )
+            self._raise_if_aborted()
+            if up_ok:
+                return True, up_msg
+            failure = str(up_msg or "").lower()
+            if (
+                attempt_idx >= len(delays)
+                or _is_session_aborted(self.session_name)
+                or any(token in failure for token in ("cancel", "abort", "hủy", "huy"))
+            ):
+                return False, up_msg
+            if _wait_interruptible(
+                delays[attempt_idx],
+                session_name=self.session_name,
+                cancel_check=self._cancel_probe,
+            ):
+                self._raise_if_aborted()
+                raise _JobAborted("cancel_event")
+        return False, up_msg
+
+    def _update(self, percent: int, step_name: str, **kwargs) -> bool:
+        safe_step = redact_secrets(step_name, extra_secrets=self.extra_secrets)
+        if "error" in kwargs and kwargs["error"] is not None:
+            kwargs["error"] = redact_secrets(str(kwargs["error"]), extra_secrets=self.extra_secrets)
+        if self.effective_owner is not None and "owner_id" not in kwargs:
+            kwargs["owner_id"] = self.effective_owner
+        if self.ownership_attempt is not None and "attempt" not in kwargs:
+            kwargs["attempt"] = self.ownership_attempt
+        ok = self.orchestrator.store.update_progress(self.job_id, percent=percent, step_name=safe_step, **kwargs)
+        if ok and self.progress_callback:
+            try:
+                self.progress_callback(percent, safe_step)
+            except Exception:
+                pass
+        return ok
+
+    def _finalize_session_once(self) -> Dict[str, Any]:
+        if self.cleanup_done:
+            return dict(self.cleanup_result or {"verified_stopped": False,
+                                           "cleanup_status": "failed_retry_needed",
+                                           "error": "Cleanup did not return a verified result"})
+        if not self.session_may_exist:
+            return {
+                "verified_stopped": True,
+                "cleanup_status": "verified",
+                "attempts": 0,
+                "error": None,
+            }
+        self.cleanup_done = True
+        logger.info("Dọn dẹp: Dừng và xác nhận session Colab %s...", self.session_name)
+        res = self.orchestrator._verify_or_stop_session(self.session_name, extra_secrets=self.extra_secrets)
+        self.cleanup_result = dict(res)
+        if res.get("verified_stopped"):
+            self.runtime_end_time = time.time()
+        # The VM can consume CU while the provider is stopping it. Record
+        # that interval before reconciliation freezes the cost ledger.
+        self._sync_runtime_usage(check_provider=False)
+        safe_cleanup_err = (
+            redact_secrets(str(res.get("error")), extra_secrets=self.extra_secrets)
+            if res.get("error")
+            else None
+        )
+        self.orchestrator.store.record_cleanup_result(
+            self.job_id,
+            self.raw_attempt,
+            self.session_name,
+            verified_stopped=bool(res.get("verified_stopped")),
+            cleanup_status=str(res.get("cleanup_status") or "failed_retry_needed"),
+            attempts=int(res.get("attempts") or 1),
+            error=safe_cleanup_err,
+        )
+        if not res.get("verified_stopped"):
+            logger.error(
+                "Cảnh báo: Chưa xác nhận dừng session %s (%s): %s",
+                self.session_name,
+                res.get("cleanup_status"),
+                safe_cleanup_err,
+            )
+        return res
+
+    def _stage_preflight(self):
+        self._mark_stage("preflight")
+        # 0. Kiểm tra allowlist GPU/task/voice, đầu vào và bundle cục bộ (0 CU) trước khi cấp phát GPU
+        self.preflight_info: Dict[str, Any] = {}
+        self.source_snapshot: Optional[Dict[str, Any]] = None
+        try:
+            self.gpu_type = validate_gpu_type(self.job.gpu_type)
+            validate_task_type(getattr(self.job, "task_type", "full_pipeline"))
+            self.voice_choice = validate_voice(getattr(self.job, "voice", "BV562_streaming") or "BV562_streaming")
+            self.validated_input = validate_video_input(
+                self.job.video_path,
+                allowed_roots=self.orchestrator.allowed_roots,
+                require_exists=True,
+            )
+            self.preflight_info = self.orchestrator.verify_local_preflight(self.validated_input)
+            self.source_snapshot = self.preflight_info.get("source_snapshot")
+            self.rate_per_hour = GPU_CU_RATES.get(self.gpu_type, 1.15)
+        except Exception as val_exc:
+            safe_err = redact_secrets(str(val_exc), extra_secrets=self.extra_secrets)
+            logger.warning("Từ chối Cloud Job %s ở bước preflight cục bộ: %s", self.job_id, safe_err)
+            if isinstance(val_exc, CloudValidationError):
+                err_code = val_exc.code
+            elif isinstance(val_exc, _OrchestratorStageError):
+                err_code = val_exc.error_code
+            else:
+                err_code = CloudErrorCode.INVALID_INPUT.value
+            self._update(
+                0,
+                f"Lỗi tiền kiểm cục bộ: {safe_err[:100]}",
+                state="failed",
+                error=safe_err,
+                error_code=err_code,
+                cu_actual=0.0,
+            )
+            return False
+
+        logger.info(
+            "=== BẮT ĐẦU XỬ LÝ CLOUD JOB %s (Attempt=%d, Session=%s, Video=%s, GPU=%s) ===",
+            self.job_id,
+            self.session_attempt,
+            self.session_name,
+            self.validated_input.display_name,
+            self.gpu_type,
+        )
+
+        self._raise_if_aborted()
+
+        return True
+
+    def _stage_budget_check(self):
+        self._mark_stage("budget_check")
+        # 1. Kiểm tra số dư Compute Units, độ mới snapshot và ngân sách trước khi cấp phát máy
+        usage = self.orchestrator.adapter.get_usage()
+        if hasattr(self.orchestrator.store, "record_provider_usage_snapshot"):
+            snap = self.orchestrator.store.record_provider_usage_snapshot(usage)
+        else:
+            snap = {
+                "ok": bool(usage.get("ok")),
+                "balance": usage.get("balance"),
+                "is_stale": bool(usage.get("stale", False)),
+                "error": usage.get("error"),
+            }
+
+        if not snap.get("ok") or snap.get("is_stale"):
+            err = redact_secrets(
+                f"Không thể xác nhận số dư Colab mới ({snap.get('error') or 'stale/disconnected'}). Chặn mở GPU.",
+                extra_secrets=self.extra_secrets,
+            )
+            self._update(
+                0,
+                "Lỗi: Chưa xác nhận được số dư Colab",
+                state="failed",
+                error=err,
+                error_code=CloudErrorCode.BUDGET_UNCERTAIN.value,
+            )
+            return False
+
+        balance = snap.get("balance")
+        required_bal = max(
+            0.5,
+            float(getattr(self.job, "cu_reserved", 0.0) or getattr(self.job, "cu_estimated", 0.0) or 0.5),
+            float(DEFAULT_CONFIG.get("min_provider_balance_cu", 0.0)),
+        )
+        if balance is not None and float(balance) < required_bal - 1e-6:
+            err = f"Số dư Colab không đủ (còn {float(balance):.2f} < {required_bal:.2f} CU). Vui lòng nạp thêm CU."
+            self._update(
+                0,
+                "Lỗi: Hết Compute Units",
+                state="failed",
+                error=err,
+                error_code=CloudErrorCode.INSUFFICIENT_CU.value,
+            )
+            return False
+        if balance is not None:
+            self.latest_provider_balance = float(balance)
+
+        budget_info = self.orchestrator.store.get_cu_budget_info()
+        if int(budget_info.get("unreconciled_count", 0)) > 0:
+            err = "Còn phiên GPU trước chưa xác nhận thu hồi/đối soát chi phí; tạm chặn cấp phát mới."
+            logger.warning(err)
+            self._update(
+                0,
+                "Lỗi: Chờ đối soát chi phí phiên trước",
+                state="failed",
+                error=err,
+                error_code=CloudErrorCode.BUDGET_UNCERTAIN.value,
+            )
+            return False
+
+        budget_daily = float(budget_info["budget_daily"])
+        over_daily = (
+            budget_daily <= 0.0
+            or float(budget_info["spent_today"]) >= budget_daily
+            or float(budget_info.get("committed_today", budget_info["spent_today"])) > budget_daily + 1e-6
+        )
+        if over_daily:
+            err = (
+                f"Đã chạm hạn mức CU trong ngày "
+                f"({budget_info.get('committed_today', budget_info['spent_today']):.2f} / {budget_daily:.2f} CU). "
+                f"Vui lòng cập nhật hạn mức trên Dashboard hoặc đợi sang ngày mới để bảo vệ tài khoản!"
+            )
+            logger.warning(err)
+            self._update(
+                0,
+                "Lỗi: Đã chạm hạn mức CU hôm nay",
+                state="failed",
+                error=err,
+                error_code=CloudErrorCode.BUDGET_EXCEEDED.value,
+            )
+            return False
+
+        self._raise_if_aborted()
+
+        return True
+
+    def _stage_provision(self):
+        self._mark_stage("provisioning")
+        # 2. Đăng ký ownership session & khởi tạo (hoặc tái sử dụng máy giữ ấm) Session Colab (`provisioning`)
+        warm_entry = self.orchestrator._pop_warm_session_entry(self.gpu_type)
+        self.reused_warm_session = warm_entry[0] if warm_entry else None
+        self.warm_parked_at = warm_entry[1] if warm_entry else None
+        if self.reused_warm_session:
+            self.session_name = self.reused_warm_session
+            if self.warm_parked_at is not None:
+                record_warm_idle = getattr(self.orchestrator.store, "record_warm_idle_usage", None)
+                if callable(record_warm_idle):
+                    try:
+                        record_warm_idle(
+                            self.session_name,
+                            self.gpu_type,
+                            parked_at=self.warm_parked_at,
+                            ended_at=time.time(),
+                        )
+                        self.warm_idle_ledgered = True
+                    except Exception as exc:
+                        logger.warning(
+                            "Không ghi được CU giữ ấm khi tái sử dụng %s: %s",
+                            self.session_name,
+                            redact_secrets(str(exc)),
+                        )
+
+        reg_ok = self.orchestrator.store.register_session(self.job_id, self.raw_attempt, self.effective_owner, self.session_name)
+        if self.ownership_attempt is not None and not reg_ok:
+            if self.reused_warm_session:
+                try:
+                    self.orchestrator._verify_or_stop_session(self.reused_warm_session, extra_secrets=self.extra_secrets)
+                except Exception:
+                    pass
+            self._raise_if_aborted()
+            raise _JobAborted("attempt_mismatch", is_lease_lost=True)
+
+        prov_msg = (
+            f"Tái sử dụng máy ảo GPU {self.gpu_type} đang giữ ấm ({self.session_name})..."
+            if self.reused_warm_session
+            else f"Đang tạo máy ảo GPU {self.gpu_type} trên Colab..."
+        )
+        if not self._update(
+            10,
+            prov_msg,
+            state="provisioning",
+            session_name=self.session_name,
+        ):
+            if self.reused_warm_session:
+                try:
+                    self.orchestrator._verify_or_stop_session(self.reused_warm_session, extra_secrets=self.extra_secrets)
+                except Exception:
+                    pass
+            self._raise_if_aborted()
+            raise _JobAborted("lease_lost", is_lease_lost=True)
+
+        self.session_may_exist = True
+        self.runtime_start_time = time.time()
+        if self.reused_warm_session:
+            created, msg = True, f"reused warm session {self.session_name}"
+        else:
+            created, msg = _call_with_cancel(
+                self.orchestrator.adapter.create_session,
+                self.session_name,
+                gpu=self.gpu_type,
+                cancel_check=self._cancel_probe,
+            )
+
+        self.provider_rate_eligible = bool(created)
+        # Đóng race hủy trong lúc create_session: nếu hủy trong/sau khi tạo thì thu hồi ngay, không upload/chạy pipeline.
+        aborted_after_create, abort_reason = self._check_abort()
+        if aborted_after_create:
+            raise _JobAborted(
+                abort_reason,
+                is_lease_lost=(abort_reason in _LEASE_LOST_REASONS),
+                is_budget_exceeded=(abort_reason in ("budget_exceeded", "budget_uncertain")),
+            )
+
+        if not created:
+            self.session_may_exist = False
+            err_code = (
+                CloudErrorCode.PROVIDER_503.value
+                if "503" in str(msg) or "hết máy" in str(msg).lower()
+                else CloudErrorCode.SESSION_CREATE_FAILED.value
+            )
+            self._update(
+                0,
+                "Lỗi: Tạo máy ảo Colab thất bại",
+                state="failed",
+                error=f"Không thể tạo máy Colab: {msg}",
+                error_code=err_code,
+                cleanup_status="verified",
+            )
+            self.orchestrator.store.record_cleanup_result(
+                self.job_id,
+                self.raw_attempt,
+                self.session_name,
+                verified_stopped=True,
+                cleanup_status="verified",
+                attempts=0,
+                error=None,
+            )
+            return False
+
+        return True
+
+    def _stage_upload(self):
+        self._mark_stage("upload")
+        # 3. Upload mã nguồn và video lên VM (`uploading` đơn hướng, không lùi từ preparing)
+        self.is_url = self.validated_input.kind == "url"
+        if not self._update(
+            20,
+            "Đang đóng gói và tải mã nguồn AI lên máy ảo Colab...",
+            state="uploading",
+        ):
+            self._raise_if_aborted()
+            raise _JobAborted("lease_lost", is_lease_lost=True)
+
+        bundle_path = Path(tempfile.gettempdir()) / f"bundle_{self.session_name}_{uuid.uuid4().hex[:6]}.tar.gz"
+        try:
+            upload_targets: List[Path] = list(self.preflight_info.get("upload_targets") or [])
+            runtime_profile = self.orchestrator._build_v1_runtime_profile(self.validated_input)
+            bundled_fonts = _resolve_local_font_files_for_bundle(
+                str((runtime_profile.get("canvas") or {}).get("sub_font_name") or "Arial")
+            )
+            runtime_profile_bytes = json.dumps(runtime_profile, indent=2, ensure_ascii=False).encode("utf-8")
+            runtime_profile_sha = hashlib.sha256(runtime_profile_bytes).hexdigest()
+            bundle_manifest_data: Dict[str, Any] = {
+                "schema_version": 1,
+                "job_id": self.job_id,
+                "attempt": self.session_attempt,
+                "expected_gpu": self.gpu_type,
+                "files": [
+                    *[
+                        {
+                            "name": s_file.name,
+                            "size_bytes": s_file.stat().st_size,
+                            "sha256": _file_sha256(s_file),
+                        }
+                        for s_file in upload_targets
+                    ],
+                    *[
+                        {
+                            "name": arc_rel,
+                            "size_bytes": f_path.stat().st_size,
+                            "sha256": _file_sha256(f_path),
+                        }
+                        for arc_rel, f_path in bundled_fonts
+                    ],
+                    {
+                        "name": "v1_runtime_profile.json",
+                        "size_bytes": len(runtime_profile_bytes),
+                        "sha256": runtime_profile_sha,
+                    },
+                ],
+            }
+            if not self.is_url and self.source_snapshot:
+                bundle_manifest_data["expected_video"] = {
+                    "remote_filename": sanitize_remote_filename(self.validated_input.display_name),
+                    "size_bytes": self.source_snapshot["size_bytes"],
+                    "sha256": self.source_snapshot["sha256"],
+                }
+
+            bundle_manifest_bytes = json.dumps(bundle_manifest_data, indent=2, ensure_ascii=False).encode("utf-8")
+            now_mtime = int(time.time())
+            with tarfile.open(bundle_path, "w:gz") as tar:
+                for s_file in upload_targets:
+                    tar.add(s_file, arcname=s_file.name)
+                for arc_rel, f_path in bundled_fonts:
+                    tar.add(f_path, arcname=arc_rel)
+                profile_tarinfo = tarfile.TarInfo(name="v1_runtime_profile.json")
+                profile_tarinfo.size = len(runtime_profile_bytes)
+                profile_tarinfo.mtime = now_mtime
+                tar.addfile(profile_tarinfo, io.BytesIO(runtime_profile_bytes))
+                manifest_tarinfo = tarfile.TarInfo(name="bundle_manifest.json")
+                manifest_tarinfo.size = len(bundle_manifest_bytes)
+                manifest_tarinfo.mtime = now_mtime
+                tar.addfile(manifest_tarinfo, io.BytesIO(bundle_manifest_bytes))
+
+            self._raise_if_aborted()
+            up_ok, up_msg = self._upload_with_retry(bundle_path, "cloud_bundle.tar.gz")
+            self._raise_if_aborted()
+            if not up_ok:
+                raise _OrchestratorStageError(
+                    CloudErrorCode.UPLOAD_FAILED.value,
+                    f"Upload mã nguồn lên Colab thất bại: {up_msg}",
+                )
+        finally:
+            bundle_path.unlink(missing_ok=True)
+
+        if self.is_url:
+            self._update(
+                30,
+                f"Đã nhận link: {self.validated_input.display_name}. Colab sẽ tải video trực tiếp trên cloud...",
+                state="uploading",
+            )
+            self.input_arg = self.validated_input.normalized_value
+        else:
+            self._update(
+                30,
+                f"Đang tải video {self.validated_input.display_name} lên máy ảo...",
+                state="uploading",
+            )
+            remote_video_name = sanitize_remote_filename(self.validated_input.display_name)
+            self._raise_if_aborted()
+            v_ok, v_msg = self._upload_with_retry(self.validated_input.normalized_value, remote_video_name)
+            self._raise_if_aborted()
+            if not v_ok:
+                raise _OrchestratorStageError(
+                    CloudErrorCode.UPLOAD_FAILED.value,
+                    f"Upload video thất bại: {v_msg}",
+                )
+            src_check = Path(self.validated_input.normalized_value)
+            if self.source_snapshot and (
+                not src_check.is_file()
+                or src_check.stat().st_size != self.source_snapshot["size_bytes"]
+                or _file_sha256(src_check) != self.source_snapshot["sha256"]
+            ):
+                raise _OrchestratorStageError(
+                    CloudErrorCode.UPLOAD_VERIFICATION_FAILED.value,
+                    "Phát hiện file video nguồn cục bộ bị thay đổi hoặc mất sau bước upload.",
+                )
+            self.input_arg = f"/content/{remote_video_name}"
+
+    def _stage_setup(self):
+        self._mark_stage("setup")
+        # 4. Giải nén và cài đặt môi trường trên VM (`preparing`)
+        if not self._update(
+            40,
+            "Đang giải nén và chuẩn bị môi trường AI (Demucs, Whisper Large-v3-turbo, CapCut TTS)...",
+            state="preparing",
+        ):
+            self._raise_if_aborted()
+            raise _JobAborted("lease_lost", is_lease_lost=True)
+
+        tar_ok, tar_msg = _call_with_cancel(
+            self.orchestrator.adapter.exec_argv,
+            self.session_name,
+            ["tar", "-xzf", "/content/cloud_bundle.tar.gz", "-C", "/content"],
+            cwd="/content",
+            cancel_check=self._cancel_probe,
+        )
+        self._raise_if_aborted()
+        if not tar_ok:
+            raise _OrchestratorStageError(
+                CloudErrorCode.UPLOAD_VERIFICATION_FAILED.value,
+                f"Giải nén mã nguồn trên Colab thất bại: {tar_msg}",
+            )
+
+        setup_timeout = int(DEFAULT_CONFIG.get("setup_timeout_seconds", 600) or 600)
+        min_disk_mb = int(DEFAULT_CONFIG.get("min_remote_disk_mb", 4096) or 4096)
+        setup_argv = [
+            "python3",
+            "setup_env.py",
+            "--expected-gpu",
+            self.gpu_type,
+            "--min-disk-mb",
+            str(min_disk_mb),
+            "--verify-bundle",
+            "bundle_manifest.json",
+            "--pip-timeout",
+            str(min(300, setup_timeout)),
+        ]
+        self.use_monitored_exec = isinstance(self.orchestrator.adapter, ColabProviderAdapter)
+        if self.use_monitored_exec:
+            env_ok, env_msg = self.orchestrator.adapter.run_argv_monitored(
+                self.session_name,
+                setup_argv,
+                cwd="/content",
+                timeout=setup_timeout,
+                cancel_check=self._cancel_probe,
+                job_tag="setup",
+            )
+        else:
+            env_ok, env_msg = _call_with_cancel(
+                self.orchestrator.adapter.exec_argv,
+                self.session_name,
+                setup_argv,
+                cwd="/content",
+                timeout=setup_timeout,
+                cancel_check=self._cancel_probe,
+            )
+        self._raise_if_aborted()
+        safe_env_msg = redact_secrets(env_msg, extra_secrets=self.extra_secrets)
+        logger.info("Env setup output:\n%s", safe_env_msg)
+        self.setup_phase_seconds = (_parse_setup_env_result(safe_env_msg) or {}).get("phase_seconds") or {}
+        if not env_ok:
+            setup_err_code = _extract_setup_error_code(safe_env_msg)
+            setup_result = _parse_setup_env_result(safe_env_msg) or {}
+            setup_detail = str(setup_result.get("message") or safe_env_msg[-2000:])
+            raise _OrchestratorStageError(
+                setup_err_code,
+                f"Cài đặt môi trường AI trên Colab thất bại ({setup_err_code}):\n{setup_detail}",
+            )
+
+    def _stage_pipeline(self):
+        self._mark_stage("pipeline")
+        # 5. Chạy Pipeline xử lý video chính (`processing`)
+        if not self._update(
+            55,
+            "Đang chạy lồng tiếng chuẩn V1 (Demucs tách âm, Whisper GPU, CapCut TTS, EBU R128)...",
+            state="processing",
+        ):
+            self._raise_if_aborted()
+            raise _JobAborted("lease_lost", is_lease_lost=True)
+
+        pipeline_argv = [
+            "/content/.autodub_venv/bin/python"
+            if (self.preflight_info.get("env_manifest") or {}).get("isolated_runtime") else "python3",
+            "full_pipeline.py",
+            "--input",
+            self.input_arg,
+            "--voice",
+            self.voice_choice,
+        ]
+        job_opts = getattr(self.job, "options", None) or {}
+        if isinstance(job_opts, dict) and job_opts.get("allow_no_speech"):
+            pipeline_argv.append("--allow-no-speech")
+        env_vars = _build_pipeline_env_vars(self.gemini_key, self.extra_secrets)
+
+        highest_pipe_pct = [55]
+
+        def _on_remote_pipeline_progress(remote_pct: int, remote_msg: str) -> None:
+            clamped = max(highest_pipe_pct[0], min(84, int(remote_pct)))
+            highest_pipe_pct[0] = clamped
+            self._update(clamped, remote_msg, state="processing")
+
+        if self.use_monitored_exec:
+            pipe_ok, pipe_output = self.orchestrator.adapter.run_argv_monitored(
+                self.session_name,
+                pipeline_argv,
+                cwd="/content",
+                env_vars=env_vars,
+                timeout=DEFAULT_CONFIG["exec_timeout_seconds"],
+                cancel_check=self._cancel_probe,
+                progress_callback=_on_remote_pipeline_progress,
+                job_tag="pipeline",
+            )
+        else:
+            pipe_ok, pipe_output = _call_with_cancel(
+                self.orchestrator.adapter.exec_argv,
+                self.session_name,
+                pipeline_argv,
+                cwd="/content",
+                env_vars=env_vars,
+                timeout=DEFAULT_CONFIG["exec_timeout_seconds"],
+                cancel_check=self._cancel_probe,
+            )
+        self._raise_if_aborted()
+        safe_pipe_output = redact_secrets(pipe_output, extra_secrets=self.extra_secrets)
+        logger.info("Pipeline Colab output:\n%s", safe_pipe_output)
+        if not pipe_ok:
+            pipe_err_code = _extract_pipeline_error_code(safe_pipe_output)
+            pipeline_result = _parse_pipeline_result(safe_pipe_output) or {}
+            pipeline_detail = str(pipeline_result.get("error") or safe_pipe_output[-2000:])
+            raise _OrchestratorStageError(
+                pipe_err_code,
+                f"Pipeline Colab thất bại ({pipe_err_code}):\n{pipeline_detail}",
+            )
+
+    def _stage_download(self):
+        self._mark_stage("download")
+        # 6. Tải video thành phẩm và kết quả về vùng staging riêng theo job/attempt (`downloading`)
+        if not self._update(
+            85,
+            "Đang tải video thành phẩm về máy tính...",
+            state="downloading",
+        ):
+            self._raise_if_aborted()
+            raise _JobAborted("lease_lost", is_lease_lost=True)
+
+        job_res_dir = Path(DEFAULT_CONFIG["results_dir"]) / self.job_id
+        self.attempt_res_dir = job_res_dir / f"attempt_{self.session_attempt}"
+        self.attempt_res_dir.mkdir(parents=True, exist_ok=True)
+
+        self._raise_if_aborted()
+        dl_ok, self.dl_path = _call_with_cancel(
+            self.orchestrator.adapter.download_file,
+            self.session_name,
+            "output_video.mp4",
+            self.attempt_res_dir,
+            cancel_check=self._cancel_probe,
+        )
+        self._raise_if_aborted()
+        if not dl_ok:
+            raise _OrchestratorStageError(
+                CloudErrorCode.DOWNLOAD_FAILED.value,
+                "Không tải được video thành phẩm từ Colab về.",
+            )
+
+        for remote_art in ("result_metadata.json", "subtitles.srt", "subtitles_vi.srt", "subtitles_vi.ass"):
+            if remote_art in _DOWNLOADABLE_REMOTE_ARTIFACTS:
+                _call_with_cancel(
+                    self.orchestrator.adapter.download_file,
+                    self.session_name,
+                    remote_art,
+                    self.attempt_res_dir,
+                    cancel_check=self._cancel_probe,
+                )
+        self._raise_if_aborted()
+
+    def _stage_validate(self):
+        self._mark_stage("validate")
+        # 7. Kiểm tra QC tại vùng staging & xuất thành phẩm atomic an toàn (`validating`)
+        self._raise_if_aborted()
+        if not self._update(
+            95,
+            "Đang kiểm tra QC và xuất video thành phẩm an toàn...",
+            state="validating",
+        ):
+            self._raise_if_aborted()
+            raise _JobAborted("lease_lost", is_lease_lost=True)
+
+        dl_file = Path(self.dl_path)
+        self._raise_if_aborted()
+        self.qc_res = self.orchestrator.validate_downloaded_output(
+            dl_file,
+            self.attempt_res_dir,
+            source_fingerprint=self.preflight_info.get("fingerprint"),
+            extra_secrets=self.extra_secrets,
+        )
+        self._raise_if_aborted()
+
+        self.parked_warm = False
+        if (
+            self.session_may_exist
+            and not self.cleanup_done
+            and self.orchestrator._park_warm_session_on_success(self.session_name, self.gpu_type, source_job_id=self.job_id)
+        ):
+            self.parked_warm = True
+            self.cleanup_done = True
+            self.runtime_end_time = time.time()
+            self._sync_runtime_usage(check_provider=False)
+            self.cleanup_result = {
+                "verified_stopped": True,
+                "cleanup_status": "verified",
+                "attempts": 0,
+                "error": None,
+            }
+            self.orchestrator.store.record_cleanup_result(
+                self.job_id,
+                self.raw_attempt,
+                self.session_name,
+                verified_stopped=True,
+                cleanup_status="verified",
+                attempts=0,
+                error=None,
+            )
+            cleanup_res = dict(self.cleanup_result)
+        else:
+            cleanup_res = self._finalize_session_once()
+        self.cu_spent = self._estimate_elapsed_cu()
+        if not cleanup_res.get("verified_stopped"):
+            raise _OrchestratorStageError(CloudErrorCode.CLEANUP_FAILED.value,
+                                         cleanup_res.get("error") or "Cloud session cleanup is unverified.")
+        self._raise_if_aborted()
+
+        from .cloud_config import _is_local_default_banve, get_cloud_output_dir
+
+        cloud_out_override = os.getenv("AUTODUB_CLOUD_OUTPUT_DIR", "").strip()
+        out_env_raw = os.getenv("AUTODUB_OUTPUT_DIR", "").strip()
+        pytest_default_cloud_leak = os.getenv("AUTODUB_CLOUD_TEST_OUTPUT_GUARD") == "1" and (
+            not cloud_out_override
+            or os.path.normcase(cloud_out_override.rstrip("\\/")) == os.path.normcase(r"D:\ToolV1_Cloud")
+        )
+        if pytest_default_cloud_leak:
+            if out_env_raw and not _is_local_default_banve(out_env_raw) and Path(out_env_raw).exists():
+                final_out_dir = Path(out_env_raw)
+            else:
+                final_out_dir = self.attempt_res_dir
+        elif cloud_out_override:
+            final_out_dir = get_cloud_output_dir()
+        elif out_env_raw and not _is_local_default_banve(out_env_raw):
+            final_out_dir = Path(out_env_raw) if Path(out_env_raw).exists() else self.attempt_res_dir
+        else:
+            default_cloud_dir = Path(r"D:\ToolV1_Cloud")
+            final_out_dir = default_cloud_dir if Path("D:/").exists() else self.attempt_res_dir
+        self.final_video_path = self.orchestrator.export_deliverable_atomic(
+            dl_file,
+            final_out_dir,
+            job_id=self.job_id,
+            attempt=self.session_attempt,
+            video_name=self.job.video_name or self.validated_input.display_name,
+            expected_sha256=self.qc_res["sha256"],
+        )
+        try:
+            if not self.is_url and self.source_snapshot:
+                src_final = Path(self.validated_input.normalized_value)
+                if not src_final.is_file() or src_final.stat().st_size != self.source_snapshot["size_bytes"]:
+                    raise _OrchestratorStageError(
+                        CloudErrorCode.VALIDATION_FAILED.value,
+                        "File video nguồn cục bộ không còn nguyên vẹn sau quá trình xử lý Cloud.",
+                    )
+
+            remote_meta = self.qc_res.get("remote_metadata") or {}
+            local_probe = self.qc_res.get("local_probe") or {}
+            self.output_manifest: Dict[str, Any] = {
+                "schema_version": 1,
+                "job_id": self.job_id,
+                "attempt": self.session_attempt,
+                "result_path": str(self.final_video_path),
+                "staging_dir": str(self.attempt_res_dir),
+                "sha256": self.qc_res["sha256"],
+                "size_bytes": self.qc_res["size_bytes"],
+                "duration_seconds": (
+                    local_probe.get("duration_seconds")
+                    or (remote_meta.get("output_video_probe") or {}).get("duration_seconds")
+                ),
+                "video_codec": (
+                    local_probe.get("video_codec")
+                    or (remote_meta.get("output_video_probe") or {}).get("video_codec")
+                ),
+                "audio_codec": (
+                    local_probe.get("audio_codec")
+                    or (remote_meta.get("output_video_probe") or {}).get("audio_codec")
+                ),
+                "qc_passed": True,
+                "qc_report": self.qc_res["qc_report"],
+                "remote_metadata": remote_meta,
+                "setup_phase_seconds": self.setup_phase_seconds,
+                "pipeline_step_seconds": remote_meta.get("step_timings_seconds") or {},
+            }
+            (self.attempt_res_dir / "output_manifest.json").write_text(
+                redact_secrets(json.dumps(self.output_manifest, indent=2, ensure_ascii=False), extra_secrets=self.extra_secrets),
+                encoding="utf-8",
+            )
+
+            self._raise_if_aborted()
+        except Exception:
+            if self.parked_warm:
+                self.orchestrator.release_warm_sessions(self.gpu_type)
+            if self.final_video_path != dl_file:
+                try:
+                    Path(self.final_video_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+
+    def _stage_cleanup(self):
+        self._mark_stage("cleanup")
+        # 8. Thu hồi & xác nhận session trước bước hoàn tất; tính lượng CU ước tính theo thời gian chạy
+        self.elapsed_sec = max(0.0, (self.runtime_end_time if self.runtime_end_time is not None else time.time()) - (self.runtime_start_time or self.start_time))
+        self.cu_spent = self._estimate_elapsed_cu()
+        cleanup_res = self._finalize_session_once()
+        self.cu_spent = self._estimate_elapsed_cu()
+        final_cleanup_status = str(
+            cleanup_res.get("cleanup_status")
+            or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
+        )
+        self._mark_stage(None)
+        self.output_manifest["stage_timings_seconds"] = dict(self.stage_timings)
+        self.output_manifest["cu_rate_per_hour"] = self.rate_per_hour
+        self.output_manifest["cu_measurement_source"] = self._cu_measurement_source()
+        self.output_manifest["warm_idle_ledgered"] = self.warm_idle_ledgered
+        try:
+            (self.attempt_res_dir / "output_manifest.json").write_text(
+                redact_secrets(json.dumps(self.output_manifest, indent=2, ensure_ascii=False), extra_secrets=self.extra_secrets),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+        if not self._update(
+            100,
+            f"Hoàn thành! Đã kiểm tra QC & lưu thành phẩm (~{self.cu_spent} CU ước tính).",
+            state="completed",
+            result_path=str(self.final_video_path),
+            cu_actual=self.cu_spent,
+            cleanup_status=final_cleanup_status,
+            measurement_source=self._cu_measurement_source(),
+            output_manifest=self.output_manifest,
+        ):
+            self._raise_if_aborted()
+            raise _JobAborted("lease_lost", is_lease_lost=True)
+
+        logger.info(
+            "=== HOÀN THÀNH CLOUD JOB %s trong %.1fs (Ước tính tiêu thụ ~%.3f CU) ===",
+            self.job_id,
+            self.elapsed_sec,
+            self.cu_spent,
+        )
+        return True
+
+    def _handle_job_aborted(self, abort_exc: _JobAborted) -> bool:
+        if abort_exc.is_lease_lost:
+            logger.warning(
+                "Cloud Job %s (attempt=%d) mất quyền sở hữu (%s); dừng thực thi an toàn không ghi đè.",
+                self.job_id,
+                self.session_attempt,
+                abort_exc.reason,
+            )
+            return False
+
+        self.cu_spent = self._estimate_elapsed_cu()
+        if abort_exc.is_budget_exceeded:
+            logger.warning(
+                "Cloud Job %s bị dừng sớm do ngân sách/số dư (%s); thu hồi session %s...",
+                self.job_id,
+                abort_exc.reason,
+                self.session_name,
+            )
+            self._update(
+                0,
+                "Đang dừng máy ảo Colab do chạm hạn mức chi phí...",
+                state="cancelling",
+                cu_actual=self.cu_spent,
+                allow_from_cancel=True,
+            )
+            cleanup_res = self._finalize_session_once()
+            self.cu_spent = self._estimate_elapsed_cu()
+            err_code = (
+                CloudErrorCode.BUDGET_UNCERTAIN.value
+                if abort_exc.reason == "budget_uncertain"
+                else CloudErrorCode.BUDGET_EXCEEDED.value
+            )
+            self.orchestrator.store.update_progress(
+                self.job_id,
+                state="failed",
+                percent=0,
+                step_name="Đã dừng do chạm hạn mức chi phí/số dư CU.",
+                error=self.budget_abort_reason or "Đã chạm hạn mức chi phí CU khi đang xử lý.",
+                error_code=err_code,
+                cu_actual=self.cu_spent,
+                cleanup_status=str(
+                    cleanup_res.get("cleanup_status")
+                    or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
+                ),
+                owner_id=self.effective_owner,
+                attempt=self.ownership_attempt,
+                allow_from_cancel=True,
+                measurement_source=self._cu_measurement_source(),
+            )
+            return False
+
+        logger.info("Cloud Job %s nhận yêu cầu hủy (%s), đang thu hồi session %s...", self.job_id, abort_exc.reason, self.session_name)
+        self._update(
+            0,
+            "Đang dừng và xác nhận thu hồi máy ảo Colab...",
+            state="cancelling",
+            cu_actual=self.cu_spent,
+            allow_from_cancel=True,
+        )
+        cleanup_res = self._finalize_session_once()
+        self.cu_spent = self._estimate_elapsed_cu()
+        if cleanup_res.get("verified_stopped"):
+            self.orchestrator.store.update_progress(
+                self.job_id,
+                state="cancelled",
+                percent=0,
+                step_name="Đã dừng theo yêu cầu người dùng.",
+                error="Đã dừng bởi người dùng.",
+                error_code=CloudErrorCode.CANCELLED_BY_USER.value,
+                cu_actual=self.cu_spent,
+                cleanup_status="verified",
+                owner_id=self.effective_owner,
+                attempt=self.ownership_attempt,
+                allow_from_cancel=True,
+                measurement_source=self._cu_measurement_source(),
+            )
+        else:
+            self.orchestrator.store.update_progress(
+                self.job_id,
+                state="cancelling",
+                percent=0,
+                step_name="Chưa xác nhận dừng máy ảo Colab; cần dọn dẹp lại.",
+                error=cleanup_res.get("error") or "Chưa xác nhận dừng session Colab.",
+                error_code=CloudErrorCode.CLEANUP_FAILED.value,
+                cu_actual=self.cu_spent,
+                cleanup_status=str(cleanup_res.get("cleanup_status") or "failed_retry_needed"),
+                owner_id=self.effective_owner,
+                attempt=self.ownership_attempt,
+                allow_from_cancel=True,
+                measurement_source=self._cu_measurement_source(),
+            )
+        return False
+
+    def _handle_job_exception(self, exc: Exception) -> bool:
+        # Nếu trong lúc step fail mà job vừa có yêu cầu hủy hoặc mất lease thì ưu tiên nhánh đó
+        self.cu_spent = self._estimate_elapsed_cu()
+        aborted_now, abort_reason = self._check_abort()
+        if aborted_now:
+            if abort_reason in _LEASE_LOST_REASONS:
+                logger.warning("Job %s mất lease sau lỗi bước (%s); không ghi đè trạng thái.", self.job_id, abort_reason)
+                return False
+            self._update(
+                0,
+                "Đang dừng và xác nhận thu hồi máy ảo Colab...",
+                state="cancelling",
+                cu_actual=self.cu_spent,
+                allow_from_cancel=True,
+            )
+            cleanup_res = self._finalize_session_once()
+            self.cu_spent = self._estimate_elapsed_cu()
+            if cleanup_res.get("verified_stopped"):
+                self.orchestrator.store.update_progress(
+                    self.job_id,
+                    state="cancelled",
+                    percent=0,
+                    step_name="Đã dừng theo yêu cầu người dùng.",
+                    error="Đã dừng bởi người dùng.",
+                    error_code=CloudErrorCode.CANCELLED_BY_USER.value,
+                    cu_actual=self.cu_spent,
+                    cleanup_status="verified",
+                    owner_id=self.effective_owner,
+                    attempt=self.ownership_attempt,
+                    allow_from_cancel=True,
+                    measurement_source=self._cu_measurement_source(),
+                )
+            return False
+
+        cleanup_res = self._finalize_session_once()
+        self.cu_spent = self._estimate_elapsed_cu()
+        safe_exc = redact_secrets(str(exc), extra_secrets=self.extra_secrets)
+        exc_error_code = (
+            exc.error_code
+            if isinstance(exc, _OrchestratorStageError) and exc.error_code in _VALID_ERROR_CODES
+            else CloudErrorCode.EXEC_FAILED.value
+        )
+        logger.error("Lỗi trong quá trình xử lý Cloud Job %s [%s]: %s", self.job_id, exc_error_code, safe_exc)
+        self._update(
+            0,
+            f"Lỗi: {safe_exc[:120]}",
+            state="failed",
+            error=safe_exc,
+            error_code=exc_error_code,
+            cu_actual=self.cu_spent,
+            cleanup_status=str(
+                cleanup_res.get("cleanup_status")
+                or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
+            ),
+            measurement_source=self._cu_measurement_source(),
+        )
+        return False
+
 
 
 class CloudOrchestrator:
@@ -1356,1137 +2557,47 @@ class CloudOrchestrator:
         Kiểm tra hủy & lease trước/sau mỗi bước chặn và chỉ xác nhận `cancelled`
         sau khi đã xác nhận session của job/attempt dừng thực sự.
         """
-        job_id = job.job_id
-        raw_attempt = int(getattr(job, "attempt", 0) or 0)
-        session_attempt = raw_attempt if raw_attempt > 0 else 1
-        effective_owner = owner_id if owner_id is not None else getattr(job, "owner_id", None)
-        ownership_attempt = raw_attempt if raw_attempt > 0 else None
-
-        clean_id = re.sub(r"[^a-zA-Z0-9]", "", job_id)[-8:] or uuid.uuid4().hex[:6]
-        session_name = validate_session_name(f"cjob{clean_id}a{session_attempt}")
-        gemini_key, extra_secrets = _resolve_gemini_key_and_secrets()
-        start_time = time.time()
-        runtime_start_time: Optional[float] = None
-        last_budget_check_ts = start_time
-        budget_abort_reason = ""
-        budget_abort_code = ""
-        rate_per_hour = GPU_CU_RATES.get("T4", 1.15)
-        latest_provider_balance: Optional[float] = None
-        warm_idle_ledgered = False
-
-        session_may_exist = False
-        cleanup_done = False
-        cleanup_result: Optional[Dict[str, Any]] = None
-        runtime_end_time: Optional[float] = None
-
-        cu_accrued = 0.0
-        cu_accrual_ts: Optional[float] = None
-        provider_rate_used = False
-        provider_rate_eligible = False
-        setup_phase_seconds: Dict[str, Any] = {}
-        stage_timings: Dict[str, float] = {}
-        stage_state: Dict[str, Any] = {"name": None, "started": None}
-
-        def _mark_stage(name: Optional[str]) -> None:
-            now_m = time.monotonic()
-            prev, started = stage_state["name"], stage_state["started"]
-            if prev is not None and started is not None:
-                stage_timings[prev] = round(stage_timings.get(prev, 0.0) + (now_m - started), 3)
-            stage_state["name"], stage_state["started"] = name, (now_m if name else None)
-
-        def _raw_elapsed_cu(at_ts: Optional[float] = None) -> float:
-            if not session_may_exist or runtime_start_time is None:
-                return 0.0
-            end_ts = at_ts if at_ts is not None else (runtime_end_time if runtime_end_time is not None else time.time())
-            base_ts = cu_accrual_ts if cu_accrual_ts is not None else runtime_start_time
-            return cu_accrued + (max(0.0, end_ts - base_ts) / 3600.0) * rate_per_hour
-
-        def _estimate_elapsed_cu() -> float:
-            return round(_raw_elapsed_cu(), 4)
-
-        def _adopt_provider_rate(snap: Dict[str, Any]) -> None:
-            nonlocal cu_accrued, cu_accrual_ts, rate_per_hour, provider_rate_used
-            if (
-                not provider_rate_eligible
-                or not session_may_exist
-                or runtime_start_time is None
-                or runtime_end_time is not None
-            ):
-                return
-            now_ts = time.time()
-            try:
-                candidate_rate = float(snap.get("usage_rate"))
-            except (TypeError, ValueError):
-                candidate_rate = 0.0
-            rate_is_valid = math.isfinite(candidate_rate) and candidate_rate > 0.0
-            if snap.get("active_assignments") == 1 and rate_is_valid:
-                cu_accrued = _raw_elapsed_cu(now_ts)
-                cu_accrual_ts = now_ts
-                rate_per_hour = candidate_rate
-                provider_rate_used = True
-                return
-            if provider_rate_used:
-                cu_accrued = _raw_elapsed_cu(now_ts)
-                cu_accrual_ts = now_ts
-                rate_per_hour = GPU_CU_RATES.get(gpu_type, 1.15)
-
-        def _cu_measurement_source() -> str:
-            if provider_rate_used:
-                return CloudCostMeasurementSource.PROVIDER_RATE_ESTIMATE.value
-            return CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value
-
-        def _sync_runtime_usage(*, check_provider: bool = False) -> Tuple[bool, str]:
-            nonlocal last_budget_check_ts, latest_provider_balance, budget_abort_reason, budget_abort_code
-            if not hasattr(self.store, "record_runtime_usage"):
-                return True, "ok"
-            est_cu = _estimate_elapsed_cu()
-            prov_bal: Optional[float] = None
-            if check_provider:
-                try:
-                    u = self.adapter.get_usage()
-                    if hasattr(self.store, "record_provider_usage_snapshot"):
-                        snap = self.store.record_provider_usage_snapshot(u)
-                        if not snap.get("ok") or snap.get("is_stale"):
-                            budget_abort_reason = (
-                                "Mất kết nối hoặc số dư Colab bị cũ trong lúc đang chạy session."
-                            )
-                            budget_abort_code = "budget_uncertain"
-                            return False, "budget_uncertain"
-                        prov_bal = snap.get("balance")
-                        if prov_bal is not None:
-                            latest_provider_balance = float(prov_bal)
-                        _adopt_provider_rate(snap)
-                    elif u.get("ok") and u.get("balance") is not None:
-                        prov_bal = float(u["balance"])
-                        latest_provider_balance = prov_bal
-                except Exception as probe_exc:
-                    budget_abort_reason = redact_secrets(str(probe_exc), extra_secrets=extra_secrets)
-                    budget_abort_code = "budget_uncertain"
-                    return False, "budget_uncertain"
-
-            res = self.store.record_runtime_usage(
-                job_id,
-                session_attempt,
-                est_cu,
-                measurement_source=_cu_measurement_source(),
-                provider_balance=prov_bal,
-            )
-            if not res.get("within_budget", True):
-                budget_abort_reason = (
-                    "Đã vượt hạn mức CU trong ngày hoặc hết số dư trong khi đang chạy."
-                )
-                budget_abort_code = "budget_exceeded"
-                return False, "budget_exceeded"
-            return True, "ok"
-
-        def _check_abort() -> Tuple[bool, str]:
-            nonlocal last_budget_check_ts
-            if cancel_event is not None and cancel_event.is_set():
-                return True, "cancel_event"
-            lost, reason = self.store.is_cancel_or_lease_lost(
-                job_id,
-                owner_id=effective_owner,
-                attempt=ownership_attempt,
-            )
-            if lost:
-                return True, reason
-            if budget_abort_code:
-                return True, budget_abort_code
-
-            now_ts = time.time()
-            interval = max(0.01, float(DEFAULT_CONFIG.get("runtime_budget_check_interval_seconds", 15)))
-            if session_may_exist and (now_ts - last_budget_check_ts) >= interval:
-                last_budget_check_ts = now_ts
-                ok_budget, b_reason = _sync_runtime_usage(check_provider=True)
-                if not ok_budget:
-                    return True, b_reason
-            return False, "ok"
-
-        def _cancel_probe() -> bool:
-            aborted, _ = _check_abort()
-            return aborted
-
-        def _raise_if_aborted() -> None:
-            aborted, reason = _check_abort()
-            if aborted:
-                is_lost = reason in _LEASE_LOST_REASONS
-                is_budget = reason in ("budget_exceeded", "budget_uncertain")
-                raise _JobAborted(
-                    reason,
-                    is_lease_lost=is_lost,
-                    is_budget_exceeded=is_budget,
-                )
-
-        def _upload_with_retry(local_path: str | Path, remote_filename: str) -> Tuple[bool, str]:
-            retry_delays = DEFAULT_CONFIG.get("cloud_upload_retry_delays_seconds", [5, 15])
-            try:
-                delays = [max(0.0, float(delay)) for delay in retry_delays][:2]
-            except (TypeError, ValueError):
-                delays = [5.0, 15.0]
-            for attempt_idx in range(len(delays) + 1):
-                _raise_if_aborted()
-                if _is_session_aborted(session_name):
-                    _raise_if_aborted()
-                    raise _JobAborted("cancel_event")
-                up_ok, up_msg = _call_with_cancel(
-                    self.adapter.upload_file,
-                    session_name,
-                    local_path,
-                    remote_filename,
-                    cancel_check=_cancel_probe,
-                )
-                _raise_if_aborted()
-                if up_ok:
-                    return True, up_msg
-                failure = str(up_msg or "").lower()
-                if (
-                    attempt_idx >= len(delays)
-                    or _is_session_aborted(session_name)
-                    or any(token in failure for token in ("cancel", "abort", "hủy", "huy"))
-                ):
-                    return False, up_msg
-                if _wait_interruptible(
-                    delays[attempt_idx],
-                    session_name=session_name,
-                    cancel_check=_cancel_probe,
-                ):
-                    _raise_if_aborted()
-                    raise _JobAborted("cancel_event")
-            return False, up_msg
-
-        def _update(percent: int, step_name: str, **kwargs) -> bool:
-            safe_step = redact_secrets(step_name, extra_secrets=extra_secrets)
-            if "error" in kwargs and kwargs["error"] is not None:
-                kwargs["error"] = redact_secrets(str(kwargs["error"]), extra_secrets=extra_secrets)
-            if effective_owner is not None and "owner_id" not in kwargs:
-                kwargs["owner_id"] = effective_owner
-            if ownership_attempt is not None and "attempt" not in kwargs:
-                kwargs["attempt"] = ownership_attempt
-            ok = self.store.update_progress(job_id, percent=percent, step_name=safe_step, **kwargs)
-            if ok and progress_callback:
-                try:
-                    progress_callback(percent, safe_step)
-                except Exception:
-                    pass
-            return ok
-
-        def _finalize_session_once() -> Dict[str, Any]:
-            nonlocal cleanup_done, cleanup_result, runtime_end_time
-            if cleanup_done:
-                return dict(cleanup_result or {"verified_stopped": False,
-                                               "cleanup_status": "failed_retry_needed",
-                                               "error": "Cleanup did not return a verified result"})
-            if not session_may_exist:
-                return {
-                    "verified_stopped": True,
-                    "cleanup_status": "verified",
-                    "attempts": 0,
-                    "error": None,
-                }
-            cleanup_done = True
-            logger.info("Dọn dẹp: Dừng và xác nhận session Colab %s...", session_name)
-            res = self._verify_or_stop_session(session_name, extra_secrets=extra_secrets)
-            cleanup_result = dict(res)
-            if res.get("verified_stopped"):
-                runtime_end_time = time.time()
-            # The VM can consume CU while the provider is stopping it. Record
-            # that interval before reconciliation freezes the cost ledger.
-            _sync_runtime_usage(check_provider=False)
-            safe_cleanup_err = (
-                redact_secrets(str(res.get("error")), extra_secrets=extra_secrets)
-                if res.get("error")
-                else None
-            )
-            self.store.record_cleanup_result(
-                job_id,
-                raw_attempt,
-                session_name,
-                verified_stopped=bool(res.get("verified_stopped")),
-                cleanup_status=str(res.get("cleanup_status") or "failed_retry_needed"),
-                attempts=int(res.get("attempts") or 1),
-                error=safe_cleanup_err,
-            )
-            if not res.get("verified_stopped"):
-                logger.error(
-                    "Cảnh báo: Chưa xác nhận dừng session %s (%s): %s",
-                    session_name,
-                    res.get("cleanup_status"),
-                    safe_cleanup_err,
-                )
-            return res
-
+        run = _JobRun.from_job(
+            self, job, progress_callback, owner_id=owner_id, cancel_event=cancel_event
+        )
         try:
-            _raise_if_aborted()
-
-            _mark_stage("preflight")
-            # 0. Kiểm tra allowlist GPU/task/voice, đầu vào và bundle cục bộ (0 CU) trước khi cấp phát GPU
-            preflight_info: Dict[str, Any] = {}
-            source_snapshot: Optional[Dict[str, Any]] = None
-            try:
-                gpu_type = validate_gpu_type(job.gpu_type)
-                validate_task_type(getattr(job, "task_type", "full_pipeline"))
-                voice_choice = validate_voice(getattr(job, "voice", "BV562_streaming") or "BV562_streaming")
-                validated_input = validate_video_input(
-                    job.video_path,
-                    allowed_roots=self.allowed_roots,
-                    require_exists=True,
-                )
-                preflight_info = self.verify_local_preflight(validated_input)
-                source_snapshot = preflight_info.get("source_snapshot")
-                rate_per_hour = GPU_CU_RATES.get(gpu_type, 1.15)
-            except Exception as val_exc:
-                safe_err = redact_secrets(str(val_exc), extra_secrets=extra_secrets)
-                logger.warning("Từ chối Cloud Job %s ở bước preflight cục bộ: %s", job_id, safe_err)
-                if isinstance(val_exc, CloudValidationError):
-                    err_code = val_exc.code
-                elif isinstance(val_exc, _OrchestratorStageError):
-                    err_code = val_exc.error_code
-                else:
-                    err_code = CloudErrorCode.INVALID_INPUT.value
-                _update(
-                    0,
-                    f"Lỗi tiền kiểm cục bộ: {safe_err[:100]}",
-                    state="failed",
-                    error=safe_err,
-                    error_code=err_code,
-                    cu_actual=0.0,
-                )
+            run._raise_if_aborted()
+            if not run._stage_preflight():
                 return False
-
-            logger.info(
-                "=== BẮT ĐẦU XỬ LÝ CLOUD JOB %s (Attempt=%d, Session=%s, Video=%s, GPU=%s) ===",
-                job_id,
-                session_attempt,
-                session_name,
-                validated_input.display_name,
-                gpu_type,
-            )
-
-            _raise_if_aborted()
-
-            _mark_stage("budget_check")
-            # 1. Kiểm tra số dư Compute Units, độ mới snapshot và ngân sách trước khi cấp phát máy
-            usage = self.adapter.get_usage()
-            if hasattr(self.store, "record_provider_usage_snapshot"):
-                snap = self.store.record_provider_usage_snapshot(usage)
-            else:
-                snap = {
-                    "ok": bool(usage.get("ok")),
-                    "balance": usage.get("balance"),
-                    "is_stale": bool(usage.get("stale", False)),
-                    "error": usage.get("error"),
-                }
-
-            if not snap.get("ok") or snap.get("is_stale"):
-                err = redact_secrets(
-                    f"Không thể xác nhận số dư Colab mới ({snap.get('error') or 'stale/disconnected'}). Chặn mở GPU.",
-                    extra_secrets=extra_secrets,
-                )
-                _update(
-                    0,
-                    "Lỗi: Chưa xác nhận được số dư Colab",
-                    state="failed",
-                    error=err,
-                    error_code=CloudErrorCode.BUDGET_UNCERTAIN.value,
-                )
+            if not run._stage_budget_check():
                 return False
-
-            balance = snap.get("balance")
-            required_bal = max(
-                0.5,
-                float(getattr(job, "cu_reserved", 0.0) or getattr(job, "cu_estimated", 0.0) or 0.5),
-                float(DEFAULT_CONFIG.get("min_provider_balance_cu", 0.0)),
-            )
-            if balance is not None and float(balance) < required_bal - 1e-6:
-                err = f"Số dư Colab không đủ (còn {float(balance):.2f} < {required_bal:.2f} CU). Vui lòng nạp thêm CU."
-                _update(
-                    0,
-                    "Lỗi: Hết Compute Units",
-                    state="failed",
-                    error=err,
-                    error_code=CloudErrorCode.INSUFFICIENT_CU.value,
-                )
+            if not run._stage_provision():
                 return False
-            if balance is not None:
-                latest_provider_balance = float(balance)
-
-            budget_info = self.store.get_cu_budget_info()
-            if int(budget_info.get("unreconciled_count", 0)) > 0:
-                err = "Còn phiên GPU trước chưa xác nhận thu hồi/đối soát chi phí; tạm chặn cấp phát mới."
-                logger.warning(err)
-                _update(
-                    0,
-                    "Lỗi: Chờ đối soát chi phí phiên trước",
-                    state="failed",
-                    error=err,
-                    error_code=CloudErrorCode.BUDGET_UNCERTAIN.value,
-                )
-                return False
-
-            budget_daily = float(budget_info["budget_daily"])
-            over_daily = (
-                budget_daily <= 0.0
-                or float(budget_info["spent_today"]) >= budget_daily
-                or float(budget_info.get("committed_today", budget_info["spent_today"])) > budget_daily + 1e-6
-            )
-            if over_daily:
-                err = (
-                    f"Đã chạm hạn mức CU trong ngày "
-                    f"({budget_info.get('committed_today', budget_info['spent_today']):.2f} / {budget_daily:.2f} CU). "
-                    f"Vui lòng cập nhật hạn mức trên Dashboard hoặc đợi sang ngày mới để bảo vệ tài khoản!"
-                )
-                logger.warning(err)
-                _update(
-                    0,
-                    "Lỗi: Đã chạm hạn mức CU hôm nay",
-                    state="failed",
-                    error=err,
-                    error_code=CloudErrorCode.BUDGET_EXCEEDED.value,
-                )
-                return False
-
-            _raise_if_aborted()
-
-            _mark_stage("provisioning")
-            # 2. Đăng ký ownership session & khởi tạo (hoặc tái sử dụng máy giữ ấm) Session Colab (`provisioning`)
-            warm_entry = self._pop_warm_session_entry(gpu_type)
-            reused_warm_session = warm_entry[0] if warm_entry else None
-            warm_parked_at = warm_entry[1] if warm_entry else None
-            if reused_warm_session:
-                session_name = reused_warm_session
-                if warm_parked_at is not None:
-                    record_warm_idle = getattr(self.store, "record_warm_idle_usage", None)
-                    if callable(record_warm_idle):
-                        try:
-                            record_warm_idle(
-                                session_name,
-                                gpu_type,
-                                parked_at=warm_parked_at,
-                                ended_at=time.time(),
-                            )
-                            warm_idle_ledgered = True
-                        except Exception as exc:
-                            logger.warning(
-                                "Không ghi được CU giữ ấm khi tái sử dụng %s: %s",
-                                session_name,
-                                redact_secrets(str(exc)),
-                            )
-
-            reg_ok = self.store.register_session(job_id, raw_attempt, effective_owner, session_name)
-            if ownership_attempt is not None and not reg_ok:
-                if reused_warm_session:
-                    try:
-                        self._verify_or_stop_session(reused_warm_session, extra_secrets=extra_secrets)
-                    except Exception:
-                        pass
-                _raise_if_aborted()
-                raise _JobAborted("attempt_mismatch", is_lease_lost=True)
-
-            prov_msg = (
-                f"Tái sử dụng máy ảo GPU {gpu_type} đang giữ ấm ({session_name})..."
-                if reused_warm_session
-                else f"Đang tạo máy ảo GPU {gpu_type} trên Colab..."
-            )
-            if not _update(
-                10,
-                prov_msg,
-                state="provisioning",
-                session_name=session_name,
-            ):
-                if reused_warm_session:
-                    try:
-                        self._verify_or_stop_session(reused_warm_session, extra_secrets=extra_secrets)
-                    except Exception:
-                        pass
-                _raise_if_aborted()
-                raise _JobAborted("lease_lost", is_lease_lost=True)
-
-            session_may_exist = True
-            runtime_start_time = time.time()
-            if reused_warm_session:
-                created, msg = True, f"reused warm session {session_name}"
-            else:
-                created, msg = _call_with_cancel(
-                    self.adapter.create_session,
-                    session_name,
-                    gpu=gpu_type,
-                    cancel_check=_cancel_probe,
-                )
-
-            provider_rate_eligible = bool(created)
-            # Đóng race hủy trong lúc create_session: nếu hủy trong/sau khi tạo thì thu hồi ngay, không upload/chạy pipeline.
-            aborted_after_create, abort_reason = _check_abort()
-            if aborted_after_create:
-                raise _JobAborted(
-                    abort_reason,
-                    is_lease_lost=(abort_reason in _LEASE_LOST_REASONS),
-                    is_budget_exceeded=(abort_reason in ("budget_exceeded", "budget_uncertain")),
-                )
-
-            if not created:
-                session_may_exist = False
-                err_code = (
-                    CloudErrorCode.PROVIDER_503.value
-                    if "503" in str(msg) or "hết máy" in str(msg).lower()
-                    else CloudErrorCode.SESSION_CREATE_FAILED.value
-                )
-                _update(
-                    0,
-                    "Lỗi: Tạo máy ảo Colab thất bại",
-                    state="failed",
-                    error=f"Không thể tạo máy Colab: {msg}",
-                    error_code=err_code,
-                    cleanup_status="verified",
-                )
-                self.store.record_cleanup_result(
-                    job_id,
-                    raw_attempt,
-                    session_name,
-                    verified_stopped=True,
-                    cleanup_status="verified",
-                    attempts=0,
-                    error=None,
-                )
-                return False
-
-            _mark_stage("upload")
-            # 3. Upload mã nguồn và video lên VM (`uploading` đơn hướng, không lùi từ preparing)
-            is_url = validated_input.kind == "url"
-            if not _update(
-                20,
-                "Đang đóng gói và tải mã nguồn AI lên máy ảo Colab...",
-                state="uploading",
-            ):
-                _raise_if_aborted()
-                raise _JobAborted("lease_lost", is_lease_lost=True)
-
-            bundle_path = Path(tempfile.gettempdir()) / f"bundle_{session_name}_{uuid.uuid4().hex[:6]}.tar.gz"
-            try:
-                upload_targets: List[Path] = list(preflight_info.get("upload_targets") or [])
-                runtime_profile = self._build_v1_runtime_profile(validated_input)
-                bundled_fonts = _resolve_local_font_files_for_bundle(
-                    str((runtime_profile.get("canvas") or {}).get("sub_font_name") or "Arial")
-                )
-                runtime_profile_bytes = json.dumps(runtime_profile, indent=2, ensure_ascii=False).encode("utf-8")
-                runtime_profile_sha = hashlib.sha256(runtime_profile_bytes).hexdigest()
-                bundle_manifest_data: Dict[str, Any] = {
-                    "schema_version": 1,
-                    "job_id": job_id,
-                    "attempt": session_attempt,
-                    "expected_gpu": gpu_type,
-                    "files": [
-                        *[
-                            {
-                                "name": s_file.name,
-                                "size_bytes": s_file.stat().st_size,
-                                "sha256": _file_sha256(s_file),
-                            }
-                            for s_file in upload_targets
-                        ],
-                        *[
-                            {
-                                "name": arc_rel,
-                                "size_bytes": f_path.stat().st_size,
-                                "sha256": _file_sha256(f_path),
-                            }
-                            for arc_rel, f_path in bundled_fonts
-                        ],
-                        {
-                            "name": "v1_runtime_profile.json",
-                            "size_bytes": len(runtime_profile_bytes),
-                            "sha256": runtime_profile_sha,
-                        },
-                    ],
-                }
-                if not is_url and source_snapshot:
-                    bundle_manifest_data["expected_video"] = {
-                        "remote_filename": sanitize_remote_filename(validated_input.display_name),
-                        "size_bytes": source_snapshot["size_bytes"],
-                        "sha256": source_snapshot["sha256"],
-                    }
-
-                bundle_manifest_bytes = json.dumps(bundle_manifest_data, indent=2, ensure_ascii=False).encode("utf-8")
-                now_mtime = int(time.time())
-                with tarfile.open(bundle_path, "w:gz") as tar:
-                    for s_file in upload_targets:
-                        tar.add(s_file, arcname=s_file.name)
-                    for arc_rel, f_path in bundled_fonts:
-                        tar.add(f_path, arcname=arc_rel)
-                    profile_tarinfo = tarfile.TarInfo(name="v1_runtime_profile.json")
-                    profile_tarinfo.size = len(runtime_profile_bytes)
-                    profile_tarinfo.mtime = now_mtime
-                    tar.addfile(profile_tarinfo, io.BytesIO(runtime_profile_bytes))
-                    manifest_tarinfo = tarfile.TarInfo(name="bundle_manifest.json")
-                    manifest_tarinfo.size = len(bundle_manifest_bytes)
-                    manifest_tarinfo.mtime = now_mtime
-                    tar.addfile(manifest_tarinfo, io.BytesIO(bundle_manifest_bytes))
-
-                _raise_if_aborted()
-                up_ok, up_msg = _upload_with_retry(bundle_path, "cloud_bundle.tar.gz")
-                _raise_if_aborted()
-                if not up_ok:
-                    raise _OrchestratorStageError(
-                        CloudErrorCode.UPLOAD_FAILED.value,
-                        f"Upload mã nguồn lên Colab thất bại: {up_msg}",
-                    )
-            finally:
-                bundle_path.unlink(missing_ok=True)
-
-            if is_url:
-                _update(
-                    30,
-                    f"Đã nhận link: {validated_input.display_name}. Colab sẽ tải video trực tiếp trên cloud...",
-                    state="uploading",
-                )
-                input_arg = validated_input.normalized_value
-            else:
-                _update(
-                    30,
-                    f"Đang tải video {validated_input.display_name} lên máy ảo...",
-                    state="uploading",
-                )
-                remote_video_name = sanitize_remote_filename(validated_input.display_name)
-                _raise_if_aborted()
-                v_ok, v_msg = _upload_with_retry(validated_input.normalized_value, remote_video_name)
-                _raise_if_aborted()
-                if not v_ok:
-                    raise _OrchestratorStageError(
-                        CloudErrorCode.UPLOAD_FAILED.value,
-                        f"Upload video thất bại: {v_msg}",
-                    )
-                src_check = Path(validated_input.normalized_value)
-                if source_snapshot and (
-                    not src_check.is_file()
-                    or src_check.stat().st_size != source_snapshot["size_bytes"]
-                    or _file_sha256(src_check) != source_snapshot["sha256"]
-                ):
-                    raise _OrchestratorStageError(
-                        CloudErrorCode.UPLOAD_VERIFICATION_FAILED.value,
-                        "Phát hiện file video nguồn cục bộ bị thay đổi hoặc mất sau bước upload.",
-                    )
-                input_arg = f"/content/{remote_video_name}"
-
-            _mark_stage("setup")
-            # 4. Giải nén và cài đặt môi trường trên VM (`preparing`)
-            if not _update(
-                40,
-                "Đang giải nén và chuẩn bị môi trường AI (Demucs, Whisper Large-v3-turbo, CapCut TTS)...",
-                state="preparing",
-            ):
-                _raise_if_aborted()
-                raise _JobAborted("lease_lost", is_lease_lost=True)
-
-            tar_ok, tar_msg = _call_with_cancel(
-                self.adapter.exec_argv,
-                session_name,
-                ["tar", "-xzf", "/content/cloud_bundle.tar.gz", "-C", "/content"],
-                cwd="/content",
-                cancel_check=_cancel_probe,
-            )
-            _raise_if_aborted()
-            if not tar_ok:
-                raise _OrchestratorStageError(
-                    CloudErrorCode.UPLOAD_VERIFICATION_FAILED.value,
-                    f"Giải nén mã nguồn trên Colab thất bại: {tar_msg}",
-                )
-
-            setup_timeout = int(DEFAULT_CONFIG.get("setup_timeout_seconds", 600) or 600)
-            min_disk_mb = int(DEFAULT_CONFIG.get("min_remote_disk_mb", 4096) or 4096)
-            setup_argv = [
-                "python3",
-                "setup_env.py",
-                "--expected-gpu",
-                gpu_type,
-                "--min-disk-mb",
-                str(min_disk_mb),
-                "--verify-bundle",
-                "bundle_manifest.json",
-                "--pip-timeout",
-                str(min(300, setup_timeout)),
-            ]
-            use_monitored_exec = isinstance(self.adapter, ColabProviderAdapter)
-            if use_monitored_exec:
-                env_ok, env_msg = self.adapter.run_argv_monitored(
-                    session_name,
-                    setup_argv,
-                    cwd="/content",
-                    timeout=setup_timeout,
-                    cancel_check=_cancel_probe,
-                    job_tag="setup",
-                )
-            else:
-                env_ok, env_msg = _call_with_cancel(
-                    self.adapter.exec_argv,
-                    session_name,
-                    setup_argv,
-                    cwd="/content",
-                    timeout=setup_timeout,
-                    cancel_check=_cancel_probe,
-                )
-            _raise_if_aborted()
-            safe_env_msg = redact_secrets(env_msg, extra_secrets=extra_secrets)
-            logger.info("Env setup output:\n%s", safe_env_msg)
-            setup_phase_seconds = (_parse_setup_env_result(safe_env_msg) or {}).get("phase_seconds") or {}
-            if not env_ok:
-                setup_err_code = _extract_setup_error_code(safe_env_msg)
-                setup_result = _parse_setup_env_result(safe_env_msg) or {}
-                setup_detail = str(setup_result.get("message") or safe_env_msg[-2000:])
-                raise _OrchestratorStageError(
-                    setup_err_code,
-                    f"Cài đặt môi trường AI trên Colab thất bại ({setup_err_code}):\n{setup_detail}",
-                )
-
-            _mark_stage("pipeline")
-            # 5. Chạy Pipeline xử lý video chính (`processing`)
-            if not _update(
-                55,
-                "Đang chạy lồng tiếng chuẩn V1 (Demucs tách âm, Whisper GPU, CapCut TTS, EBU R128)...",
-                state="processing",
-            ):
-                _raise_if_aborted()
-                raise _JobAborted("lease_lost", is_lease_lost=True)
-
-            pipeline_argv = [
-                "/content/.autodub_venv/bin/python"
-                if (preflight_info.get("env_manifest") or {}).get("isolated_runtime") else "python3",
-                "full_pipeline.py",
-                "--input",
-                input_arg,
-                "--voice",
-                voice_choice,
-            ]
-            job_opts = getattr(job, "options", None) or {}
-            if isinstance(job_opts, dict) and job_opts.get("allow_no_speech"):
-                pipeline_argv.append("--allow-no-speech")
-            env_vars = _build_pipeline_env_vars(gemini_key, extra_secrets)
-
-            highest_pipe_pct = [55]
-
-            def _on_remote_pipeline_progress(remote_pct: int, remote_msg: str) -> None:
-                clamped = max(highest_pipe_pct[0], min(84, int(remote_pct)))
-                highest_pipe_pct[0] = clamped
-                _update(clamped, remote_msg, state="processing")
-
-            if use_monitored_exec:
-                pipe_ok, pipe_output = self.adapter.run_argv_monitored(
-                    session_name,
-                    pipeline_argv,
-                    cwd="/content",
-                    env_vars=env_vars,
-                    timeout=DEFAULT_CONFIG["exec_timeout_seconds"],
-                    cancel_check=_cancel_probe,
-                    progress_callback=_on_remote_pipeline_progress,
-                    job_tag="pipeline",
-                )
-            else:
-                pipe_ok, pipe_output = _call_with_cancel(
-                    self.adapter.exec_argv,
-                    session_name,
-                    pipeline_argv,
-                    cwd="/content",
-                    env_vars=env_vars,
-                    timeout=DEFAULT_CONFIG["exec_timeout_seconds"],
-                    cancel_check=_cancel_probe,
-                )
-            _raise_if_aborted()
-            safe_pipe_output = redact_secrets(pipe_output, extra_secrets=extra_secrets)
-            logger.info("Pipeline Colab output:\n%s", safe_pipe_output)
-            if not pipe_ok:
-                pipe_err_code = _extract_pipeline_error_code(safe_pipe_output)
-                pipeline_result = _parse_pipeline_result(safe_pipe_output) or {}
-                pipeline_detail = str(pipeline_result.get("error") or safe_pipe_output[-2000:])
-                raise _OrchestratorStageError(
-                    pipe_err_code,
-                    f"Pipeline Colab thất bại ({pipe_err_code}):\n{pipeline_detail}",
-                )
-
-            _mark_stage("download")
-            # 6. Tải video thành phẩm và kết quả về vùng staging riêng theo job/attempt (`downloading`)
-            if not _update(
-                85,
-                "Đang tải video thành phẩm về máy tính...",
-                state="downloading",
-            ):
-                _raise_if_aborted()
-                raise _JobAborted("lease_lost", is_lease_lost=True)
-
-            job_res_dir = Path(DEFAULT_CONFIG["results_dir"]) / job_id
-            attempt_res_dir = job_res_dir / f"attempt_{session_attempt}"
-            attempt_res_dir.mkdir(parents=True, exist_ok=True)
-
-            _raise_if_aborted()
-            dl_ok, dl_path = _call_with_cancel(
-                self.adapter.download_file,
-                session_name,
-                "output_video.mp4",
-                attempt_res_dir,
-                cancel_check=_cancel_probe,
-            )
-            _raise_if_aborted()
-            if not dl_ok:
-                raise _OrchestratorStageError(
-                    CloudErrorCode.DOWNLOAD_FAILED.value,
-                    "Không tải được video thành phẩm từ Colab về.",
-                )
-
-            for remote_art in ("result_metadata.json", "subtitles.srt", "subtitles_vi.srt", "subtitles_vi.ass"):
-                if remote_art in _DOWNLOADABLE_REMOTE_ARTIFACTS:
-                    _call_with_cancel(
-                        self.adapter.download_file,
-                        session_name,
-                        remote_art,
-                        attempt_res_dir,
-                        cancel_check=_cancel_probe,
-                    )
-            _raise_if_aborted()
-
-            _mark_stage("validate")
-            # 7. Kiểm tra QC tại vùng staging & xuất thành phẩm atomic an toàn (`validating`)
-            _raise_if_aborted()
-            if not _update(
-                95,
-                "Đang kiểm tra QC và xuất video thành phẩm an toàn...",
-                state="validating",
-            ):
-                _raise_if_aborted()
-                raise _JobAborted("lease_lost", is_lease_lost=True)
-
-            dl_file = Path(dl_path)
-            _raise_if_aborted()
-            qc_res = self.validate_downloaded_output(
-                dl_file,
-                attempt_res_dir,
-                source_fingerprint=preflight_info.get("fingerprint"),
-                extra_secrets=extra_secrets,
-            )
-            _raise_if_aborted()
-
-            parked_warm = False
-            if (
-                session_may_exist
-                and not cleanup_done
-                and self._park_warm_session_on_success(session_name, gpu_type, source_job_id=job_id)
-            ):
-                parked_warm = True
-                cleanup_done = True
-                runtime_end_time = time.time()
-                _sync_runtime_usage(check_provider=False)
-                cleanup_result = {
-                    "verified_stopped": True,
-                    "cleanup_status": "verified",
-                    "attempts": 0,
-                    "error": None,
-                }
-                self.store.record_cleanup_result(
-                    job_id,
-                    raw_attempt,
-                    session_name,
-                    verified_stopped=True,
-                    cleanup_status="verified",
-                    attempts=0,
-                    error=None,
-                )
-                cleanup_res = dict(cleanup_result)
-            else:
-                cleanup_res = _finalize_session_once()
-            cu_spent = _estimate_elapsed_cu()
-            if not cleanup_res.get("verified_stopped"):
-                raise _OrchestratorStageError(CloudErrorCode.CLEANUP_FAILED.value,
-                                             cleanup_res.get("error") or "Cloud session cleanup is unverified.")
-            _raise_if_aborted()
-
-            from .cloud_config import _is_local_default_banve, get_cloud_output_dir
-
-            cloud_out_override = os.getenv("AUTODUB_CLOUD_OUTPUT_DIR", "").strip()
-            out_env_raw = os.getenv("AUTODUB_OUTPUT_DIR", "").strip()
-            pytest_default_cloud_leak = os.getenv("AUTODUB_CLOUD_TEST_OUTPUT_GUARD") == "1" and (
-                not cloud_out_override
-                or os.path.normcase(cloud_out_override.rstrip("\\/")) == os.path.normcase(r"D:\ToolV1_Cloud")
-            )
-            if pytest_default_cloud_leak:
-                if out_env_raw and not _is_local_default_banve(out_env_raw) and Path(out_env_raw).exists():
-                    final_out_dir = Path(out_env_raw)
-                else:
-                    final_out_dir = attempt_res_dir
-            elif cloud_out_override:
-                final_out_dir = get_cloud_output_dir()
-            elif out_env_raw and not _is_local_default_banve(out_env_raw):
-                final_out_dir = Path(out_env_raw) if Path(out_env_raw).exists() else attempt_res_dir
-            else:
-                default_cloud_dir = Path(r"D:\ToolV1_Cloud")
-                final_out_dir = default_cloud_dir if Path("D:/").exists() else attempt_res_dir
-            final_video_path = self.export_deliverable_atomic(
-                dl_file,
-                final_out_dir,
-                job_id=job_id,
-                attempt=session_attempt,
-                video_name=job.video_name or validated_input.display_name,
-                expected_sha256=qc_res["sha256"],
-            )
-            try:
-                if not is_url and source_snapshot:
-                    src_final = Path(validated_input.normalized_value)
-                    if not src_final.is_file() or src_final.stat().st_size != source_snapshot["size_bytes"]:
-                        raise _OrchestratorStageError(
-                            CloudErrorCode.VALIDATION_FAILED.value,
-                            "File video nguồn cục bộ không còn nguyên vẹn sau quá trình xử lý Cloud.",
-                        )
-
-                remote_meta = qc_res.get("remote_metadata") or {}
-                local_probe = qc_res.get("local_probe") or {}
-                output_manifest: Dict[str, Any] = {
-                    "schema_version": 1,
-                    "job_id": job_id,
-                    "attempt": session_attempt,
-                    "result_path": str(final_video_path),
-                    "staging_dir": str(attempt_res_dir),
-                    "sha256": qc_res["sha256"],
-                    "size_bytes": qc_res["size_bytes"],
-                    "duration_seconds": (
-                        local_probe.get("duration_seconds")
-                        or (remote_meta.get("output_video_probe") or {}).get("duration_seconds")
-                    ),
-                    "video_codec": (
-                        local_probe.get("video_codec")
-                        or (remote_meta.get("output_video_probe") or {}).get("video_codec")
-                    ),
-                    "audio_codec": (
-                        local_probe.get("audio_codec")
-                        or (remote_meta.get("output_video_probe") or {}).get("audio_codec")
-                    ),
-                    "qc_passed": True,
-                    "qc_report": qc_res["qc_report"],
-                    "remote_metadata": remote_meta,
-                    "setup_phase_seconds": setup_phase_seconds,
-                    "pipeline_step_seconds": remote_meta.get("step_timings_seconds") or {},
-                }
-                (attempt_res_dir / "output_manifest.json").write_text(
-                    redact_secrets(json.dumps(output_manifest, indent=2, ensure_ascii=False), extra_secrets=extra_secrets),
-                    encoding="utf-8",
-                )
-
-                _raise_if_aborted()
-            except Exception:
-                if parked_warm:
-                    self.release_warm_sessions(gpu_type)
-                if final_video_path != dl_file:
-                    try:
-                        Path(final_video_path).unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                raise
-
-            _mark_stage("cleanup")
-            # 8. Thu hồi & xác nhận session trước bước hoàn tất; tính lượng CU ước tính theo thời gian chạy
-            elapsed_sec = max(0.0, (runtime_end_time if runtime_end_time is not None else time.time()) - (runtime_start_time or start_time))
-            cu_spent = _estimate_elapsed_cu()
-            cleanup_res = _finalize_session_once()
-            cu_spent = _estimate_elapsed_cu()
-            final_cleanup_status = str(
-                cleanup_res.get("cleanup_status")
-                or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
-            )
-            _mark_stage(None)
-            output_manifest["stage_timings_seconds"] = dict(stage_timings)
-            output_manifest["cu_rate_per_hour"] = rate_per_hour
-            output_manifest["cu_measurement_source"] = _cu_measurement_source()
-            output_manifest["warm_idle_ledgered"] = warm_idle_ledgered
-            try:
-                (attempt_res_dir / "output_manifest.json").write_text(
-                    redact_secrets(json.dumps(output_manifest, indent=2, ensure_ascii=False), extra_secrets=extra_secrets),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
-
-            if not _update(
-                100,
-                f"Hoàn thành! Đã kiểm tra QC & lưu thành phẩm (~{cu_spent} CU ước tính).",
-                state="completed",
-                result_path=str(final_video_path),
-                cu_actual=cu_spent,
-                cleanup_status=final_cleanup_status,
-                measurement_source=_cu_measurement_source(),
-                output_manifest=output_manifest,
-            ):
-                _raise_if_aborted()
-                raise _JobAborted("lease_lost", is_lease_lost=True)
-
-            logger.info(
-                "=== HOÀN THÀNH CLOUD JOB %s trong %.1fs (Ước tính tiêu thụ ~%.3f CU) ===",
-                job_id,
-                elapsed_sec,
-                cu_spent,
-            )
-            return True
-
+            run._stage_upload()
+            run._stage_setup()
+            run._stage_pipeline()
+            run._stage_download()
+            run._stage_validate()
+            return run._stage_cleanup()
         except _JobAborted as abort_exc:
-            if abort_exc.is_lease_lost:
-                logger.warning(
-                    "Cloud Job %s (attempt=%d) mất quyền sở hữu (%s); dừng thực thi an toàn không ghi đè.",
-                    job_id,
-                    session_attempt,
-                    abort_exc.reason,
-                )
-                return False
-
-            cu_spent = _estimate_elapsed_cu()
-            if abort_exc.is_budget_exceeded:
-                logger.warning(
-                    "Cloud Job %s bị dừng sớm do ngân sách/số dư (%s); thu hồi session %s...",
-                    job_id,
-                    abort_exc.reason,
-                    session_name,
-                )
-                _update(
-                    0,
-                    "Đang dừng máy ảo Colab do chạm hạn mức chi phí...",
-                    state="cancelling",
-                    cu_actual=cu_spent,
-                    allow_from_cancel=True,
-                )
-                cleanup_res = _finalize_session_once()
-                cu_spent = _estimate_elapsed_cu()
-                err_code = (
-                    CloudErrorCode.BUDGET_UNCERTAIN.value
-                    if abort_exc.reason == "budget_uncertain"
-                    else CloudErrorCode.BUDGET_EXCEEDED.value
-                )
-                self.store.update_progress(
-                    job_id,
-                    state="failed",
-                    percent=0,
-                    step_name="Đã dừng do chạm hạn mức chi phí/số dư CU.",
-                    error=budget_abort_reason or "Đã chạm hạn mức chi phí CU khi đang xử lý.",
-                    error_code=err_code,
-                    cu_actual=cu_spent,
-                    cleanup_status=str(
-                        cleanup_res.get("cleanup_status")
-                        or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
-                    ),
-                    owner_id=effective_owner,
-                    attempt=ownership_attempt,
-                    allow_from_cancel=True,
-                    measurement_source=_cu_measurement_source(),
-                )
-                return False
-
-            logger.info("Cloud Job %s nhận yêu cầu hủy (%s), đang thu hồi session %s...", job_id, abort_exc.reason, session_name)
-            _update(
-                0,
-                "Đang dừng và xác nhận thu hồi máy ảo Colab...",
-                state="cancelling",
-                cu_actual=cu_spent,
-                allow_from_cancel=True,
-            )
-            cleanup_res = _finalize_session_once()
-            cu_spent = _estimate_elapsed_cu()
-            if cleanup_res.get("verified_stopped"):
-                self.store.update_progress(
-                    job_id,
-                    state="cancelled",
-                    percent=0,
-                    step_name="Đã dừng theo yêu cầu người dùng.",
-                    error="Đã dừng bởi người dùng.",
-                    error_code=CloudErrorCode.CANCELLED_BY_USER.value,
-                    cu_actual=cu_spent,
-                    cleanup_status="verified",
-                    owner_id=effective_owner,
-                    attempt=ownership_attempt,
-                    allow_from_cancel=True,
-                    measurement_source=_cu_measurement_source(),
-                )
-            else:
-                self.store.update_progress(
-                    job_id,
-                    state="cancelling",
-                    percent=0,
-                    step_name="Chưa xác nhận dừng máy ảo Colab; cần dọn dẹp lại.",
-                    error=cleanup_res.get("error") or "Chưa xác nhận dừng session Colab.",
-                    error_code=CloudErrorCode.CLEANUP_FAILED.value,
-                    cu_actual=cu_spent,
-                    cleanup_status=str(cleanup_res.get("cleanup_status") or "failed_retry_needed"),
-                    owner_id=effective_owner,
-                    attempt=ownership_attempt,
-                    allow_from_cancel=True,
-                    measurement_source=_cu_measurement_source(),
-                )
-            return False
-
+            return run._handle_job_aborted(abort_exc)
         except Exception as exc:
-            # Nếu trong lúc step fail mà job vừa có yêu cầu hủy hoặc mất lease thì ưu tiên nhánh đó
-            cu_spent = _estimate_elapsed_cu()
-            aborted_now, abort_reason = _check_abort()
-            if aborted_now:
-                if abort_reason in _LEASE_LOST_REASONS:
-                    logger.warning("Job %s mất lease sau lỗi bước (%s); không ghi đè trạng thái.", job_id, abort_reason)
-                    return False
-                _update(
-                    0,
-                    "Đang dừng và xác nhận thu hồi máy ảo Colab...",
-                    state="cancelling",
-                    cu_actual=cu_spent,
-                    allow_from_cancel=True,
-                )
-                cleanup_res = _finalize_session_once()
-                cu_spent = _estimate_elapsed_cu()
-                if cleanup_res.get("verified_stopped"):
-                    self.store.update_progress(
-                        job_id,
-                        state="cancelled",
-                        percent=0,
-                        step_name="Đã dừng theo yêu cầu người dùng.",
-                        error="Đã dừng bởi người dùng.",
-                        error_code=CloudErrorCode.CANCELLED_BY_USER.value,
-                        cu_actual=cu_spent,
-                        cleanup_status="verified",
-                        owner_id=effective_owner,
-                        attempt=ownership_attempt,
-                        allow_from_cancel=True,
-                        measurement_source=_cu_measurement_source(),
-                    )
-                return False
-
-            cleanup_res = _finalize_session_once()
-            cu_spent = _estimate_elapsed_cu()
-            safe_exc = redact_secrets(str(exc), extra_secrets=extra_secrets)
-            exc_error_code = (
-                exc.error_code
-                if isinstance(exc, _OrchestratorStageError) and exc.error_code in _VALID_ERROR_CODES
-                else CloudErrorCode.EXEC_FAILED.value
-            )
-            logger.error("Lỗi trong quá trình xử lý Cloud Job %s [%s]: %s", job_id, exc_error_code, safe_exc)
-            _update(
-                0,
-                f"Lỗi: {safe_exc[:120]}",
-                state="failed",
-                error=safe_exc,
-                error_code=exc_error_code,
-                cu_actual=cu_spent,
-                cleanup_status=str(
-                    cleanup_res.get("cleanup_status")
-                    or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
-                ),
-                measurement_source=_cu_measurement_source(),
-            )
-            return False
-
+            return run._handle_job_exception(exc)
         finally:
-            if session_may_exist and not cleanup_done:
+            if run.session_may_exist and not run.cleanup_done:
                 try:
-                    _finalize_session_once()
+                    run._finalize_session_once()
                 except Exception as stop_exc:
                     logger.warning(
                         "Lỗi thu hồi session %s: %s",
-                        session_name,
-                        redact_secrets(str(stop_exc), extra_secrets=extra_secrets),
+                        run.session_name,
+                        redact_secrets(str(stop_exc), extra_secrets=run.extra_secrets),
                     )
-            _mark_stage(None)
+            run._mark_stage(None)
             logger.info(
                 "CLOUD_STAGE_TIMINGS job=%s %s",
-                job_id,
+                run.job_id,
                 json.dumps(
-                    {"stages": stage_timings, "cu_rate_per_hour": rate_per_hour, "measurement_source": _cu_measurement_source()},
+                    {
+                        "stages": run.stage_timings,
+                        "cu_rate_per_hour": run.rate_per_hour,
+                        "measurement_source": run._cu_measurement_source(),
+                    },
                     ensure_ascii=False,
                 ),
             )
