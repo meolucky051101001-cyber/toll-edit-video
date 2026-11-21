@@ -20,7 +20,7 @@ import time
 import logging
 import delivery_ledger
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 

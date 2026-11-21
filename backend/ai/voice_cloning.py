@@ -2,6 +2,7 @@ import os
 import asyncio
 import re
 import random
+import subprocess
 import threading
 import logging
 import edge_tts
