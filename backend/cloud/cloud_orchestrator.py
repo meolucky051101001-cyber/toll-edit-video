@@ -961,6 +961,22 @@ class _JobRun:
 
         return True
 
+    def _provider_confirms_session_absent(self) -> bool:
+        status_fn = getattr(self.orchestrator.adapter, "get_sessions_status", None)
+        if not callable(status_fn):
+            return False
+        try:
+            status = status_fn()
+        except Exception:
+            return False
+        if not isinstance(status, dict) or not status.get("ok"):
+            return False
+        return not any(
+            str(item.get("name") or "") == self.session_name
+            for item in (status.get("sessions") or [])
+            if isinstance(item, dict)
+        )
+
     def _stage_provision(self):
         self._mark_stage("provisioning")
         # 2. Đăng ký ownership session & khởi tạo (hoặc tái sử dụng máy giữ ấm) Session Colab (`provisioning`)
@@ -1018,12 +1034,13 @@ class _JobRun:
             self._raise_if_aborted()
             raise _JobAborted("lease_lost", is_lease_lost=True)
 
-        self.runtime_start_time = time.time()
         if self.reused_warm_session:
             self.session_may_exist = True
+            self.runtime_start_time = time.time()
             created, msg = True, f"reused warm session {self.session_name}"
         else:
             self.session_may_exist = True
+            self.runtime_start_time = time.time()
             created, msg = _call_with_cancel(
                 self.orchestrator.adapter.create_session,
                 self.session_name,
@@ -1032,6 +1049,45 @@ class _JobRun:
             )
 
         self.provider_rate_eligible = bool(created)
+        if not created:
+            provision_error = str(msg).lower()
+            if (
+                re.search(r"\b(?:503|412)\b", provision_error)
+                or any(token in provision_error for token in ("hết máy", "no gpu available", "no capacity", "quota"))
+            ):
+                err_code = CloudErrorCode.PROVIDER_503.value
+            elif "backend rejected accelerator" in provision_error:
+                err_code = CloudErrorCode.GPU_ALLOCATION_REFUSED.value
+            else:
+                err_code = CloudErrorCode.SESSION_CREATE_FAILED.value
+            if (
+                err_code
+                in {
+                    CloudErrorCode.PROVIDER_503.value,
+                    CloudErrorCode.GPU_ALLOCATION_REFUSED.value,
+                }
+                and self._provider_confirms_session_absent()
+            ):
+                self.session_may_exist = False
+                self.runtime_start_time = None
+                self.runtime_end_time = None
+                self.cu_accrued = 0.0
+                self.cu_accrual_ts = None
+                self.provider_rate_eligible = False
+                self.orchestrator.store.record_cleanup_result(
+                    self.job_id,
+                    self.raw_attempt,
+                    self.session_name,
+                    verified_stopped=True,
+                    cleanup_status="verified",
+                    attempts=0,
+                    error=None,
+                )
+            error = (
+                f"Chưa xác nhận kết quả cấp GPU: {msg}"
+                if self.is_gpu_check and err_code == CloudErrorCode.SESSION_CREATE_FAILED.value
+                else f"Không thể tạo máy Colab: {msg}"
+            )
         # Đóng race hủy trong lúc create_session: nếu hủy trong/sau khi tạo thì thu hồi ngay, không upload/chạy pipeline.
         aborted_after_create, abort_reason = self._check_abort()
         if aborted_after_create:
@@ -1040,20 +1096,7 @@ class _JobRun:
                 is_lease_lost=(abort_reason in _LEASE_LOST_REASONS),
                 is_budget_exceeded=(abort_reason in ("budget_exceeded", "budget_uncertain")),
             )
-
         if not created:
-            provision_error = str(msg).lower()
-            if re.search(r"\b(?:503|412)\b", provision_error) or "hết máy" in provision_error:
-                err_code = CloudErrorCode.PROVIDER_503.value
-            elif "backend rejected accelerator" in provision_error:
-                err_code = CloudErrorCode.GPU_ALLOCATION_REFUSED.value
-            else:
-                err_code = CloudErrorCode.SESSION_CREATE_FAILED.value
-            error = (
-                f"Chưa xác nhận kết quả cấp GPU: {msg}"
-                if self.is_gpu_check and err_code == CloudErrorCode.SESSION_CREATE_FAILED.value
-                else f"Không thể tạo máy Colab: {msg}"
-            )
             raise _OrchestratorStageError(err_code, error)
 
         return True
@@ -2537,7 +2580,7 @@ class CloudOrchestrator:
                 still_present = any(
                     str(item.get("name")) == session_name for item in (st.get("sessions") or [])
                 )
-                if stop_ok and not still_present:
+                if not still_present:
                     return {
                         "verified_stopped": True,
                         "cleanup_status": "verified",

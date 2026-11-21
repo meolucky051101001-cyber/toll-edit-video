@@ -117,8 +117,8 @@ def test_dashboard_rejects_video_jobs_without_cuda(dashboard, accelerator):
     [
         ("success", None, True),
         ("wrong_gpu", "ENV_GPU_MISMATCH", True),
-        ("refused", "GPU_ALLOCATION_REFUSED", True),
-        ("no_capacity", "PROVIDER_503", True),
+        ("refused", "GPU_ALLOCATION_REFUSED", False),
+        ("no_capacity", "PROVIDER_503", False),
         ("cleanup_uncertain", "CLEANUP_FAILED", False),
     ],
 )
@@ -158,6 +158,13 @@ def test_gpu_check_uses_no_video_and_verifies_teardown(tmp_path, scenario, error
     assert adapter.sessions_stopped == ([saved.session_name] if stopped else [])
     assert not store.list_warm_sessions()
     assert store.get_cu_budget_info()["unreconciled_count"] == int(scenario == "cleanup_uncertain")
+    if scenario in {"refused", "no_capacity"}:
+        assert saved.cleanup_status == "verified"
+        assert saved.cu_actual == 0.0
+        ledger = store.list_cost_ledger(job_id=job.job_id)
+        assert ledger and ledger[0]["cu_observed"] == 0.0
+        next_job = store.enqueue("", video_name="next", gpu_type="L4")
+        assert store.claim_job(next_job.job_id, "next-job") is not None
 
 
 def test_gpu_check_accepts_provider_hardware_while_kernel_is_booting(tmp_path):

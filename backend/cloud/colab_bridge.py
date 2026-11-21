@@ -1615,7 +1615,7 @@ def verify_session_stopped(
         if status.get("ok"):
             sessions = status.get("sessions") or []
             still_present = any(str(item.get("name")) == safe_session for item in sessions)
-            if stop_ok and not still_present:
+            if not still_present:
                 return {
                     "verified_stopped": True,
                     "cleanup_status": "verified",

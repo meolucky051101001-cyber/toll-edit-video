@@ -372,6 +372,33 @@ def test_scoped_stop_session_never_calls_global_orphan_wipe():
     assert all("cjob2222a1" not in cmd for cmd in called_cmds)
 
 
+def test_stop_verification_accepts_provider_absence_after_stop_failure(monkeypatch):
+    stop_calls: list[str] = []
+
+    def fail_stop(session_name):
+        stop_calls.append(session_name)
+        return False, "provider stop timed out"
+
+    monkeypatch.setattr(colab_bridge, "stop_session", fail_stop)
+    monkeypatch.setattr(
+        colab_bridge,
+        "get_sessions_status",
+        lambda: {"ok": True, "sessions": []},
+    )
+
+    result = colab_bridge.verify_session_stopped(
+        "cjob1111a1",
+        max_retries=2,
+        retry_delay=0.01,
+    )
+
+    assert stop_calls == ["cjob1111a1"]
+    assert result["verified_stopped"] is True
+    assert result["cleanup_status"] == "verified"
+    assert result["attempts"] == 1
+    assert result["error"] is None
+
+
 def test_stop_verification_recognizes_real_colab_alias_format(monkeypatch):
     output = "[cjob27e4e9f3a1] gpu-t4-s-ass1a0-1r7rpvcy7pcp3 | Hardware: T4 | Shape: Standard | Variant: GPU"
     monkeypatch.setattr(colab_bridge, "stop_session", lambda _name: (True, "stop accepted"))
