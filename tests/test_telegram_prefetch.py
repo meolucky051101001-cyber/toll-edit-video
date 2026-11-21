@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,6 +91,53 @@ class TelegramPrefetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         download.assert_awaited_once()
         self.assertFalse(download.await_args.kwargs["reload_downloader"])
+
+    async def test_prefetch_finishing_after_prepare_is_reused_without_duplicate_download(self):
+        job = self.make_job()
+        await self.queue.put(job)
+        source = self.root / "downloads" / "job-1.mp4"
+        download_started = threading.Event()
+        finish_download = threading.Event()
+        downloads = []
+
+        def blocking_download(_url, output_dir, job_id):
+            downloads.append(job_id)
+            download_started.set()
+            finish_download.wait(timeout=3)
+            path = Path(output_dir) / f"{job_id}.mp4"
+            path.write_bytes(b"prefetched video")
+            return True, str(path), "Title", None
+
+        prepared = asyncio.Event()
+
+        def prepare(item):
+            item["resume_state"] = dict(item.get("resume_state") or {})
+            prepared.set()
+            return item
+
+        with patch.dict("sys.modules", {
+            "social_downloader": SimpleNamespace(download_social_video=blocking_download)
+        }), patch.object(bot, "prepare_telegram_job", side_effect=prepare), \
+             patch("pipeline_v2.download_validation.probe_downloaded_video"), \
+             patch("v1_checkpoint.fingerprint", return_value="source-hash"), \
+             patch.object(bot, "run_pipeline_v1_for_telegram", AsyncMock(return_value={
+                 "status": "success",
+                 "final_video": str(self.root / "output" / "Dubbed_job-1.mp4"),
+                 "tracker_finalized": True,
+             })), \
+             patch.object(bot.job_tracker, "start_video"), \
+             patch.object(bot, "safe_edit_status", AsyncMock()):
+            task = bot._schedule_next_download_prefetch()
+            await asyncio.wait_for(asyncio.to_thread(download_started.wait, 2), timeout=3)
+            worker = asyncio.create_task(bot._process_telegram_job(job))
+            await prepared.wait()
+            finish_download.set()
+            result = await worker
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(downloads, ["job-1"])
+        self.assertEqual(job["resume_state"]["source_path"], str(source))
+        self.assertEqual(job["resume_state"]["title"], "Title")
 
     async def test_prefetch_depth_limits_which_waiting_jobs_are_considered(self):
         cloud_job = self.make_job("cloud", execution_mode="cloud")

@@ -1809,9 +1809,9 @@ async def _download_job_source(job, status_msg=None, *, reload_downloader=True) 
     from pipeline_v2.download_validation import probe_downloaded_video
     from v1_checkpoint import fingerprint
 
-    state = job["resume_state"]
     download_dir = Path(WORKSPACE) / "downloads"
     download_dir.mkdir(parents=True, exist_ok=True)
+    title = None
     if job["type"] == "url":
         import importlib
         import social_downloader
