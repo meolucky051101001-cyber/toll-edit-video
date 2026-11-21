@@ -124,6 +124,7 @@ FPT_API_KEY = configured_secret("FPT_API_KEY")
 
 # Import các module xử lý từ backend
 sys.path.insert(0, os.path.dirname(__file__))
+from telegram_access import install_access_gate, load_allowed_chat_ids
 import job_tracker
 from config.paths import is_downloader_save_dir
 from pipeline_v2.atomic_io import atomic_copy_file, atomic_write_json
@@ -354,6 +355,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/stop` - Dừng khẩn cấp toàn bộ tác vụ"
     )
     await update.message.reply_text(welcome, parse_mode="Markdown")
+
+
+async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = getattr(update, "effective_chat", None)
+    message = getattr(update, "effective_message", None)
+    if message is not None:
+        await message.reply_text(f"Chat ID của bạn: {getattr(chat, 'id', None)}")
 
 
 # ===== LỆNH /sub_tts (Opt-in: OCR sub tiếng Trung trên hình -> TTS) =====
@@ -2218,6 +2226,7 @@ def main():
             )
             global GLOBAL_BOT_APP
             GLOBAL_BOT_APP = app
+            install_access_gate(app, load_allowed_chat_ids(), bot_name="v1")
 
             async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
                 from telegram.error import NetworkError, TimedOut, RetryAfter
@@ -2233,6 +2242,7 @@ def main():
 
             # Đăng ký handlers
             app.add_error_handler(telegram_error_handler)
+            app.add_handler(CommandHandler("chatid", cmd_chatid))
             app.add_handler(CommandHandler("start", cmd_start))
             app.add_handler(CommandHandler("stop", cmd_stop))
             app.add_handler(CommandHandler("status", cmd_status))

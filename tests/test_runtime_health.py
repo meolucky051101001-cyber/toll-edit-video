@@ -125,10 +125,11 @@ class ReadOnlyPreflightTests(unittest.TestCase):
                 self.assertEqual(preflight._directory_check("missing", root / "absent", read_only=True)["status"], "error")
             self.assertFalse((root / "absent").exists())
 
-    def test_read_only_preflight_still_requires_all_25_checks(self):
+    def test_read_only_preflight_still_requires_all_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            env = {"PIPELINE_MODE": "legacy", "BOT_TOKEN": "fixture", "GEMINI_API_KEY": "fixture",
+            env = {"PIPELINE_MODE": "legacy", "BOT_TOKEN": "fixture", "TELEGRAM_ALLOWED_CHAT_IDS": "1",
+                   "GEMINI_API_KEY": "fixture",
                    "AUTODUB_WORKSPACE": str(root), "AUTODUB_OUTPUT_DIR": str(root)}
             with patch.object(preflight, "_load_env", return_value=env), \
                  patch.object(preflight.importlib.util, "find_spec", return_value=object()), \
@@ -138,7 +139,7 @@ class ReadOnlyPreflightTests(unittest.TestCase):
                  patch.object(preflight.tempfile, "mkstemp", side_effect=AssertionError("write")):
                 result = preflight.run_preflight(root, "all", read_only=True)
             self.assertIs(result["ready"], True)
-            self.assertEqual(len(result["checks"]), 25)
+            self.assertEqual(len(result["checks"]), 26)
             self.assertTrue(all(check["status"] == "pass" for check in result["checks"]))
 
     def test_ocr_timeout_is_incomplete_in_bounded_mode_and_fallback_otherwise(self):
