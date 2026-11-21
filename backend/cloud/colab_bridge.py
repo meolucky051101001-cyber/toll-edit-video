@@ -1101,6 +1101,7 @@ def run_argv_monitored(
     progress_callback: Optional[Callable[[int, str], None]] = None,
     job_tag: str = "pipeline",
     poll_interval_seconds: float = 5.0,
+    max_poll_interval_seconds: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """
     Launch `argv` detached on the Colab VM and poll short-lived status/progress snapshots.
@@ -1228,7 +1229,14 @@ def run_argv_monitored(
         consecutive_poll_failures = 0
         max_consecutive_failures = 15
         last_progress_sig: Optional[Tuple[int, str]] = None
-        poll_sleep = max(0.5, float(poll_interval_seconds))
+        base_poll_sleep = max(0.5, float(poll_interval_seconds))
+        configured_max_poll = (
+            DEFAULT_CONFIG.get("cloud_poll_max_interval_seconds", 30)
+            if max_poll_interval_seconds is None
+            else max_poll_interval_seconds
+        )
+        max_poll_sleep = max(base_poll_sleep, float(configured_max_poll))
+        poll_sleep = base_poll_sleep
 
         while time.monotonic() < overall_deadline:
             if _wait_interruptible(poll_sleep, session_name=safe_session, cancel_check=cancel_check):
@@ -1260,6 +1268,7 @@ def run_argv_monitored(
 
             if poll_payload is None:
                 consecutive_poll_failures += 1
+                poll_sleep = base_poll_sleep
                 err_snip = redact_secrets(f"{out_p}\n{err_p}".strip(), extra_secrets=secret_values)
                 logger.warning(
                     "Poll %s trên %s tạm gián đoạn (lần %d/%d): %s",
@@ -1278,16 +1287,22 @@ def run_argv_monitored(
 
             consecutive_poll_failures = 0
             prog = poll_payload.get("progress")
-            if isinstance(prog, dict) and progress_callback is not None:
+            progress_sig: Optional[Tuple[int, str]] = None
+            if isinstance(prog, dict):
                 try:
                     p_pct = int(prog.get("percent") or 0)
                     p_msg = redact_secrets(str(prog.get("message") or "").strip(), extra_secrets=secret_values)
-                    sig = (p_pct, p_msg)
-                    if p_pct > 0 and p_msg and sig != last_progress_sig:
-                        last_progress_sig = sig
-                        progress_callback(p_pct, p_msg)
+                    if p_pct > 0 and p_msg:
+                        progress_sig = (p_pct, p_msg)
                 except Exception:
                     pass
+            if progress_sig != last_progress_sig:
+                last_progress_sig = progress_sig
+                poll_sleep = base_poll_sleep
+                if progress_sig is not None and progress_callback is not None:
+                    progress_callback(*progress_sig)
+            else:
+                poll_sleep = min(max_poll_sleep, poll_sleep * 1.5)
 
             if poll_payload.get("done"):
                 remote_rc = int(poll_payload.get("returncode") if poll_payload.get("returncode") is not None else 1)
@@ -1563,6 +1578,7 @@ class ColabProviderAdapter:
         progress_callback: Optional[Callable[[int, str], None]] = None,
         job_tag: str = "pipeline",
         poll_interval_seconds: float = 5.0,
+        max_poll_interval_seconds: Optional[float] = None,
     ) -> Tuple[bool, str]:
         return run_argv_monitored(
             session_name,
@@ -1574,6 +1590,7 @@ class ColabProviderAdapter:
             progress_callback=progress_callback,
             job_tag=job_tag,
             poll_interval_seconds=poll_interval_seconds,
+            max_poll_interval_seconds=max_poll_interval_seconds,
         )
 
     def exec_script(

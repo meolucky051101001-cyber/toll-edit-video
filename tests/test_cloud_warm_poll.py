@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import json
+import threading
 import time
 from pathlib import Path
 
@@ -38,7 +40,7 @@ def test_warm_session_keepalive_is_parked_and_clamped(
         store=store,
         adapter=_WarmAdapter(),
         enable_warm_session_reuse=True,
-)
+    )
 
     assert orchestrator._park_warm_session_on_success("warm-session", "T4") is True
     parked = store.list_warm_sessions()[0]
@@ -59,3 +61,167 @@ def test_list_warm_sessions_includes_idle_seconds_and_cu_estimate(tmp_path: Path
     assert warm["cu_rate_per_hour"] == pytest.approx(1.15)
     assert warm["idle_cu_estimate"] == pytest.approx(0.575)
     assert warm["expires_in_seconds"] == pytest.approx(1800)
+
+
+def _run_monitored_with_poll_payloads(monkeypatch: pytest.MonkeyPatch, payloads: list[dict], *, max_poll: float):
+    from backend.cloud import colab_bridge
+
+    waits: list[float] = []
+    monkeypatch.setattr(colab_bridge, "_write_wsl_temp_script", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(colab_bridge, "_remove_wsl_temp_file", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(colab_bridge, "_wait_interruptible", lambda seconds, **_kwargs: waits.append(seconds) or False)
+
+    def fake_run(colab_args, **_kwargs):
+        args = list(colab_args)
+        script_path = args[args.index("-f") + 1]
+        if "colab_launch_" in script_path:
+            return 0, 'AUTODUB_LAUNCH_JSON:{"launched": true, "sup_pid": 4321}', ""
+        payload = payloads.pop(0)
+        return 0, "AUTODUB_POLL_JSON:" + json.dumps(payload), ""
+
+    monkeypatch.setattr(colab_bridge, "_run_wsl_colab_argv", fake_run)
+    result = colab_bridge.run_argv_monitored(
+        "cjobwarmtest",
+        ["python3", "pipeline.py"],
+        timeout=120,
+        poll_interval_seconds=5,
+        max_poll_interval_seconds=max_poll,
+    )
+    return result, waits
+
+
+def test_adaptive_polling_grows_for_unchanged_progress_and_caps(monkeypatch: pytest.MonkeyPatch):
+    payloads = [
+        {"done": False, "progress": None},
+        {"done": False, "progress": None},
+        {"done": False, "progress": None},
+        {"done": False, "progress": None},
+        {"done": True, "returncode": 0, "log_tail": "ok"},
+    ]
+
+    (ok, output), waits = _run_monitored_with_poll_payloads(monkeypatch, payloads, max_poll=12)
+
+    assert ok is True
+    assert output == "ok"
+    assert waits == pytest.approx([5, 7.5, 11.25, 12, 12])
+
+
+def test_adaptive_polling_resets_when_progress_changes(monkeypatch: pytest.MonkeyPatch):
+    payloads = [
+        {"done": False, "progress": {"percent": 10, "message": "step one"}},
+        {"done": False, "progress": {"percent": 10, "message": "step one"}},
+        {"done": False, "progress": {"percent": 20, "message": "step two"}},
+        {"done": False, "progress": {"percent": 20, "message": "step two"}},
+        {"done": True, "returncode": 0, "log_tail": "ok"},
+    ]
+
+    (ok, _output), waits = _run_monitored_with_poll_payloads(monkeypatch, payloads, max_poll=30)
+
+    assert ok is True
+    assert waits == pytest.approx([5, 5, 7.5, 5, 7.5])
+
+
+class _UploadRetryAdapter:
+    pass
+
+
+def _run_upload_retry_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter,
+    *,
+    cancel_event: threading.Event | None = None,
+):
+    from tests.test_cloud_phase5_quality_export import (
+        _Phase5Adapter,
+        _enqueue_and_claim,
+        _make_sample_video,
+    )
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestSecretKey_1234567890")
+    monkeypatch.setenv("AUTODUB_OUTPUT_DIR", str(tmp_path / "deliverables"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "results"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "cloud_upload_retry_delays_seconds", [0, 0])
+    source = _make_sample_video(tmp_path / "input", "upload_retry.mp4")
+    store = CloudJobStore(db_path=tmp_path / "upload-retry.db", rollout_controlled=False)
+    orchestrator = CloudOrchestrator(store=store, adapter=adapter, allowed_roots=[tmp_path])
+    job = _enqueue_and_claim(store, source)
+    result = orchestrator.process_job(job, owner_id="w1", cancel_event=cancel_event)
+    return result, store.get_job(job.job_id), _Phase5Adapter
+
+
+def test_upload_retries_twice_then_job_proceeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from tests.test_cloud_phase5_quality_export import _Phase5Adapter
+
+    class RetryAdapter(_Phase5Adapter):
+        def __init__(self):
+            super().__init__()
+            self.upload_attempts = 0
+
+        def upload_file(self, session_name, local_path, remote_filename=None):
+            self.upload_attempts += 1
+            if self.upload_attempts <= 2:
+                return False, "temporary upload failure"
+            return super().upload_file(session_name, local_path, remote_filename)
+
+    adapter = RetryAdapter()
+    result, saved, _ = _run_upload_retry_job(tmp_path, monkeypatch, adapter)
+
+    assert result is True
+    assert saved is not None and saved.state == "completed"
+    assert adapter.upload_attempts == 4
+
+
+def test_upload_retries_exhaust_with_existing_upload_error_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from backend.cloud.cloud_contract import CloudErrorCode
+    from tests.test_cloud_phase5_quality_export import _Phase5Adapter
+
+    class RetryAdapter(_Phase5Adapter):
+        def __init__(self):
+            super().__init__()
+            self.upload_attempts = 0
+
+        def upload_file(self, session_name, local_path, remote_filename=None):
+            self.upload_attempts += 1
+            return False, "temporary upload failure"
+
+    adapter = RetryAdapter()
+    result, saved, _ = _run_upload_retry_job(tmp_path, monkeypatch, adapter)
+
+    assert result is False
+    assert saved is not None and saved.state == "failed"
+    assert saved.error_code == CloudErrorCode.UPLOAD_FAILED.value
+    assert adapter.upload_attempts == 3
+
+
+def test_cancel_during_upload_retry_prevents_another_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from backend.cloud import cloud_orchestrator
+    from tests.test_cloud_phase5_quality_export import _Phase5Adapter
+
+    class RetryAdapter(_Phase5Adapter):
+        def __init__(self):
+            super().__init__()
+            self.upload_attempts = 0
+
+        def upload_file(self, session_name, local_path, remote_filename=None):
+            self.upload_attempts += 1
+            return False, "temporary upload failure"
+
+    cancel_event = threading.Event()
+
+    def cancel_retry(_seconds, **_kwargs):
+        cancel_event.set()
+        return True
+
+    monkeypatch.setattr(cloud_orchestrator, "_wait_interruptible", cancel_retry)
+    adapter = RetryAdapter()
+    result, saved, _ = _run_upload_retry_job(
+        tmp_path,
+        monkeypatch,
+        adapter,
+        cancel_event=cancel_event,
+    )
+
+    assert result is False
+    assert saved is not None and saved.state == "cancelled"
+    assert adapter.upload_attempts == 1

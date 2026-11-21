@@ -46,7 +46,7 @@ from .cloud_security import (
     validate_video_input,
     validate_voice,
 )
-from .colab_bridge import ColabProviderAdapter
+from .colab_bridge import ColabProviderAdapter, _is_session_aborted, _wait_interruptible
 
 logger = logging.getLogger("cloud.orchestrator")
 
@@ -1489,6 +1489,41 @@ class CloudOrchestrator:
                     is_budget_exceeded=is_budget,
                 )
 
+        def _upload_with_retry(local_path: str | Path, remote_filename: str) -> Tuple[bool, str]:
+            retry_delays = DEFAULT_CONFIG.get("cloud_upload_retry_delays_seconds", [5, 15])
+            try:
+                delays = [max(0.0, float(delay)) for delay in retry_delays][:2]
+            except (TypeError, ValueError):
+                delays = [5.0, 15.0]
+            for attempt_idx in range(len(delays) + 1):
+                _raise_if_aborted()
+                if _is_session_aborted(session_name):
+                    raise _JobAborted("cancel_event")
+                up_ok, up_msg = _call_with_cancel(
+                    self.adapter.upload_file,
+                    session_name,
+                    local_path,
+                    remote_filename,
+                    cancel_check=_cancel_probe,
+                )
+                _raise_if_aborted()
+                if up_ok:
+                    return True, up_msg
+                failure = str(up_msg or "").lower()
+                if (
+                    attempt_idx >= len(delays)
+                    or _is_session_aborted(session_name)
+                    or any(token in failure for token in ("cancel", "abort", "hủy", "huy"))
+                ):
+                    return False, up_msg
+                if _wait_interruptible(
+                    delays[attempt_idx],
+                    session_name=session_name,
+                    cancel_check=_cancel_probe,
+                ):
+                    raise _JobAborted("cancel_event")
+            return False, up_msg
+
         def _update(percent: int, step_name: str, **kwargs) -> bool:
             safe_step = redact_secrets(step_name, extra_secrets=extra_secrets)
             if "error" in kwargs and kwargs["error"] is not None:
@@ -1857,13 +1892,7 @@ class CloudOrchestrator:
                     tar.addfile(manifest_tarinfo, io.BytesIO(bundle_manifest_bytes))
 
                 _raise_if_aborted()
-                up_ok, up_msg = _call_with_cancel(
-                    self.adapter.upload_file,
-                    session_name,
-                    bundle_path,
-                    "cloud_bundle.tar.gz",
-                    cancel_check=_cancel_probe,
-                )
+                up_ok, up_msg = _upload_with_retry(bundle_path, "cloud_bundle.tar.gz")
                 _raise_if_aborted()
                 if not up_ok:
                     raise _OrchestratorStageError(
@@ -1888,13 +1917,7 @@ class CloudOrchestrator:
                 )
                 remote_video_name = sanitize_remote_filename(validated_input.display_name)
                 _raise_if_aborted()
-                v_ok, v_msg = _call_with_cancel(
-                    self.adapter.upload_file,
-                    session_name,
-                    validated_input.normalized_value,
-                    remote_video_name,
-                    cancel_check=_cancel_probe,
-                )
+                v_ok, v_msg = _upload_with_retry(validated_input.normalized_value, remote_video_name)
                 _raise_if_aborted()
                 if not v_ok:
                     raise _OrchestratorStageError(
