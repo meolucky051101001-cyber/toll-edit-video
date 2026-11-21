@@ -209,6 +209,47 @@ def test_setup_cache_restores_matching_sha256(tmp_path: Path, monkeypatch: pytes
     assert (roformer / "roformer.ckpt").read_bytes() == b"model"
 
 
+def test_cache_restore_keeps_real_symlink_venv_runnable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _use_temp_model_homes(monkeypatch, tmp_path)
+    workdir, _manifest_path = _prepare_setup_workdir(tmp_path)
+    runtime = workdir / ".autodub_venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--symlinks", str(runtime)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    runtime_python = runtime / "bin" / "python"
+    assert runtime_python.is_symlink()
+    base_interpreter = runtime_python.resolve()
+
+    python_install = workdir / ".autodub_python"
+    python_install.mkdir()
+    (python_install / "interpreter-marker").write_text("python", encoding="utf-8")
+    cache_root = tmp_path / "drive"
+    cache_key = "e" * 64
+
+    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir) == "saved"
+    shutil.rmtree(runtime)
+
+    assert setup_env._restore_cloud_cache(cache_root, cache_key, workdir) == "restored"
+    assert runtime_python.is_symlink()
+    assert runtime_python.resolve() == base_interpreter
+    assert (python_install / "interpreter-marker").read_text(encoding="utf-8") == "python"
+    result = subprocess.run(
+        [str(runtime_python), "-c", "import sys; print(sys.prefix)"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.stdout.strip() == str(runtime)
+
+
 def test_cache_sha_mismatch_is_invalid_and_setup_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -745,6 +786,7 @@ def test_cache_anchors_exclude_pip_and_hf_credentials(tmp_path: Path, monkeypatc
     anchors = setup_env._cloud_cache_anchor_paths(workdir)
 
     assert anchors["runtime"] == (workdir / ".autodub_venv").absolute()
+    assert anchors["python_install"] == (workdir / ".autodub_python").absolute()
     assert anchors["roformer"] == (workdir / "model_cache").absolute()
     assert anchors["whisper"] == (home / ".cache" / "whisper").absolute()
     assert anchors["demucs"] == (home / ".cache" / "torch" / "hub" / "checkpoints").absolute()

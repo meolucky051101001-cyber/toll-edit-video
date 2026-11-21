@@ -92,6 +92,7 @@ def _cloud_cache_anchor_paths(workdir: Path) -> Dict[str, Path]:
     huggingface_home = Path(huggingface_home_raw).expanduser()
     return {
         "runtime": (workdir / ".autodub_venv").absolute(),
+        "python_install": (workdir / ".autodub_python").absolute(),
         "roformer": (workdir / "model_cache").absolute(),
         "whisper": (home / ".cache" / "whisper").absolute(),
         "demucs": (torch_home / "hub" / "checkpoints").absolute(),
@@ -184,17 +185,21 @@ def _validate_cache_archive_members(
                 if posixpath.isabs(linkname)
                 else posixpath.normpath(posixpath.join(posixpath.dirname(member_path), linkname))
             )
-            anchor_root = anchor_path.as_posix()
-            in_anchor = (
-                resolved_link == anchor_root
-                or resolved_link.startswith(anchor_root.rstrip("/") + "/")
+            in_anchor = any(
+                resolved_link == cached_root.as_posix()
+                or resolved_link.startswith(cached_root.as_posix().rstrip("/") + "/")
+                for cached_root in anchor_paths.values()
             )
+            base_python = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
             is_runtime_python_link = (
                 allow_external_runtime_python
-                and anchor_name == "runtime"
-                and Path(resolved_link).parent.as_posix()
-                in {"/usr/bin", "/usr/local/bin", "/opt/conda/bin"}
+                and anchor_name in {"runtime", "python_install"}
                 and re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(resolved_link).name) is not None
+                and (
+                    Path(resolved_link) == base_python
+                    or Path(resolved_link).parent.as_posix()
+                    in {"/usr/bin", "/usr/local/bin", "/opt/conda/bin"}
+                )
             )
             if not in_anchor and not is_runtime_python_link:
                 raise ValueError("Cache archive symlink points outside its configured anchor.")
