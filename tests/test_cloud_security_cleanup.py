@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,6 +47,44 @@ def test_external_env_fallback_requires_explicit_flag(
 
     assert os.environ["AUTODUB_TEST_EXTERNAL_ENV"] == "loaded-from-external"
     assert len([record for record in caplog.records if "Bỏ qua file .env bên ngoài" in record.message]) == 1
+
+
+def test_cloud_cache_backend_is_loaded_from_dotenv_before_config_reload(
+    tmp_path: Path,
+):
+    module_name = "cloud_config_reload_test"
+    module_dir = tmp_path / "backend" / "cloud"
+    module_dir.mkdir(parents=True)
+    module_path = module_dir / f"{module_name}.py"
+    module_path.write_text(Path(cloud_config.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "backend" / ".env").write_text(
+        "AUTODUB_CLOUD_CACHE_BACKEND=gdrive\n",
+        encoding="utf-8",
+    )
+    script = (
+        "import importlib, os; "
+        f"config = importlib.import_module({module_name!r}); "
+        "os.environ.pop('AUTODUB_CLOUD_CACHE_BACKEND', None); "
+        "config = importlib.reload(config); "
+        "assert config.DEFAULT_CONFIG['cloud_cache_backend'] == 'gdrive'"
+    )
+    env = os.environ.copy()
+    env.pop("AUTODUB_CLOUD_CACHE_BACKEND", None)
+    env.pop("AUTODUB_ALLOW_EXTERNAL_ENV_FALLBACK", None)
+    env["AUTODUB_WORKSPACE"] = str(tmp_path / "workspace")
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(module_dir), env.get("PYTHONPATH", "")) if part
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 def test_remote_gemini_keys_are_capped_and_redaction_keeps_full_pool(

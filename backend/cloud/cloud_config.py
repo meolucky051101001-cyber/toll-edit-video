@@ -12,10 +12,6 @@ BACKEND_DIR = BASE_DIR.parent
 
 logger = logging.getLogger(__name__)
 
-_cloud_cache_backend = os.getenv("AUTODUB_CLOUD_CACHE_BACKEND", "none").strip().lower()
-if _cloud_cache_backend not in {"none", "gdrive"}:
-    _cloud_cache_backend = "none"
-
 # Tự động nạp .env nếu chưa có trong biến môi trường.
 # Khi fallback sang .env của checkout khác, không ghi đè workspace/token cục bộ của checkout hiện tại.
 _LOCAL_ENV_PATH = BACKEND_DIR / ".env"
@@ -62,6 +58,10 @@ def _load_environment() -> None:
 
 
 _load_environment()
+
+_cloud_cache_backend = os.getenv("AUTODUB_CLOUD_CACHE_BACKEND", "none").strip().lower()
+if _cloud_cache_backend not in {"none", "gdrive"}:
+    _cloud_cache_backend = "none"
 
 WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(BACKEND_DIR.parent / "workspace")))
 
