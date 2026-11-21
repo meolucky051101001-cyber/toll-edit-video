@@ -6,13 +6,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from backend import v1_gpu_gatekeeper
 from backend.ai import v1_asr_isolated, v1_asr_session
+from backend.ai import v1_asr_cache, transcription
 
 WORKER_PATH = Path(__file__).resolve().parents[1] / "backend" / "model_workers" / "v1_asr_worker.py"
 
@@ -176,6 +177,43 @@ def test_asr_worker_serve_returns_errors(tmp_path, monkeypatch):
 
     response, _ = _run_worker_serve(tmp_path, monkeypatch, fail)
     assert response == {"success": False, "error": "transcription failed"}
+
+
+@pytest.mark.parametrize("reuse, expected_constructions", [(True, 1), (False, 2)])
+def test_transcription_reuses_whisper_model_only_when_enabled(
+    monkeypatch, reuse, expected_constructions
+):
+    v1_asr_cache.cache.close()
+    monkeypatch.setattr(v1_asr_cache.cache, "memory_ok", lambda: True)
+    monkeypatch.setenv("V1_ASR_REUSE", "1" if reuse else "0")
+    constructions = []
+
+    class FakeModel:
+        def __init__(self):
+            self.model = SimpleNamespace(
+                unload_model=lambda **_kwargs: None,
+                load_model=lambda: None,
+            )
+
+    def make_model(*_args, **_kwargs):
+        constructions.append(True)
+        return FakeModel()
+
+    fake_torch = ModuleType("torch")
+    fake_torch.cuda = SimpleNamespace(
+        is_available=lambda: True,
+        get_device_name=lambda _index: "test GPU",
+        empty_cache=lambda: None,
+    )
+    with patch.dict(sys.modules, {"torch": fake_torch}), \
+         patch.object(transcription, "_cached_model_path", return_value="cached-model"), \
+         patch.object(transcription, "WhisperModel", side_effect=make_model), \
+         patch.object(transcription, "_transcribe_raw_segments", return_value=[]):
+        transcription._transcribe_once("audio.wav", "model", 1)
+        transcription._transcribe_once("audio.wav", "model", 1)
+
+    assert len(constructions) == expected_constructions
+    v1_asr_cache.cache.close()
 
 
 def test_asr_session_reuses_process_and_restarts_when_key_changes(tmp_path):

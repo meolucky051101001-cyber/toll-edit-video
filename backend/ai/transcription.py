@@ -356,6 +356,8 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
     worker_count = max(1, int(num_workers))
 
     model = None
+    model_lease = None
+    reuse_model = os.getenv("V1_ASR_REUSE", "0") == "1"
     model_name = _cached_model_path(model_name, download_root)
     load_started = time.monotonic()
     if torch.cuda.is_available():
@@ -364,13 +366,25 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
                 torch.cuda.get_device_name(0), model_name
             )
         )
-        model = WhisperModel(
-            model_name,
-            device="cuda",
-            compute_type="int8_float16",
-            num_workers=1,
-            download_root=download_root,
-        )
+        def create_model():
+            return WhisperModel(
+                model_name,
+                device="cuda",
+                compute_type="int8_float16",
+                num_workers=1,
+                download_root=download_root,
+            )
+
+        if reuse_model:
+            try:
+                from .v1_asr_cache import cache as model_cache
+            except ImportError:
+                from ai.v1_asr_cache import cache as model_cache
+            cache_key = (model_name, "cuda", "int8_float16", download_root)
+            model_lease = model_cache.lease(cache_key, create_model)
+            model = model_lease.__enter__()
+        else:
+            model = create_model()
     else:
         raise RuntimeError("V1 ASR requires CUDA; CPU fallback is disabled.")
 
@@ -461,7 +475,9 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
 
         return merged_fast
     finally:
-        if model is not None:
+        if model_lease is not None:
+            model_lease.__exit__(*sys.exc_info())
+        elif model is not None:
             del model
         gc.collect()
         if torch.cuda.is_available():
