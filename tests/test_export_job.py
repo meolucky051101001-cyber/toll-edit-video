@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -121,6 +122,50 @@ class ExportJobApiTests(ExportJobTestBase):
         self.assertGreater(out_file.stat().st_size, 1000)
         self.assertEqual(result["filename"], out_file.name)
         self.assertGreater(result["size_mb"], 0)
+
+    def test_custom_export_encoder_commands_match_legacy_argv(self):
+        source = self.input_dir / "vid.mp4"
+        source.write_bytes(b"source")
+        commands = []
+
+        def fake_ffmpeg(cmd, job_ctl=None, timeout=900):
+            commands.append(cmd)
+            if "libx264" in cmd:
+                Path(cmd[-1]).write_bytes(b"rendered" * 200)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+
+        with patch.object(workflow_api, "probe_stream_durations",
+                          return_value={"video": 1.0, "audio": 1.0}), \
+             patch.object(workflow_api, "_run_ffmpeg_ctl", side_effect=fake_ffmpeg), \
+             patch.object(workflow_api, "_valid_final_video",
+                          side_effect=lambda path, defer=False: Path(path).is_file()), \
+             patch.object(workflow_api.time, "time_ns", return_value=123):
+            workflow_api._execute_custom_export(self._payload())
+
+        temp = commands[0][-1]
+        graph = (
+            "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
+            "pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1[outv]"
+        )
+        common_prefix = [
+            "ffmpeg", "-y", "-i", str(source), "-filter_complex", graph,
+            "-map", "[outv]", "-map", "0:a?",
+        ]
+        common_suffix = [
+            "-r", "30", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", "-shortest", str(temp),
+        ]
+        self.assertEqual(commands, [
+            common_prefix + [
+                "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "500k",
+                "-maxrate", "750k", "-bufsize", "1000k",
+            ] + common_suffix,
+            common_prefix + [
+                "-c:v", "libx264", "-preset", "medium", "-b:v", "500k",
+                "-maxrate", "750k", "-bufsize", "1000k",
+            ] + common_suffix,
+        ])
 
     def test_export_tts_mix_keeps_base_audio(self):
         _make_tiny_video(self.input_dir / "vid.mp4")
