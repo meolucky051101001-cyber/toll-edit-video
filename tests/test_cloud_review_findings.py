@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from backend.cloud.cloud_contract import GPU_CU_RATES
-from backend.cloud.cloud_job_store import CloudJobStore
+from backend.cloud.cloud_job_store import CloudJobStore, _day_bounds_epoch
 from backend.cloud.cloud_telegram_bot import CloudTelegramBotService
 from backend.cloud.gpu_scripts import caption_geometry as geometry
 
@@ -45,6 +45,16 @@ def test_standby_is_held_until_the_parked_gpu_is_taken_over(tmp_path):
     store.pop_warm_session("T4", now=NOON + 100)
     released = store.check_admission_allowed(cu_estimated=.5, gpu_type="L4", now=NOON + 100)
     assert released["allowed"] is True
+
+
+def test_standby_after_midnight_is_not_held_against_today(tmp_path):
+    store = CloudJobStore(db_path=tmp_path / "cloud_jobs.db", rollout_controlled=False)
+    midnight = _day_bounds_epoch(NOON, store.get_cu_budget_info(now=NOON)["budget_timezone"])[1]
+    store.park_warm_session("warm-1", "T4", ttl_seconds=300, now=midnight - 120)
+
+    today = store.get_cu_budget_info(now=midnight - 100)
+    assert today["spent_today"] == pytest.approx(_cu(20), abs=.002)
+    assert today["reserved_today"] == pytest.approx(_cu(100), abs=.002)
 
 
 def test_warm_gpu_left_past_expiry_is_billed_only_until_its_stop_window(tmp_path):

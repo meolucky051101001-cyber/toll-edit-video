@@ -1509,7 +1509,12 @@ class CloudJobStore:
         for row in db.execute("SELECT * FROM cloud_warm_sessions").fetchall():
             start, end, rate = self._warm_idle_interval(row, now_ts)
             spent += _allocate_cu_to_window((end - start) * rate / 3600.0, start, end, win_start, win_end)
-            reserved += max(0.0, float(row["expires_at"] or 0.0) - max(float(now_ts), start)) * rate / 3600.0
+            hold_start = max(float(now_ts), start)
+            hold_end = float(row["expires_at"] or 0.0)
+            if hold_end > hold_start:
+                reserved += _allocate_cu_to_window(
+                    (hold_end - hold_start) * rate / 3600.0, hold_start, hold_end, win_start, win_end
+                )
         return spent, reserved
 
     def park_warm_session(
