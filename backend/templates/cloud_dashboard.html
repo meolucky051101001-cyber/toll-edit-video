@@ -812,6 +812,11 @@ window.fetch = async function() {
         const sessions = data.sessions || [];
         const warmList = data.warm_sessions || [];
         const warmNames = new Set(warmList.map(w => w.session_name).filter(Boolean));
+        const warmRate = warmList.reduce((total, w) => total + Number(w.cu_rate_per_hour || 0), 0);
+        const warmIdleCu = warmList.reduce((total, w) => total + Number(w.idle_cu_estimate || 0), 0);
+        const warmMinutesRemaining = warmList.length
+          ? Math.ceil(Math.min(...warmList.map(w => Number(w.expires_in_seconds || 0))) / 60)
+          : 0;
         const alertBox = document.getElementById('session-alert-container');
         const hasActiveJob = !!data.active_job;
 
@@ -834,7 +839,7 @@ window.fetch = async function() {
               <div class="session-alert-box" style="background: rgba(56, 189, 248, 0.09); border-color: rgba(56, 189, 248, 0.35);">
                 <div style="display: flex; align-items: center; gap: 8px;">
                   <span class="dot dot-green"></span>
-                  <span style="font-weight: 600; color: #38bdf8;">♻️ Đang giữ ấm ${sessions.length} máy ảo Colab (${escapeHtml(sessions.map(s => s.name || s.id).join(', '))}) chờ chuyển giao cho video kế tiếp.</span>
+                  <span style="font-weight: 600; color: #38bdf8;">♻️ Đang giữ ấm ${sessions.length} máy ảo Colab (${escapeHtml(sessions.map(s => s.name || s.id).join(', '))}) chờ chuyển giao cho video kế tiếp · ~${warmRate.toFixed(2)} CU/h, đã tốn ~${warmIdleCu.toFixed(3)} CU, còn ${warmMinutesRemaining} phút.</span>
                 </div>
                 <button class="btn btn-outline" onclick="emergencyStopAll()">🧹 Thu hồi ngay</button>
               </div>

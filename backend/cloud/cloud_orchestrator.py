@@ -655,8 +655,15 @@ class CloudOrchestrator:
             return False
         gpu_norm = str(gpu_type or "").strip().upper()
         waiting_next = self.has_waiting_work(gpu_norm)
-        keepalive_s = max(0, int(DEFAULT_CONFIG.get("warm_session_keepalive_seconds", 0) or 0))
-        handoff_s = max(15, int(DEFAULT_CONFIG.get("warm_session_handoff_seconds", 180) or 180))
+        max_keepalive_s = max(0, int(DEFAULT_CONFIG.get("warm_session_keepalive_max_seconds", 1800) or 0))
+        keepalive_s = min(
+            max_keepalive_s,
+            max(0, int(DEFAULT_CONFIG.get("warm_session_keepalive_seconds", 300) or 0)),
+        )
+        handoff_s = min(
+            max_keepalive_s,
+            max(15, int(DEFAULT_CONFIG.get("warm_session_handoff_seconds", 180) or 180)),
+        )
         ttl_s = handoff_s if waiting_next else keepalive_s
         if ttl_s <= 0:
             return False
