@@ -338,3 +338,20 @@ def test_successful_pipeline_with_failed_cleanup_never_publishes(cloud):
     assert saved.cu_actual > 0
     assert saved.cleanup_status != 'verified'
     assert cloud.store.get_cu_budget_info()['unreconciled_count'] == 1
+
+
+def test_wsl_argv_reaches_the_program_without_shell_quoting(monkeypatch):
+    seen = []
+
+    def fake_run(cmd_args, **kwargs):
+        seen.append(list(cmd_args))
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(colab_bridge.subprocess, 'run', fake_run)
+    dest = "/mnt/c/tool v1/backend/cloud/results/job/attempt_1/output_video.mp4"
+    args = ['download', '-s', 'cjob1234', 'content/output_video.mp4', dest, "a'b; echo $HOME"]
+
+    assert colab_bridge._run_wsl_argv('env', args, timeout=5)[0] == 0
+    [cmd] = seen
+    assert cmd[cmd.index('--exec'):] == ['--exec', 'env', *args]
+    assert '--' not in cmd
