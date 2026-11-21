@@ -1347,6 +1347,7 @@ class CloudOrchestrator:
         runtime_start_time: Optional[float] = None
         last_budget_check_ts = start_time
         budget_abort_reason = ""
+        budget_abort_code = ""
         rate_per_hour = GPU_CU_RATES.get("T4", 1.15)
         latest_provider_balance: Optional[float] = None
         warm_idle_ledgered = False
@@ -1413,7 +1414,7 @@ class CloudOrchestrator:
             return CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value
 
         def _sync_runtime_usage(*, check_provider: bool = False) -> Tuple[bool, str]:
-            nonlocal last_budget_check_ts, latest_provider_balance, budget_abort_reason
+            nonlocal last_budget_check_ts, latest_provider_balance, budget_abort_reason, budget_abort_code
             if not hasattr(self.store, "record_runtime_usage"):
                 return True, "ok"
             est_cu = _estimate_elapsed_cu()
@@ -1427,6 +1428,7 @@ class CloudOrchestrator:
                             budget_abort_reason = (
                                 "Mất kết nối hoặc số dư Colab bị cũ trong lúc đang chạy session."
                             )
+                            budget_abort_code = "budget_uncertain"
                             return False, "budget_uncertain"
                         prov_bal = snap.get("balance")
                         if prov_bal is not None:
@@ -1437,6 +1439,7 @@ class CloudOrchestrator:
                         latest_provider_balance = prov_bal
                 except Exception as probe_exc:
                     budget_abort_reason = redact_secrets(str(probe_exc), extra_secrets=extra_secrets)
+                    budget_abort_code = "budget_uncertain"
                     return False, "budget_uncertain"
 
             res = self.store.record_runtime_usage(
@@ -1450,6 +1453,7 @@ class CloudOrchestrator:
                 budget_abort_reason = (
                     "Đã vượt hạn mức CU trong ngày hoặc hết số dư trong khi đang chạy."
                 )
+                budget_abort_code = "budget_exceeded"
                 return False, "budget_exceeded"
             return True, "ok"
 
@@ -1464,6 +1468,8 @@ class CloudOrchestrator:
             )
             if lost:
                 return True, reason
+            if budget_abort_code:
+                return True, budget_abort_code
 
             now_ts = time.time()
             interval = max(0.01, float(DEFAULT_CONFIG.get("runtime_budget_check_interval_seconds", 15)))
@@ -1498,6 +1504,7 @@ class CloudOrchestrator:
             for attempt_idx in range(len(delays) + 1):
                 _raise_if_aborted()
                 if _is_session_aborted(session_name):
+                    _raise_if_aborted()
                     raise _JobAborted("cancel_event")
                 up_ok, up_msg = _call_with_cancel(
                     self.adapter.upload_file,
@@ -1521,6 +1528,7 @@ class CloudOrchestrator:
                     session_name=session_name,
                     cancel_check=_cancel_probe,
                 ):
+                    _raise_if_aborted()
                     raise _JobAborted("cancel_event")
             return False, up_msg
 

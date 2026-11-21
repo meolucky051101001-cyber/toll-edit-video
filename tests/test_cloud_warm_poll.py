@@ -255,3 +255,62 @@ def test_cancel_during_upload_retry_prevents_another_attempt(tmp_path: Path, mon
     assert result is False
     assert saved is not None and saved.state == "cancelled"
     assert adapter.upload_attempts == 1
+
+
+def test_budget_abort_during_upload_retry_is_not_user_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend.cloud import cloud_orchestrator
+    from backend.cloud.cloud_contract import CloudErrorCode
+    from tests.test_cloud_phase5_quality_export import (
+        _Phase5Adapter,
+        _enqueue_and_claim,
+        _make_sample_video,
+    )
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestSecretKey_1234567890")
+    monkeypatch.setenv("AUTODUB_OUTPUT_DIR", str(tmp_path / "deliverables"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "results"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "cloud_upload_retry_delays_seconds", [0])
+    monkeypatch.setitem(DEFAULT_CONFIG, "runtime_budget_check_interval_seconds", 0.01)
+
+    source = _make_sample_video(tmp_path / "input", "budget_retry.mp4")
+    store = CloudJobStore(db_path=tmp_path / "budget-retry.db", rollout_controlled=False)
+    store.set_cu_budget_daily(0.6)
+    job = _enqueue_and_claim(store, source)
+    in_backoff = [False]
+    record_runtime_usage = store.record_runtime_usage
+
+    def trip_budget_during_backoff(*args, **kwargs):
+        result = record_runtime_usage(*args, **kwargs)
+        if in_backoff[0]:
+            return {**result, "within_budget": False}
+        return result
+
+    monkeypatch.setattr(store, "record_runtime_usage", trip_budget_during_backoff)
+
+    class RetryAdapter(_Phase5Adapter):
+        def __init__(self):
+            super().__init__()
+            self.upload_attempts = 0
+
+        def upload_file(self, session_name, local_path, remote_filename=None):
+            self.upload_attempts += 1
+            return False, "temporary upload failure"
+
+    def interruptible_budget_backoff(_seconds, *, session_name=None, cancel_check=None):
+        in_backoff[0] = True
+        time.sleep(0.02)
+        assert cancel_check is not None and cancel_check()
+        return True
+
+    monkeypatch.setattr(cloud_orchestrator, "_wait_interruptible", interruptible_budget_backoff)
+    adapter = RetryAdapter()
+    orchestrator = CloudOrchestrator(store=store, adapter=adapter, allowed_roots=[tmp_path])
+
+    assert orchestrator.process_job(job, owner_id="w1") is False
+    saved = store.get_job(job.job_id)
+    assert saved is not None and saved.error_code == CloudErrorCode.BUDGET_EXCEEDED.value
+    assert saved.error_code != CloudErrorCode.CANCELLED_BY_USER.value
+    assert adapter.upload_attempts == 1
