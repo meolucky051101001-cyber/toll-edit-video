@@ -67,6 +67,29 @@ def test_compare_resolves_job_output_directory_and_reports_deltas(tmp_path, caps
     assert report["compare"]["stages"][1]["delta_percent"] == 100.0
 
 
+def test_compare_table_includes_stages_present_only_in_baseline(tmp_path, capsys):
+    before_output = tmp_path / "before"
+    after_output = tmp_path / "after"
+    before_output.mkdir()
+    after_output.mkdir()
+    before = write_manifest(
+        tmp_path / "before.manifest.json",
+        "before",
+        before_output,
+        {"removed_stage": {"status": "completed", "duration_s": 4.0}},
+    )
+    after = write_manifest(
+        tmp_path / "after.manifest.json",
+        "after",
+        after_output,
+        {"added_stage": {"status": "completed", "duration_s": 2.0}},
+    )
+
+    assert bench_job.main([str(after), "--compare", str(before)]) == 0
+    table = capsys.readouterr().out
+    assert "removed_stage | missing | 0.000 |  | 4.000 | 0.000 | -4.000 | -100.00%" in table
+
+
 def test_output_directory_resolves_from_configured_workspace(tmp_path, capsys, monkeypatch):
     workspace = tmp_path / "workspace"
     output_dir = tmp_path / "published" / "job-output"

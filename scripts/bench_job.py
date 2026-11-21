@@ -172,12 +172,16 @@ def _print_table(report: dict) -> None:
     if "compare" in report:
         print("Stage | Status | Duration (s) | Key metrics | Before (s) | After (s) | Delta (s) | Delta (%)")
         comparisons = {row["stage"]: row for row in report["compare"]["stages"]}
-        for row in report["stages"]:
-            comparison = comparisons[row["stage"]]
+        after_rows = {row["stage"]: row for row in report["stages"]}
+        for stage, comparison in comparisons.items():
+            row = after_rows.get(stage)
+            status = row["status"] if row else "missing"
+            duration_s = row["duration_s"] if row else 0.0
+            metrics = row["metrics"] if row else {}
             percent = "n/a" if comparison["delta_percent"] is None else f'{comparison["delta_percent"]:.2f}%'
             print(
-                f'{row["stage"]} | {row["status"]} | {row["duration_s"]:.3f} | '
-                f'{_format_metrics(row["metrics"])} | {comparison["before_s"]:.3f} | '
+                f'{stage} | {status} | {duration_s:.3f} | '
+                f'{_format_metrics(metrics)} | {comparison["before_s"]:.3f} | '
                 f'{comparison["after_s"]:.3f} | {comparison["delta_s"]:.3f} | {percent}'
             )
         total = report["compare"]["total"]
