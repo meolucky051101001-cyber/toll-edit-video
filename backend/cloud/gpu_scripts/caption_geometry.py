@@ -211,6 +211,24 @@ def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_b
     A supported dialogue-caption band is needed to classify detected text as
     captions. Without an anchor, a genuinely text-free frame can still pass.
     """
+    boxes = _observe_caption_boxes(reader, frame, band_top=band_top, band_bottom=band_bottom, x_bounds=x_bounds)
+    if x_bounds is None or band_top is None or band_bottom is None:
+        return boxes
+    # A caption wider than the sampled lane is cut at the crop edge, and every
+    # scale then agrees on the cut box. Re-measure with that side opened up.
+    left, right = float(x_bounds[0]), float(x_bounds[1])
+    tolerance = max(.008, 3. / frame.shape[1])
+    cut_left = left > 0. and any(b[0] <= left + tolerance for b in boxes)
+    cut_right = right < 1. and any(b[2] >= right - tolerance for b in boxes)
+    if not (cut_left or cut_right):
+        return boxes
+    return _observe_caption_boxes(
+        reader, frame, band_top=band_top, band_bottom=band_bottom,
+        x_bounds=(0. if cut_left else left, 1. if cut_right else right),
+    )
+
+
+def _observe_caption_boxes(reader, frame, *, band_top, band_bottom, x_bounds):
     anchored = band_top is not None and band_bottom is not None
     if anchored:
         margin = max(.03, (band_bottom - band_top) * .65)
