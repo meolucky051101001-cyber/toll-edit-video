@@ -33,6 +33,17 @@ def test_parked_warm_gpu_counts_against_the_daily_budget(tmp_path):
     assert reused["reserved_today"] == 0
 
 
+def test_job_reusing_the_parked_gpu_is_not_charged_for_its_remaining_standby(tmp_path):
+    store = CloudJobStore(db_path=tmp_path / "cloud_jobs.db", rollout_controlled=False)
+    store.set_cu_budget_daily(1.0)  # either job fits alone; the 0.93 CU standby hold does not fit beside one
+    store.park_warm_session("warm-1", "T4", ttl_seconds=3000, now=NOON)
+
+    same_gpu = store.check_admission_allowed(cu_estimated=.5, gpu_type="T4", now=NOON + 100)
+    other_gpu = store.check_admission_allowed(cu_estimated=.5, gpu_type="L4", now=NOON + 100)
+    assert same_gpu["allowed"] is True
+    assert other_gpu["code"] == "BUDGET_EXCEEDED"
+
+
 def test_warm_gpu_left_past_expiry_is_billed_only_until_its_stop_window(tmp_path):
     store = CloudJobStore(db_path=tmp_path / "cloud_jobs.db", rollout_controlled=False)
     store.park_warm_session("warm-1", "T4", ttl_seconds=300, now=NOON)
@@ -67,3 +78,14 @@ def test_caption_wider_than_the_compact_lane_is_measured_in_full(monkeypatch):
     )
     assert widths == [50, 50, 100, 100]
     assert measured[0] == pytest.approx([.1, .9, .9, .92])
+
+
+def test_wider_pass_that_sees_nothing_keeps_the_measured_caption(monkeypatch):
+    monkeypatch.setattr(
+        geometry, "_detect",
+        lambda reader, crop, *, top, bottom, scale: [[0., .9, 1., .92]] if crop.shape[1] == 50 else [],
+    )
+    measured = geometry.observe_caption_boxes(
+        object(), np.zeros((100, 100, 3)), band_top=.87, band_bottom=.98, x_bounds=(.25, .75),
+    )
+    assert measured[0] == pytest.approx([.25, .9, .75, .92])
