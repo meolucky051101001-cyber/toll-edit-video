@@ -80,7 +80,10 @@ try:
             with part.open("rb") as source:
                 shutil.copyfileobj(source, out)
     with pending.open("rb") as assembled:
-        checksum = hashlib.file_digest(assembled, "sha256").hexdigest()
+        hasher = hashlib.sha256()
+        for chunk in iter(lambda: assembled.read(1 << 20), b""):
+            hasher.update(chunk)
+        checksum = hasher.hexdigest()
     if pending.stat().st_size != int(size) or checksum != digest:
         raise ValueError("Transferred video size or SHA256 does not match the original")
     pending.replace(target)
