@@ -1,4 +1,5 @@
 import os
+import secrets
 import sys
 from pathlib import Path
 import logging
@@ -147,13 +148,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-import secrets
-
 def _load_or_create_local_token() -> str:
     try:
-        from .control_token import candidate_token_paths, read_control_token
+        from .control_token import load_or_create_control_token
     except ImportError:
-        from control_token import candidate_token_paths, read_control_token
+        from control_token import load_or_create_control_token
 
     workspace_root = Path(
         os.getenv(
@@ -161,18 +160,14 @@ def _load_or_create_local_token() -> str:
             str(Path(__file__).resolve().parent.parent / "workspace"),
         )
     )
-    token = read_control_token(workspace_root)
-    if token:
-        return token
-    candidate_paths = candidate_token_paths(workspace_root)
-    new_token = secrets.token_urlsafe(32)
-    for p in candidate_paths[:2]:
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(new_token, encoding="utf-8")
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in main._load_or_create_local_token (p.parent.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
-    return new_token
+    def log_write_error(_path, exc):
+        logger.debug(
+            'Suppressed error in main._load_or_create_local_token (p.parent.mkdir): %s',
+            type(exc).__name__,
+            exc_info=False,
+        )
+
+    return load_or_create_control_token(workspace_root, on_write_error=log_write_error)
 
 LOCAL_TOKEN = _load_or_create_local_token()
 DASHBOARD_CONTROL_TOKEN = LOCAL_TOKEN

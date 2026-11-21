@@ -67,3 +67,20 @@ def test_workflow_api_resolves_token_from_bot_system(tmp_path, monkeypatch):
     monkeypatch.setattr(workflow_api, "WORKSPACE", tmp_path)
 
     assert workflow_api.get_current_control_token() == "workflow-control-token"
+
+
+def test_load_or_create_writes_bot_system_token_and_reuses_it(tmp_path, monkeypatch):
+    monkeypatch.delenv("AUTODUB_LOCAL_TOKEN", raising=False)
+    first = tmp_path / "bot_system" / TOKEN_NAME
+    second = tmp_path / TOKEN_NAME
+    monkeypatch.setattr(
+        control_token,
+        "candidate_token_paths",
+        lambda workspace_root=None: [first, second],
+    )
+
+    token = control_token.load_or_create_control_token(tmp_path)
+
+    assert first.read_text(encoding="utf-8") == token
+    assert not second.exists()
+    assert control_token.load_or_create_control_token(tmp_path) == token

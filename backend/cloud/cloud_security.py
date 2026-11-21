@@ -382,10 +382,10 @@ def resolve_local_control_token() -> str:
     Resolve the shared local control token using the same search order as backend/main.py.
     """
     try:
-        from ..control_token import read_control_token
+        from ..control_token import load_or_create_control_token
     except ImportError:
-        from control_token import read_control_token
-    return read_control_token(WORKSPACE_DIR)
+        from control_token import load_or_create_control_token
+    return load_or_create_control_token(WORKSPACE_DIR)
 
 
 def is_valid_loopback_host(host_header: str) -> bool:
