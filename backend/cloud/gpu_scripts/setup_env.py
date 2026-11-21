@@ -1199,7 +1199,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     setup_fingerprint = hashlib.sha256(
         f"{manifest_sha}:{req_sha}:{sys.version.split()[0]}".encode("utf-8")
     ).hexdigest()
-    _CURRENT_CACHE_KEY = setup_fingerprint
+    cache_engine = (
+        str(os.environ.get("AUTODUB_CLOUD_ASR_ENGINE", "openai-whisper")).strip().lower()
+        or "openai-whisper"
+    )
+    cache_key = hashlib.sha256(
+        f"{setup_fingerprint}:{cache_engine}".encode("utf-8")
+    ).hexdigest()
+    _CURRENT_CACHE_KEY = cache_key
 
     if args.cache_save_only:
         cache_save_t0 = time.monotonic()
@@ -1211,7 +1218,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             _CURRENT_CACHE_STATUS = _save_cloud_cache(
                 args.cache_dir,
-                setup_fingerprint,
+                cache_key,
                 workdir,
             )
             if _CURRENT_CACHE_STATUS != "saved":
@@ -1223,7 +1230,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     if cache_root is None:
                         raise OSError("Invalid cloud cache root.")
                     cache_sha256 = _sha256_file(
-                        cache_root / setup_fingerprint / "runtime.tar"
+                        cache_root / cache_key / "runtime.tar"
                     )
                 except OSError:
                     _CURRENT_CACHE_STATUS = "save_failed"
@@ -1297,7 +1304,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         and os.environ.get(_CACHE_STATUS_ENV)
         in {"miss", "invalid", "restored", "saved", "save_failed"}
     )
-    cache_key = inherited_cache_key if cache_restore_done else setup_fingerprint
+    if cache_restore_done:
+        cache_key = inherited_cache_key
     _CURRENT_CACHE_KEY = cache_key
     if cache_restore_done:
         _CURRENT_CACHE_STATUS = os.environ[_CACHE_STATUS_ENV]

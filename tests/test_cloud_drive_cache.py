@@ -30,6 +30,7 @@ def _use_temp_model_homes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("AUTODUB_CLOUD_ASR_ENGINE", raising=False)
     monkeypatch.setattr(setup_env, "_CLOUD_CACHE_MYDRIVE_ROOT", tmp_path)
     for name in (
         "XDG_CACHE_HOME",
@@ -61,12 +62,17 @@ def _prepare_setup_workdir(tmp_path: Path) -> tuple[Path, Path]:
     return workdir, manifest_path
 
 
-def _cache_key(workdir: Path, manifest_path: Path) -> str:
+def _cache_key(
+    workdir: Path,
+    manifest_path: Path,
+    engine: str = "openai-whisper",
+) -> str:
     manifest_sha = setup_env._sha256_file(manifest_path)
     requirements_sha = setup_env._sha256_file(workdir / "requirements_cloud.txt")
-    return hashlib.sha256(
+    setup_fingerprint = hashlib.sha256(
         f"{manifest_sha}:{requirements_sha}:{sys.version.split()[0]}".encode("utf-8")
     ).hexdigest()
+    return hashlib.sha256(f"{setup_fingerprint}:{engine}".encode("utf-8")).hexdigest()
 
 
 def test_warm_reset_preserves_drive_and_nested_mounts(
@@ -395,6 +401,69 @@ def test_cache_restore_without_local_hash_skips_archive(
     assert not runtime.exists()
 
 
+def test_cache_key_includes_asr_engine_and_engine_change_misses_then_saves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    _use_temp_model_homes(monkeypatch, tmp_path)
+    workdir, manifest_path = _prepare_setup_workdir(tmp_path)
+    runtime = workdir / ".autodub_venv"
+    runtime.mkdir()
+    (runtime / "runtime.txt").write_text("cached", encoding="utf-8")
+    cache_root = tmp_path / "drive"
+    _patch_successful_setup(monkeypatch, [])
+    monkeypatch.delenv("AUTODUB_CLOUD_ASR_ENGINE", raising=False)
+
+    rc, default_result = _run_setup_with_cache(
+        workdir,
+        manifest_path,
+        cache_root,
+        no_cache_save=True,
+        capsys=capsys,
+    )
+    default_key = _cache_key(workdir, manifest_path)
+    assert rc == setup_env.EXIT_OK
+    assert default_result["cache_status"] == "miss"
+    assert default_result["cache_key"] == default_key
+
+    save_rc, default_save = _run_cache_save_only(
+        workdir,
+        manifest_path,
+        cache_root,
+        capsys=capsys,
+    )
+    assert save_rc == setup_env.EXIT_OK
+    assert default_save["cache_status"] == "saved"
+    assert default_save["cache_key"] == default_key
+
+    monkeypatch.setenv("AUTODUB_CLOUD_ASR_ENGINE", "faster-whisper")
+    rc, faster_result = _run_setup_with_cache(
+        workdir,
+        manifest_path,
+        cache_root,
+        no_cache_save=True,
+        capsys=capsys,
+    )
+    faster_key = _cache_key(workdir, manifest_path, "faster-whisper")
+    assert rc == setup_env.EXIT_OK
+    assert faster_key != default_key
+    assert faster_result["cache_key"] == faster_key
+    assert faster_result["cache_status"] == "miss"
+    assert not (cache_root / faster_key / "runtime.tar").exists()
+
+    save_rc, faster_save = _run_cache_save_only(
+        workdir,
+        manifest_path,
+        cache_root,
+        capsys=capsys,
+    )
+    assert save_rc == setup_env.EXIT_OK
+    assert faster_save["cache_status"] == "saved"
+    assert faster_save["cache_key"] == faster_key
+    assert (cache_root / faster_key / "runtime.tar").is_file()
+
+
 def test_cache_restore_rejects_traversal_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _use_temp_model_homes(monkeypatch, tmp_path)
     workdir, _manifest_path = _prepare_setup_workdir(tmp_path)
@@ -612,6 +681,8 @@ class _CacheJobAdapter:
         self.cache_sha256 = "a" * 64
         self.cache_save_budget_abort = cache_save_budget_abort
         self.in_cache_save = False
+        self.setup_env_vars = None
+        self.save_only_env_vars = None
         self.unmount_result = unmount_result
         self.unmount_calls = []
         self.active_sessions = {warm_session} if warm_session else set()
@@ -687,6 +758,7 @@ class _CacheJobAdapter:
         if "--cache-save-only" in argv:
             self.command_order.append("cache_save")
             self.save_only_argv = list(argv)
+            self.save_only_env_vars = env_vars
             if self.cache_save_budget_abort and cancel_check:
                 self.in_cache_save = True
                 cancel_check()
@@ -705,6 +777,7 @@ class _CacheJobAdapter:
         if "setup_env.py" in argv:
             self.command_order.append("setup")
             self.setup_argv = list(argv)
+            self.setup_env_vars = env_vars
             cache_status = self.setup_cache_status if "--cache-dir" in argv else "disabled"
             result = {
                 "ok": True,
@@ -886,6 +959,18 @@ def test_orchestrator_passes_locally_trusted_cache_sha256(
     expected_index = adapter.setup_argv.index("--cache-expected-sha256") + 1
     assert adapter.setup_argv[expected_index] == trusted_sha256
     assert job.state == "completed"
+
+
+def test_orchestrator_passes_asr_engine_to_setup_and_cache_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(DEFAULT_CONFIG, "cloud_asr_engine", "faster-whisper")
+    adapter, job = _run_cache_job(tmp_path, monkeypatch, (True, "mounted"))
+
+    assert job.state == "completed"
+    assert adapter.setup_env_vars == {"AUTODUB_CLOUD_ASR_ENGINE": "faster-whisper"}
+    assert adapter.save_only_env_vars == {"AUTODUB_CLOUD_ASR_ENGINE": "faster-whisper"}
 
 
 @pytest.mark.parametrize(

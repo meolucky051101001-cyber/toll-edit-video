@@ -189,10 +189,21 @@ def _build_gemini_env_vars(gemini_key: str, extra_secrets: Sequence[str]) -> Opt
 
 def _build_pipeline_env_vars(gemini_key: str, extra_secrets: Sequence[str]) -> Optional[Dict[str, str]]:
     env_vars = _build_gemini_env_vars(gemini_key, extra_secrets) or {}
-    asr_engine = str(DEFAULT_CONFIG.get("cloud_asr_engine", "openai-whisper")).strip().lower()
+    asr_engine = _configured_cloud_asr_engine()
     if asr_engine and asr_engine != "openai-whisper":
         env_vars["AUTODUB_CLOUD_ASR_ENGINE"] = asr_engine
     return env_vars or None
+
+
+def _configured_cloud_asr_engine() -> str:
+    return (
+        str(DEFAULT_CONFIG.get("cloud_asr_engine", "openai-whisper")).strip().lower()
+        or "openai-whisper"
+    )
+
+
+def _build_asr_engine_env_vars() -> Dict[str, str]:
+    return {"AUTODUB_CLOUD_ASR_ENGINE": _configured_cloud_asr_engine()}
 
 
 def _file_sha256(path_obj: Path) -> str:
@@ -1203,12 +1214,14 @@ class _JobRun:
                         )
             if not DEFAULT_CONFIG.get("cloud_cache_save_enabled", True):
                 setup_argv.append("--no-cache-save")
+        setup_env_vars = _build_asr_engine_env_vars()
         self.use_monitored_exec = isinstance(self.orchestrator.adapter, ColabProviderAdapter)
         if self.use_monitored_exec:
             env_ok, env_msg = self.orchestrator.adapter.run_argv_monitored(
                 self.session_name,
                 setup_argv,
                 cwd="/content",
+                env_vars=setup_env_vars,
                 timeout=setup_timeout,
                 cancel_check=self._cancel_probe,
                 job_tag="setup",
@@ -1219,6 +1232,7 @@ class _JobRun:
                 self.session_name,
                 setup_argv,
                 cwd="/content",
+                env_vars=setup_env_vars,
                 timeout=setup_timeout,
                 cancel_check=self._cancel_probe,
             )
@@ -1387,23 +1401,25 @@ class _JobRun:
         ]
         try:
             if self.use_monitored_exec:
-                save_ok, save_output = self.orchestrator.adapter.run_argv_monitored(
-                    self.session_name,
-                    save_argv,
-                    cwd="/content",
-                    timeout=save_timeout,
-                    cancel_check=self._cancel_probe,
-                    job_tag="cache_save",
+            save_ok, save_output = self.orchestrator.adapter.run_argv_monitored(
+                self.session_name,
+                save_argv,
+                cwd="/content",
+                env_vars=_build_asr_engine_env_vars(),
+                timeout=save_timeout,
+                cancel_check=self._cancel_probe,
+                job_tag="cache_save",
                 )
             else:
                 save_ok, save_output = _call_with_cancel(
                     self.orchestrator.adapter.exec_argv,
-                    self.session_name,
-                    save_argv,
-                    cwd="/content",
-                    timeout=save_timeout,
-                    cancel_check=self._cancel_probe,
-                )
+                self.session_name,
+                save_argv,
+                cwd="/content",
+                env_vars=_build_asr_engine_env_vars(),
+                timeout=save_timeout,
+                cancel_check=self._cancel_probe,
+            )
             self._raise_if_aborted()
         except _JobAborted as abort_exc:
             if not abort_exc.is_budget_exceeded:
