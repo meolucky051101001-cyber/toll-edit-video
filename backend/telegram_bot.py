@@ -1823,9 +1823,37 @@ async def _download_job_source(job, status_msg=None, *, reload_downloader=True) 
             status_msg,
             f"Đang tải video: {job.get('url') or job.get('filename') or 'Video Telegram'}",
         )
-        success, path, title, error = await asyncio.to_thread(
+        download_task = asyncio.create_task(asyncio.to_thread(
             download_social_video, job["url"], str(download_dir), job["job_id"]
-        )
+        ))
+
+        def remove_cancelled_download(done):
+            try:
+                result = done.result()
+                if not result[0] or not result[1]:
+                    return
+                downloaded_path = Path(result[1]).resolve()
+                if (
+                    downloaded_path.is_relative_to(download_dir.resolve())
+                    and downloaded_path.is_file()
+                ):
+                    downloaded_path.unlink()
+                    logger.info(
+                        "Removed URL download after Telegram prefetch cancellation job_id=%s",
+                        job.get("job_id"),
+                    )
+            except BaseException:
+                logger.warning(
+                    "Could not clean completed URL download after Telegram prefetch cancellation job_id=%s",
+                    job.get("job_id"),
+                    exc_info=True,
+                )
+
+        try:
+            success, path, title, error = await asyncio.shield(download_task)
+        except asyncio.CancelledError:
+            download_task.add_done_callback(remove_cancelled_download)
+            raise
         if not success:
             raise RuntimeError(error or "Khong tai duoc video.")
         video_path = Path(path)

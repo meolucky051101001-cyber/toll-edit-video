@@ -304,6 +304,39 @@ class TelegramPrefetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(calls, [False, True])
 
+    async def test_cancelled_url_prefetch_removes_download_when_thread_finishes(self):
+        job = self.make_job()
+        await self.queue.put(job)
+        download_started = threading.Event()
+        finish_download = threading.Event()
+        download_finished = threading.Event()
+        source = self.root / "downloads" / "job-1.mp4"
+
+        def blocking_download(_url, output_dir, job_id):
+            download_started.set()
+            finish_download.wait(timeout=3)
+            path = Path(output_dir) / f"{job_id}.mp4"
+            path.write_bytes(b"completed after cancellation")
+            download_finished.set()
+            return True, str(path), "Title", None
+
+        with patch.dict("sys.modules", {
+            "social_downloader": SimpleNamespace(download_social_video=blocking_download)
+        }), patch.object(bot, "safe_edit_status", AsyncMock()):
+            task = bot._schedule_next_download_prefetch()
+            await asyncio.wait_for(asyncio.to_thread(download_started.wait, 2), timeout=3)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            finish_download.set()
+            await asyncio.wait_for(asyncio.to_thread(download_finished.wait, 2), timeout=3)
+            for _ in range(100):
+                if not source.exists():
+                    break
+                await asyncio.sleep(0.01)
+
+        self.assertFalse(source.exists())
+
     async def test_stop_cancels_prefetch_and_removes_partial_telegram_download(self):
         started = asyncio.Event()
 
