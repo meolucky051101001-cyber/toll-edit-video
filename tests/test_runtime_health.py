@@ -148,6 +148,7 @@ class ReadOnlyPreflightTests(unittest.TestCase):
             with patch.object(preflight, "_load_env", return_value=env), \
                  patch.object(preflight.importlib.util, "find_spec", return_value=object()), \
                  patch.object(preflight.shutil, "which", return_value="fixture.exe"), \
+                 patch.object(preflight, "_ffmpeg_version_check", return_value=preflight._check("binary:ffmpeg_version", "pass", "fixture")), \
                  patch.object(preflight, "_cuda_check", return_value=preflight._check("gpu:cuda", "pass", "fixture")), \
                  patch.object(preflight, "_optional_ocr_check", return_value=preflight._check("ocr", "pass", "fixture")), \
                  patch.object(preflight.tempfile, "mkstemp", side_effect=AssertionError("write")):
@@ -155,6 +156,31 @@ class ReadOnlyPreflightTests(unittest.TestCase):
             self.assertIs(result["ready"], True)
             self.assertEqual(len(result["checks"]), 26)
             self.assertTrue(all(check["status"] == "pass" for check in result["checks"]))
+
+    def test_ffmpeg_version_check_requires_version_seven_or_newer(self):
+        cases = (
+            ("ffmpeg version 6.1 Copyright fixture\n", "error", "6.1"),
+            ("ffmpeg version 8.0.1-full_build-www.gyan.dev Copyright fixture\n", "pass", "8.0.1-full_build-www.gyan.dev"),
+            ("ffmpeg version 9.0.2 Copyright fixture\n", "pass", "9.0.2"),
+            ("ffmpeg version N-118000-gfixture Copyright fixture\n", "warning", "unrecognized"),
+        )
+        for stdout, expected_status, expected_message in cases:
+            with self.subTest(stdout=stdout), patch.object(
+                preflight.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(["ffmpeg", "-version"], 0, stdout, ""),
+            ) as run:
+                check = preflight._ffmpeg_version_check()
+            self.assertEqual(check["status"], expected_status)
+            self.assertIn(expected_message, check["message"])
+            run.assert_called_once()
+            self.assertEqual(run.call_args.kwargs["timeout"], 10)
+            self.assertIn("creationflags", run.call_args.kwargs)
+
+    def test_ffmpeg_version_probe_failure_is_a_warning(self):
+        with patch.object(preflight.subprocess, "run", side_effect=subprocess.TimeoutExpired("ffmpeg", 10)):
+            check = preflight._ffmpeg_version_check()
+        self.assertEqual(check["status"], "warning")
 
     def test_ocr_timeout_is_incomplete_in_bounded_mode_and_fallback_otherwise(self):
         with patch.object(Path, "is_file", return_value=True), \

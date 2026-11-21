@@ -263,8 +263,8 @@ def test_custom_export_blurs_raw_source_before_crop_and_scale(tmp_path, many_reg
     commands, graphs, scripts = [], [], []
     def fake_run(cmd, *args, **kwargs):
         commands.append(cmd)
-        if "-filter_complex_script" in cmd:
-            script = Path(cmd[cmd.index("-filter_complex_script") + 1])
+        if "-/filter_complex" in cmd:
+            script = Path(cmd[cmd.index("-/filter_complex") + 1])
             scripts.append(script)
             graphs.append(script.read_text(encoding="utf-8"))
         else:

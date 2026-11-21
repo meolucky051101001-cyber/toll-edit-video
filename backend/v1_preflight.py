@@ -52,6 +52,40 @@ def _check(name: str, status: str, message: str) -> dict:
     return {"name": name, "status": status, "message": message}
 
 
+def _ffmpeg_version_check() -> dict:
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW
+                if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
+                else 0
+            ),
+        )
+        if result.returncode != 0:
+            return _check("binary:ffmpeg_version", "warning", "version check failed")
+        first_line = (result.stdout or result.stderr).splitlines()[0] if (result.stdout or result.stderr) else ""
+        parsed = re.search(r"ffmpeg version n?(\d+)\.(\d+)", first_line)
+        version = re.search(r"ffmpeg version\s+(\S+)", first_line, re.IGNORECASE)
+        if not parsed or not version:
+            return _check("binary:ffmpeg_version", "warning", "unrecognized FFmpeg version")
+        version_string = version.group(1)
+        if int(parsed.group(1)) < 7:
+            return _check(
+                "binary:ffmpeg_version",
+                "error",
+                "{}; FFmpeg >= 7 required, 8.0.x recommended".format(version_string),
+            )
+        return _check("binary:ffmpeg_version", "pass", version_string)
+    except (OSError, subprocess.SubprocessError):
+        return _check("binary:ffmpeg_version", "warning", "version check failed")
+
+
 def _directory_check(name: str, path: Path, read_only: bool = False) -> dict:
     try:
         if read_only:
@@ -129,6 +163,8 @@ def run_preflight(project_root: Path, interface: str, read_only: bool = False, t
     for binary in ("ffmpeg", "ffprobe"):
         path = shutil.which(binary)
         checks.append(_check("binary:{}".format(binary), "pass" if path else "error", path or "not found on PATH"))
+        if binary == "ffmpeg":
+            checks.append(_ffmpeg_version_check())
 
     if interface in {"telegram", "all"}:
         token = env.get("BOT_TOKEN", "").strip()
