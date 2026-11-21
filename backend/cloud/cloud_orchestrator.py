@@ -1705,7 +1705,7 @@ class _JobRun:
         self.attempt_res_dir.mkdir(parents=True, exist_ok=True)
 
         self._raise_if_aborted()
-        dl_ok, self.dl_path = _call_with_cancel(
+        dl_ok, dl_detail = _call_with_cancel(
             self.orchestrator.adapter.download_file,
             self.session_name,
             "output_video.mp4",
@@ -1714,10 +1714,19 @@ class _JobRun:
         )
         self._raise_if_aborted()
         if not dl_ok:
+            safe_detail = redact_secrets(str(dl_detail or ""), extra_secrets=self.extra_secrets)
             raise _OrchestratorStageError(
                 CloudErrorCode.DOWNLOAD_FAILED.value,
-                "Không tải được video thành phẩm từ Colab về.",
+                " ".join(
+                    part
+                    for part in (
+                        "Không tải được video thành phẩm từ Colab về.",
+                        safe_detail,
+                    )
+                    if part
+                ),
             )
+        self.dl_path = dl_detail
 
         for remote_art in ("result_metadata.json", "subtitles.srt", "subtitles_vi.srt", "subtitles_vi.ass"):
             if remote_art in _DOWNLOADABLE_REMOTE_ARTIFACTS:
