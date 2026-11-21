@@ -23,18 +23,24 @@ _process: subprocess.Popen | None = None
 _key: tuple | None = None
 _last_used_at: float = 0.0
 _stderr_thread: threading.Thread | None = None
+_idle_timer: threading.Timer | None = None
 
 
 def close_session() -> None:
     """Terminate the persistent ASR worker and reap its process tree."""
-    global _process, _key, _last_used_at, _stderr_thread
+    global _process, _key, _last_used_at, _stderr_thread, _idle_timer
     with _lock:
         process = _process
         stderr_thread = _stderr_thread
+        idle_timer = _idle_timer
         _process = None
         _key = None
         _last_used_at = 0.0
         _stderr_thread = None
+        _idle_timer = None
+
+    if idle_timer is not None:
+        idle_timer.cancel()
 
     if process is None:
         return
@@ -69,6 +75,15 @@ def close_session() -> None:
     finally:
         if stderr_thread is not None and stderr_thread.is_alive():
             stderr_thread.join(timeout=1.0)
+
+
+def _schedule_idle_close(idle_s: float) -> None:
+    global _idle_timer
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+    _idle_timer = threading.Timer(idle_s, close_if_idle, args=(idle_s,))
+    _idle_timer.daemon = True
+    _idle_timer.start()
 
 
 def close_if_idle(max_idle_s: float = 300.0) -> bool:
@@ -196,6 +211,13 @@ def run_asr_request(
                         _last_used_at = time.monotonic()
                         if not result:
                             raise RuntimeError("ASR warm worker produced an empty response")
+                        try:
+                            idle_s = float(worker_env.get("V1_ASR_KEEP_WARM_IDLE_S", "300"))
+                            if not math.isfinite(idle_s) or idle_s < 0:
+                                raise ValueError
+                        except (TypeError, ValueError):
+                            idle_s = 300.0
+                        _schedule_idle_close(idle_s)
                         return result
                     if _process.poll() is not None:
                         raise RuntimeError(

@@ -255,6 +255,23 @@ def test_asr_session_closes_when_idle(tmp_path):
     assert v1_asr_session._process is None
 
 
+def test_asr_session_expires_automatically_when_idle(tmp_path, monkeypatch):
+    monkeypatch.setenv("V1_ASR_KEEP_WARM_IDLE_S", "0.1")
+    worker = _fake_worker(tmp_path)
+    v1_asr_session.run_asr_request(
+        sys.executable,
+        worker,
+        {"audio": "audio.wav", "output": "output.srt"},
+        timeout=5,
+        env=dict(os.environ),
+    )
+
+    timer = v1_asr_session._idle_timer
+    assert timer is not None and timer.daemon
+    timer.join(timeout=2)
+    assert v1_asr_session._process is None
+
+
 @pytest.mark.parametrize("failure_mode", ["error", "crash", "timeout", "error-retry"])
 def test_asr_warm_failure_falls_back_to_one_shot(tmp_path, monkeypatch, failure_mode):
     backend, _python = _isolated_test_backend(tmp_path, monkeypatch)
