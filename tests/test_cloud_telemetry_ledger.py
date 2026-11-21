@@ -91,6 +91,45 @@ def test_orchestrator_stop_of_parked_session_ledgers_idle(tmp_path: Path):
     assert "warm-3" not in orch._warm_parked_at
 
 
+def test_reusing_warm_session_ledgers_idle_before_job_runtime(tmp_path: Path, monkeypatch):
+    from tests.test_cloud_phase5_quality_export import _Phase5Adapter
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestSecretKey_1234567890")
+    monkeypatch.setenv("AUTODUB_OUTPUT_DIR", str(tmp_path / "deliverables"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "results"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_seconds", 0)
+
+    store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
+    video = _make_sample_video(tmp_path)
+    now = time.time()
+    parked_at = now - 600
+    store.park_warm_session(
+        "cjobwarmreuse",
+        "T4",
+        ttl_seconds=3600,
+        source_job_id="prior-job",
+        now=parked_at,
+    )
+    job = store.enqueue(str(video), video_name=video.name, gpu_type="T4", cu_estimated=0.4)
+    claimed = store.claim_job(job.job_id, owner_id="w-warm-reuse")
+    assert claimed is not None
+
+    orchestrator = CloudOrchestrator(
+        store=store,
+        adapter=_Phase5Adapter(),
+        allowed_roots=[tmp_path],
+        enable_warm_session_reuse=True,
+    )
+    assert orchestrator.process_job(claimed, owner_id="w-warm-reuse") is True
+
+    warm_ledger = store.list_cost_ledger(job_id="warm:cjobwarmreuse")
+    job_ledger = store.list_cost_ledger(job_id=job.job_id)
+    finished = store.get_job(job.job_id)
+    assert len(warm_ledger) == 1 and warm_ledger[0]["cu_observed"] > 0.0
+    assert job_ledger[0]["usage_started_at"] >= warm_ledger[0]["usage_ended_at"]
+    assert finished.output_manifest["warm_idle_ledgered"] is True
+
+
 def test_runtime_ledger_switches_to_provider_usage_rate(tmp_path: Path):
     store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
     store.set_cu_budget_daily(0.6)

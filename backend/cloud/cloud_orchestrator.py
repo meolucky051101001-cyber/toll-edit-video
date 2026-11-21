@@ -1273,6 +1273,7 @@ class CloudOrchestrator:
         budget_abort_reason = ""
         rate_per_hour = GPU_CU_RATES.get("T4", 1.15)
         latest_provider_balance: Optional[float] = None
+        warm_idle_ledgered = False
 
         session_may_exist = False
         cleanup_done = False
@@ -1612,6 +1613,23 @@ class CloudOrchestrator:
             warm_parked_at = warm_entry[1] if warm_entry else None
             if reused_warm_session:
                 session_name = reused_warm_session
+                if warm_parked_at is not None:
+                    record_warm_idle = getattr(self.store, "record_warm_idle_usage", None)
+                    if callable(record_warm_idle):
+                        try:
+                            record_warm_idle(
+                                session_name,
+                                gpu_type,
+                                parked_at=warm_parked_at,
+                                ended_at=time.time(),
+                            )
+                            warm_idle_ledgered = True
+                        except Exception as exc:
+                            logger.warning(
+                                "Không ghi được CU giữ ấm khi tái sử dụng %s: %s",
+                                session_name,
+                                redact_secrets(str(exc)),
+                            )
 
             reg_ok = self.store.register_session(job_id, raw_attempt, effective_owner, session_name)
             if ownership_attempt is not None and not reg_ok:
@@ -2147,7 +2165,7 @@ class CloudOrchestrator:
             output_manifest["stage_timings_seconds"] = dict(stage_timings)
             output_manifest["cu_rate_per_hour"] = rate_per_hour
             output_manifest["cu_measurement_source"] = _cu_measurement_source()
-            output_manifest["warm_idle_included"] = bool(reused_warm_session and warm_parked_at is not None)
+            output_manifest["warm_idle_ledgered"] = warm_idle_ledgered
             try:
                 (attempt_res_dir / "output_manifest.json").write_text(
                     redact_secrets(json.dumps(output_manifest, indent=2, ensure_ascii=False), extra_secrets=extra_secrets),
