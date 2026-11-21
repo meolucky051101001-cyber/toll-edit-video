@@ -997,11 +997,12 @@ class _JobRun:
             self._raise_if_aborted()
             raise _JobAborted("lease_lost", is_lease_lost=True)
 
-        self.session_may_exist = True
         self.runtime_start_time = time.time()
         if self.reused_warm_session:
+            self.session_may_exist = True
             created, msg = True, f"reused warm session {self.session_name}"
         else:
+            self.session_may_exist = True
             created, msg = _call_with_cancel(
                 self.orchestrator.adapter.create_session,
                 self.session_name,
@@ -1020,7 +1021,6 @@ class _JobRun:
             )
 
         if not created:
-            self.session_may_exist = False
             provision_error = str(msg).lower()
             if re.search(r"\b(?:503|412)\b", provision_error) or "hết máy" in provision_error:
                 err_code = CloudErrorCode.PROVIDER_503.value
@@ -1028,29 +1028,12 @@ class _JobRun:
                 err_code = CloudErrorCode.GPU_ALLOCATION_REFUSED.value
             else:
                 err_code = CloudErrorCode.SESSION_CREATE_FAILED.value
-                if self.is_gpu_check:
-                    raise _OrchestratorStageError(
-                        err_code,
-                        f"Chưa xác nhận kết quả cấp GPU: {msg}",
-                    )
-            self._update(
-                0,
-                "Lỗi: Tạo máy ảo Colab thất bại",
-                state="failed",
-                error=f"Không thể tạo máy Colab: {msg}",
-                error_code=err_code,
-                cleanup_status="verified",
+            error = (
+                f"Chưa xác nhận kết quả cấp GPU: {msg}"
+                if self.is_gpu_check and err_code == CloudErrorCode.SESSION_CREATE_FAILED.value
+                else f"Không thể tạo máy Colab: {msg}"
             )
-            self.orchestrator.store.record_cleanup_result(
-                self.job_id,
-                self.raw_attempt,
-                self.session_name,
-                verified_stopped=True,
-                cleanup_status="verified",
-                attempts=0,
-                error=None,
-            )
-            return False
+            raise _OrchestratorStageError(err_code, error)
 
         return True
 
