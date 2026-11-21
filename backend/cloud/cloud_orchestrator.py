@@ -1741,6 +1741,7 @@ class CloudOrchestrator:
                     cancel_check=_cancel_probe,
                 )
 
+            provider_rate_eligible = bool(created)
             # Đóng race hủy trong lúc create_session: nếu hủy trong/sau khi tạo thì thu hồi ngay, không upload/chạy pipeline.
             aborted_after_create, abort_reason = _check_abort()
             if aborted_after_create:
@@ -1776,7 +1777,6 @@ class CloudOrchestrator:
                 )
                 return False
 
-            provider_rate_eligible = True
             _mark_stage("upload")
             # 3. Upload mã nguồn và video lên VM (`uploading` đơn hướng, không lùi từ preparing)
             is_url = validated_input.kind == "url"
