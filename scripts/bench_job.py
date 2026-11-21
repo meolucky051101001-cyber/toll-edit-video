@@ -32,17 +32,18 @@ def _candidate_manifest_files(job_dir: Path) -> list[Path]:
         if configured_workspace:
             roots.append(Path(configured_workspace) / "bot_system" / "manifests")
 
-    files = set()
+    files = {}
     clean_id = _clean_job_id(job_dir.name)
     for root in roots:
         if root.is_dir():
-            files.update(root.glob("*.manifest.json"))
+            for candidate in root.glob("*.manifest.json"):
+                files.setdefault(candidate.resolve(), candidate)
     expected_name = f"{clean_id}.manifest.json"
     for root in roots:
         expected = root / expected_name
         if expected.is_file():
-            files.add(expected)
-    return sorted(files)
+            files.setdefault(expected.resolve(), expected)
+    return sorted(files.values(), key=lambda path: str(path.resolve()))
 
 
 def _read_manifest(path: Path) -> dict:

@@ -85,6 +85,17 @@ def test_output_directory_resolves_from_configured_workspace(tmp_path, capsys, m
     assert report["total_duration_s"] == 9.0
 
 
+def test_relative_output_directory_deduplicates_manifest_candidates(tmp_path, capsys, monkeypatch):
+    _, _, output_dir = fixture_runs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AUTODUB_WORKSPACE", str(tmp_path / "workspace"))
+
+    assert bench_job.main(["workspace/after-output", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total_duration_s"] == 8.0
+    assert Path(report["manifest"]).resolve().name == "after.manifest.json"
+
+
 def test_missing_manifest_exits_two_with_clear_message(tmp_path, capsys):
     missing = tmp_path / "not-here"
 
