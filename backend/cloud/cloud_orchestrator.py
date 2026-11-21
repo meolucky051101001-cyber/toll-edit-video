@@ -2389,6 +2389,23 @@ class CloudOrchestrator:
                         idle_cu,
                     )
                     return False
+                provider = budget_info.get("provider")
+                if (
+                    isinstance(provider, dict)
+                    and provider.get("status") == "ok"
+                    and not provider.get("is_stale")
+                    and provider.get("balance") is not None
+                ):
+                    balance = float(provider["balance"])
+                    required_balance = reserved_today + idle_cu
+                    if balance < required_balance - 1e-6:
+                        logger.info(
+                            "Không giữ ấm session %s vì số dư Colab %.4f CU thấp hơn phần giữ chỗ và CU chờ %.4f.",
+                            session_name,
+                            balance,
+                            required_balance,
+                        )
+                        return False
             except Exception as exc:
                 logger.warning(
                     "Không xác định được CU còn lại để giữ ấm session %s; session sẽ được thu hồi: %s",

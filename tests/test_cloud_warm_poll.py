@@ -72,6 +72,48 @@ def test_warm_session_keepalive_is_skipped_when_daily_cu_is_near_limit(tmp_path:
     assert store.list_warm_sessions() == []
 
 
+def test_warm_session_parking_respects_fresh_provider_balance_and_reservations(tmp_path: Path):
+    store = CloudJobStore(db_path=tmp_path / "warm-provider-balance.db", rollout_controlled=False)
+    store.set_cu_budget_daily(10.0)
+    reserved_job = store.enqueue("unused.mp4", video_name="unused.mp4", gpu_type="T4", cu_estimated=0.4)
+    assert store.claim_job(reserved_job.job_id, owner_id="reserved-job") is not None
+    store.record_provider_usage_snapshot({"ok": True, "balance": 0.1})
+    budget = store.get_cu_budget_info()
+    assert budget["reserved_today"] > 0.0
+
+    orchestrator = CloudOrchestrator(
+        store=store,
+        adapter=_WarmAdapter(),
+        enable_warm_session_reuse=True,
+    )
+
+    assert orchestrator._park_warm_session_on_success("warm-session", "T4") is False
+    assert store.list_warm_sessions() == []
+
+
+@pytest.mark.parametrize("snapshot_state", ["missing", "stale"])
+def test_warm_session_parking_uses_daily_limit_without_fresh_provider_snapshot(
+    tmp_path: Path,
+    snapshot_state: str,
+):
+    store = CloudJobStore(db_path=tmp_path / f"warm-provider-{snapshot_state}.db", rollout_controlled=False)
+    store.set_cu_budget_daily(10.0)
+    if snapshot_state == "stale":
+        store.record_provider_usage_snapshot(
+            {"ok": True, "balance": 0.0, "observed_at": time.time() - 600.0}
+        )
+
+    orchestrator = CloudOrchestrator(
+        store=store,
+        adapter=_WarmAdapter(),
+        enable_warm_session_reuse=True,
+    )
+
+    assert orchestrator._park_warm_session_on_success("warm-session", "T4") is True
+    orchestrator._cancel_warm_timer("warm-session")
+    store.remove_warm_session("warm-session")
+
+
 def test_list_warm_sessions_includes_idle_seconds_and_cu_estimate(tmp_path: Path):
     store = CloudJobStore(db_path=tmp_path / "warm-list.db", rollout_controlled=False)
     now = time.time()
