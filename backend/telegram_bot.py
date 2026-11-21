@@ -1104,6 +1104,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         worker_task.cancel()
     
     # 2. Xóa sạch hàng đợi
+    await _cancel_download_prefetches()
     global_queue.clear()
     clear_network_retries()
             
@@ -1142,6 +1143,7 @@ def _reserve_queue_positions(count=1):
     queue_counter += count
     return first_position
 worker_task = None
+_prefetch_tasks = set()
 GLOBAL_BOT_APP = None
 
 NETWORK_RETRY_DELAYS = (60, 300)
@@ -1310,6 +1312,124 @@ def _ensure_video_worker():
     if worker_task is None or worker_task.done():
         worker_task = asyncio.create_task(video_worker())
     return worker_task
+
+
+def _telegram_prefetch_depth():
+    try:
+        return min(2, max(0, int(os.getenv("V1_TELEGRAM_PREFETCH_DEPTH", "1"))))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _has_existing_telegram_source(job):
+    state = job.get("resume_state")
+    source_path = state.get("source_path") if isinstance(state, dict) else None
+    return bool(source_path and Path(source_path).is_file())
+
+
+async def _run_download_prefetch(job):
+    try:
+        source_path = await _download_job_source(job, None, reload_downloader=False)
+    except asyncio.CancelledError:
+        logger.info("Telegram download prefetch cancelled job_id=%s", job.get("job_id"))
+        raise
+    except Exception:
+        logger.warning(
+            "Telegram download prefetch failed job_id=%s",
+            job.get("job_id"),
+            exc_info=True,
+        )
+        raise
+    logger.info(
+        "Telegram download prefetch completed job_id=%s",
+        job.get("job_id"),
+    )
+    return source_path
+
+
+def _discard_download_prefetch(task):
+    _prefetch_tasks.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
+def _schedule_next_download_prefetch():
+    if os.getenv("V1_TELEGRAM_PREFETCH", "1").strip() == "0":
+        return None
+    if getattr(shared_state, "stop_requested", False) or any(
+        not task.done() for task in _prefetch_tasks
+    ):
+        return None
+    depth = _telegram_prefetch_depth()
+    if depth == 0:
+        return None
+
+    for job in list(global_queue._queue)[:depth]:
+        if not isinstance(job, dict):
+            continue
+        if job.get("type") not in {"url", "video"}:
+            continue
+        if job.get("execution_mode") != "local":
+            continue
+        if _has_existing_telegram_source(job) or job.get("_prefetch_task"):
+            continue
+        task = asyncio.create_task(_run_download_prefetch(job))
+        job["_prefetch_task"] = task
+        _prefetch_tasks.add(task)
+        task.add_done_callback(_discard_download_prefetch)
+        return task
+    return None
+
+
+async def download_prefetcher():
+    if os.getenv("V1_TELEGRAM_PREFETCH", "1").strip() == "0":
+        return
+    while True:
+        if not getattr(shared_state, "stop_requested", False):
+            _schedule_next_download_prefetch()
+        await asyncio.sleep(1)
+
+
+async def _cancel_download_prefetches():
+    tasks = set(_prefetch_tasks)
+    queued_jobs = list(global_queue._queue)
+    if global_queue.active_job is not None:
+        queued_jobs.append(global_queue.active_job)
+    for job in queued_jobs:
+        if isinstance(job, dict):
+            task = job.pop("_prefetch_task", None)
+            if task is not None:
+                tasks.add(task)
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _install_download_prefetcher(application):
+    previous_post_init = application.post_init
+
+    async def start_prefetcher(app):
+        if previous_post_init:
+            await previous_post_init(app)
+        app.bot_data["_telegram_download_prefetcher"] = asyncio.create_task(
+            download_prefetcher()
+        )
+
+    application.post_init = start_prefetcher
+    previous_post_shutdown = application.post_shutdown
+
+    async def stop_prefetcher(app):
+        await _cancel_download_prefetches()
+        task = app.bot_data.pop("_telegram_download_prefetcher", None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if previous_post_shutdown:
+            await previous_post_shutdown(app)
+
+    application.post_shutdown = stop_prefetcher
 
 
 async def send_video_safely(context, chat_id, final_video, caption, status_msg, url_or_filename):
@@ -1693,6 +1813,91 @@ async def run_pipeline_v1_for_telegram(video_path, job, status_msg):
     return result
 
 
+async def _download_job_source(job, status_msg=None, *, reload_downloader=True) -> Path:
+    from pipeline_v2.download_validation import probe_downloaded_video
+    from v1_checkpoint import fingerprint
+
+    download_dir = Path(WORKSPACE) / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    title = None
+    if job["type"] == "url":
+        import importlib
+        import social_downloader
+        if reload_downloader:
+            importlib.reload(social_downloader)
+        from social_downloader import download_social_video
+
+        await safe_edit_status(
+            status_msg,
+            f"Đang tải video: {job.get('url') or job.get('filename') or 'Video Telegram'}",
+        )
+        download_task = asyncio.create_task(asyncio.to_thread(
+            download_social_video, job["url"], str(download_dir), job["job_id"]
+        ))
+
+        def remove_cancelled_download(done):
+            try:
+                result = done.result()
+                if not result[0] or not result[1]:
+                    return
+                downloaded_path = Path(result[1]).resolve()
+                if (
+                    downloaded_path.is_relative_to(download_dir.resolve())
+                    and downloaded_path.is_file()
+                ):
+                    downloaded_path.unlink()
+                    logger.info(
+                        "Removed URL download after Telegram prefetch cancellation job_id=%s",
+                        job.get("job_id"),
+                    )
+            except BaseException:
+                logger.warning(
+                    "Could not clean completed URL download after Telegram prefetch cancellation job_id=%s",
+                    job.get("job_id"),
+                    exc_info=True,
+                )
+
+        try:
+            success, path, title, error = await asyncio.shield(download_task)
+        except asyncio.CancelledError:
+            download_task.add_done_callback(remove_cancelled_download)
+            raise
+        if not success:
+            raise RuntimeError(error or "Khong tai duoc video.")
+        video_path = Path(path)
+        await asyncio.to_thread(probe_downloaded_video, video_path)
+    else:
+        bot = getattr(job.get("context"), "bot", None) or getattr(GLOBAL_BOT_APP, "bot", None)
+        if not bot:
+            raise RuntimeError("Bot client khong kha dung de tai video.")
+        video_path = download_dir / f"{job['job_id']}.mp4"
+        partial = video_path.with_suffix(".partial.mp4")
+        await safe_edit_status(status_msg, "Đang tải video từ Telegram...")
+        try:
+            async def download():
+                file = await bot.get_file(job["file_id"], read_timeout=60, connect_timeout=60)
+                await file.download_to_drive(
+                    str(partial), read_timeout=60, write_timeout=60, connect_timeout=60
+                )
+
+            await asyncio.wait_for(download(), timeout=600)
+            await asyncio.to_thread(probe_downloaded_video, partial)
+            os.replace(partial, video_path)
+        finally:
+            partial.unlink(missing_ok=True)
+
+    new_sha = await asyncio.to_thread(fingerprint, video_path)
+    state = job.setdefault("resume_state", {})
+    if state.get("source_sha256") and state["source_sha256"] != new_sha:
+        raise ValueError("Nguon tai lai khac nguon da dong bang.")
+    state["source_path"] = str(video_path)
+    state["source_sha256"] = new_sha
+    if title is not None:
+        state["title"] = title
+    global_queue.publish()
+    return video_path
+
+
 async def _process_telegram_job(job):
     import shared_state
     from batch_processor import BatchStopRequested
@@ -1735,6 +1940,35 @@ async def _process_telegram_job(job):
             global_queue.publish()
         else:
             state = job["resume_state"]
+            prefetch_task = job.get("_prefetch_task")
+            if prefetch_task is not None:
+                try:
+                    if not prefetch_task.done():
+                        await safe_edit_status(status_msg, "Đang chờ tải xong video...")
+                    await asyncio.shield(prefetch_task)
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    cancelling = getattr(current_task, "cancelling", None)
+                    if (
+                        callable(cancelling) and cancelling()
+                    ) or not prefetch_task.cancelled():
+                        raise
+                    job.pop("_prefetch_task", None)
+                    logger.warning(
+                        "Telegram prefetch cancelled; downloading in worker job_id=%s",
+                        job.get("job_id"),
+                    )
+                    await _download_job_source(job, status_msg)
+                except Exception:
+                    job.pop("_prefetch_task", None)
+                    logger.warning(
+                        "Telegram prefetch failed; downloading in worker job_id=%s",
+                        job.get("job_id"),
+                        exc_info=True,
+                    )
+                    await _download_job_source(job, status_msg)
+                else:
+                    job.pop("_prefetch_task", None)
             video_path = Path(state["source_path"]) if state.get("source_path") else None
             if video_path and not video_path.resolve().is_relative_to((Path(WORKSPACE) / "downloads").resolve()):
                 raise ValueError("Nguon Telegram nam ngoai thu muc downloads.")
@@ -1744,46 +1978,7 @@ async def _process_telegram_job(job):
                 if expected and await asyncio.to_thread(fingerprint, video_path) != expected:
                     raise ValueError("Nguon Telegram da thay doi; khong the resume job cu.")
             else:
-                download_dir = Path(WORKSPACE) / "downloads"
-                download_dir.mkdir(parents=True, exist_ok=True)
-                if job["type"] == "url":
-                    import importlib
-                    import social_downloader
-                    importlib.reload(social_downloader)
-                    from social_downloader import download_social_video
-                    await safe_edit_status(status_msg, f"Đang tải video: {name}")
-                    success, path, title, error = await asyncio.to_thread(
-                        download_social_video, job["url"], str(download_dir), job["job_id"]
-                    )
-                    if not success:
-                        raise RuntimeError(error or "Khong tai duoc video.")
-                    video_path = Path(path)
-                    await asyncio.to_thread(probe_downloaded_video, video_path)
-                    state["title"] = title
-                else:
-                    bot = getattr(job.get("context"), "bot", None) or getattr(GLOBAL_BOT_APP, "bot", None)
-                    if not bot:
-                        raise RuntimeError("Bot client khong kha dung de tai video.")
-                    video_path = download_dir / f"{job['job_id']}.mp4"
-                    partial = video_path.with_suffix(".partial.mp4")
-                    await safe_edit_status(status_msg, "Đang tải video từ Telegram...")
-                    try:
-                        async def download():
-                            file = await bot.get_file(job["file_id"], read_timeout=60, connect_timeout=60)
-                            await file.download_to_drive(
-                                str(partial), read_timeout=60, write_timeout=60, connect_timeout=60
-                            )
-                        await asyncio.wait_for(download(), timeout=600)
-                        await asyncio.to_thread(probe_downloaded_video, partial)
-                        os.replace(partial, video_path)
-                    finally:
-                        partial.unlink(missing_ok=True)
-                new_sha = await asyncio.to_thread(fingerprint, video_path)
-                if state.get("source_sha256") and state["source_sha256"] != new_sha:
-                    raise ValueError("Nguon tai lai khac nguon da dong bang.")
-                state["source_path"] = str(video_path)
-                state["source_sha256"] = new_sha
-                global_queue.publish()
+                video_path = await _download_job_source(job, status_msg)
 
         if shared_state.stop_requested:
             raise BatchStopRequested("Đã dừng theo yêu cầu.")
@@ -2116,6 +2311,7 @@ async def queue_signal_watcher(application=None):
                 for pending_job in list(global_queue._queue):
                     submit_delete(SNAPSHOT, pending_job)
                 clear_flag.unlink(missing_ok=True)
+                await _cancel_download_prefetches()
                 global_queue.clear()
                 clear_network_retries()
                 logger.info("🗑️ Đã nhận lệnh xóa sạch hàng đợi từ Dashboard.")
@@ -2227,6 +2423,7 @@ def main():
             global GLOBAL_BOT_APP
             GLOBAL_BOT_APP = app
             install_access_gate(app, load_allowed_chat_ids(), bot_name="v1")
+            _install_download_prefetcher(app)
 
             async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
                 from telegram.error import NetworkError, TimedOut, RetryAfter
