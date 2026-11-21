@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +22,63 @@ from backend.cloud.cloud_orchestrator import (
     _resolve_gemini_key_and_secrets,
 )
 from backend.cloud.cloud_security import redact_secrets
+
+
+@pytest.mark.parametrize("use_popen", [False, True])
+def test_wsl_argv_uses_exec_and_passes_arguments_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+    use_popen: bool,
+):
+    raw_args = ["folder with spaces/file's $name.mp4", "$HOME", "don't-expand"]
+    calls = []
+
+    if use_popen:
+        class FakePopen:
+            def __init__(self, argv, **_kwargs):
+                calls.append(list(argv))
+                self.stdout = io.BytesIO()
+                self.stderr = io.BytesIO()
+                self.stdin = None
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        monkeypatch.setattr(colab_bridge.subprocess, "Popen", FakePopen)
+        result = colab_bridge._run_wsl_argv(
+            "python3",
+            raw_args,
+            distro="Ubuntu",
+            user="test-user",
+            cancel_check=lambda: False,
+        )
+    else:
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(colab_bridge.subprocess, "run", fake_run)
+        result = colab_bridge._run_wsl_argv(
+            "python3",
+            raw_args,
+            distro="Ubuntu",
+            user="test-user",
+        )
+
+    assert result == (0, "", "")
+    assert calls == [[
+        "wsl",
+        "-d",
+        "Ubuntu",
+        "-u",
+        "test-user",
+        "--exec",
+        "python3",
+        *raw_args,
+    ]]
 
 
 def test_external_env_fallback_requires_explicit_flag(

@@ -225,9 +225,9 @@ def _run_wsl_argv(
         str(target_distro),
         "-u",
         str(target_user),
-        "--",
+        "--exec",
         str(program),
-        *[shlex.quote(str(a)) for a in args],
+        *[str(a) for a in args],
     ]
 
     use_popen = (cancel_check is not None) or (
