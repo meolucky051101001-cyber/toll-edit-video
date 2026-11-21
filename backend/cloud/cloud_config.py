@@ -27,7 +27,10 @@ _ISOLATED_ENV_KEYS = {
 
 def _env_candidates() -> List[Tuple[Path, bool]]:
     candidates = [(_LOCAL_ENV_PATH, False)]
-    if _EXTERNAL_ENV_PATH.exists():
+    same_path = os.path.normcase(os.path.abspath(_EXTERNAL_ENV_PATH)) == os.path.normcase(
+        os.path.abspath(_LOCAL_ENV_PATH)
+    )
+    if not same_path and _EXTERNAL_ENV_PATH.exists():
         if os.getenv("AUTODUB_ALLOW_EXTERNAL_ENV_FALLBACK") == "1":
             candidates.append((_EXTERNAL_ENV_PATH, True))
         else:

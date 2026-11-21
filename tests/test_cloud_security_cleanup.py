@@ -108,6 +108,26 @@ def test_external_env_fallback_requires_explicit_flag(
     assert len([record for record in caplog.records if "Bỏ qua file .env bên ngoài" in record.message]) == 1
 
 
+def test_external_env_path_matching_local_path_is_skipped_without_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    local_env = tmp_path / "local.env"
+    local_env.write_text("AUTODUB_TEST_SAME_ENV=loaded-locally\n", encoding="utf-8")
+    (tmp_path / "subdir").mkdir()
+    external_env = local_env.parent / "subdir" / ".." / local_env.name
+    monkeypatch.setattr(cloud_config, "_LOCAL_ENV_PATH", local_env)
+    monkeypatch.setattr(cloud_config, "_EXTERNAL_ENV_PATH", external_env)
+    monkeypatch.delenv("AUTODUB_ALLOW_EXTERNAL_ENV_FALLBACK", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="backend.cloud.cloud_config"):
+        candidates = cloud_config._env_candidates()
+
+    assert candidates == [(local_env, False)]
+    assert not any("Bỏ qua file .env bên ngoài" in record.message for record in caplog.records)
+
+
 def test_cloud_cache_backend_is_loaded_from_dotenv_before_config_reload(
     tmp_path: Path,
 ):
