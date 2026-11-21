@@ -6,7 +6,7 @@ File này được sinh tự động bởi `python scripts/gen_env_docs.py`. Kh�
 Cột *Mặc định* là giá trị viết trong code. Nhiều giá trị nghĩa là các module dùng
 mặc định khác nhau cho cùng một biến; nên xem lại những dòng đó.
 
-Tổng: 197 biến.
+Tổng: 202 biến.
 
 | Biến | Mặc định | Nơi đọc |
 |---|---|---|
@@ -43,7 +43,7 @@ Tổng: 197 biến.
 | `AUTODUB_DATA_DIR` | — | `backend/config/paths.py` |
 | `AUTODUB_DISABLE_STOP_CHECK` | `0` | `backend/shared_state.py`, `backend/social_downloader.py` |
 | `AUTODUB_INPUT_DIR` | `D:\video_input` | `backend/batch_processor.py`, `backend/main.py`, `backend/telegram_bot.py` |
-| `AUTODUB_LOCAL_TOKEN` | — | `backend/cloud/cloud_security.py`, `backend/main.py`, `backend/script_api.py`, `backend/telegram_script_bot.py` |
+| `AUTODUB_LOCAL_TOKEN` | — | `backend/control_token.py` |
 | `AUTODUB_LOG_FILE` | — | `backend/main.py` |
 | `AUTODUB_MIN_FREE_GB` | `(tính lúc chạy)` | `backend/disk_guard.py` |
 | `AUTODUB_MODEL_CACHE` | — | `backend/ai/model_policy.py` |
@@ -53,7 +53,7 @@ Tổng: 197 biến.
 | `AUTODUB_QC_GATE_POLICY` | `(tính lúc chạy)` | `backend/pipeline_v2/config.py` |
 | `AUTODUB_SHARED_WORKSPACE_DIR` | — | `backend/config/paths.py` |
 | `AUTODUB_TELEGRAM_UPLOAD_VIDEO` | `false` | `backend/telegram_bot.py` |
-| `AUTODUB_WORKSPACE` | `(tính lúc chạy)` | `backend/ai/doodle_engine.py`, `backend/ai/script_tts_service.py`, `backend/ai/translation.py`, `backend/ai/v1_auto_voice.py` (+35) |
+| `AUTODUB_WORKSPACE` | `(tính lúc chạy)` | `backend/ai/doodle_engine.py`, `backend/ai/script_tts_service.py`, `backend/ai/translation.py`, `backend/ai/v1_auto_voice.py` (+36) |
 | `BOT_TOKEN` | — | `backend/telegram_script_bot.py`, `backend/v1_preflight.py` |
 | `CAPCUT_API_DIR` | — | `backend/ai/script_tts_service.py` |
 | `CLOUD_BOT_ALLOWED_USER_IDS` | — | `backend/cloud/cloud_telegram_bot.py` |
@@ -132,6 +132,7 @@ Tổng: 197 biến.
 | `SUBEXTRACT_JOBS_DIR` | `(tính lúc chạy)` | `backend/handoff_api.py` |
 | `SystemRoot` | `C:\Windows` | `backend/ops_watchdog.py`, `backend/v1_shutdown.py` |
 | `TARGET_LUFS` | `(tính lúc chạy)` | `backend/pipeline_v2/config.py` |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | `(tính lúc chạy)` | `backend/v1_preflight.py` |
 | `TELEGRAM_BOT_TOKEN` | — | `backend/notification_service.py` |
 | `TELEGRAM_SCRIPT_AI_ENGINE` | `muse` | `backend/telegram_script_bot.py` |
 | `TELEGRAM_SCRIPT_ALLOWED_CHAT_IDS` | — | `backend/telegram_script_bot.py` |
@@ -148,9 +149,11 @@ Tổng: 197 biến.
 | `V1_ALLOW_TRANSLATION_FALLBACK` | `false` | `backend/ai/translation.py` |
 | `V1_ASR_CHUNKING` | `true` | `backend/ai/transcription.py`, `backend/main.py` |
 | `V1_ASR_JOB_OPTIONS` | `{}` | `backend/model_workers/v1_asr_worker.py` |
+| `V1_ASR_KEEP_WARM` | `1` | `backend/ai/v1_asr_isolated.py` |
+| `V1_ASR_KEEP_WARM_MIN_RAM_MB` | `2000` | `backend/ai/v1_asr_session.py` |
 | `V1_ASR_MODEL` | — | `backend/ai/v1_sensevoice_adapter.py` |
 | `V1_ASR_PARALLEL_SENSEVOICE` | `1` | `backend/ai/transcription.py` |
-| `V1_ASR_REUSE` | `1` | `backend/ai/v1_asr_cache.py` |
+| `V1_ASR_REUSE` | `0` / `1` | `backend/ai/transcription.py`, `backend/ai/v1_asr_cache.py` |
 | `V1_ASYNC_PROGRESS_NOTIFY` | `1` | `backend/v1_orchestrator.py` |
 | `V1_BLUR_CPU_INPLACE` | `True` | `backend/v1_gpu_subtitle_blur.py` |
 | `V1_CAPCUT_WORKERS` | `6` | `backend/ai/voice_cloning.py` |
@@ -182,7 +185,7 @@ Tổng: 197 biến.
 | `V1_PADDLE_ENGINE` | — | `backend/ai/v1_model_policy.py` |
 | `V1_PADDLE_RECOGNITION_MODEL` | — | `backend/ai/v1_model_policy.py`, `backend/job_tracker.py` |
 | `V1_PARAFORMER_CO_ASR` | `selective` | `backend/ai/transcription.py` |
-| `V1_QC_POLICY` | `(tính lúc chạy)` / `OFF` | `backend/main.py`, `backend/v1_quality_gate.py` |
+| `V1_QC_POLICY` | `(tính lúc chạy)` / `WARN` | `backend/main.py`, `backend/v1_quality_gate.py` |
 | `V1_RESUME_MANIFEST_SCAN_LIMIT` | `50` | `backend/v1_orchestrator.py` |
 | `V1_ROFORMER_BATCH_SIZE` | `0` | `backend/model_workers/v1_separator_worker.py` |
 | `V1_ROFORMER_OVERLAP` | `2` | `backend/model_workers/v1_separator_worker.py` |
@@ -196,6 +199,8 @@ Tổng: 197 biến.
 | `V1_SMART_SKIP_OCR` | `(tính lúc chạy)` / `true` | `backend/main.py`, `backend/ocr_utils.py` |
 | `V1_STRICT_OCR_GEOMETRY` | `1` | `backend/v1_ocr_geometry.py` |
 | `V1_SUBTITLE_COVER_STYLE` | — | `backend/ass_utils.py`, `backend/cloud/cloud_orchestrator.py`, `backend/cloud/gpu_scripts/full_pipeline.py`, `backend/job_config_service.py` (+2) |
+| `V1_TELEGRAM_PREFETCH` | `1` | `backend/telegram_bot.py` |
+| `V1_TELEGRAM_PREFETCH_DEPTH` | `1` | `backend/telegram_bot.py` |
 | `V1_TRANSLATION_MEANING_POLICY` | `warn` | `backend/ai/v1_translation_meaning.py` |
 | `V1_TTS_WORKERS` | `6` | `backend/ai/voice_cloning.py`, `backend/main.py` |
 | `V1_VISUAL_OCR_MAX_SAMPLES` | `20000` | `backend/ocr_utils.py` |

@@ -154,7 +154,7 @@ class ReadOnlyPreflightTests(unittest.TestCase):
                  patch.object(preflight.tempfile, "mkstemp", side_effect=AssertionError("write")):
                 result = preflight.run_preflight(root, "all", read_only=True)
             self.assertIs(result["ready"], True)
-            self.assertEqual(len(result["checks"]), 26)
+            self.assertEqual(len(result["checks"]), 27)
             self.assertTrue(all(check["status"] == "pass" for check in result["checks"]))
 
     def test_ffmpeg_version_check_requires_version_seven_or_newer(self):
