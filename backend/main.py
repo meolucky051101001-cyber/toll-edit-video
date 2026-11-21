@@ -150,29 +150,21 @@ app.add_middleware(
 import secrets
 
 def _load_or_create_local_token() -> str:
-    env_token = os.getenv("AUTODUB_LOCAL_TOKEN", "").strip()
-    if env_token:
-        return env_token
+    try:
+        from .control_token import candidate_token_paths, read_control_token
+    except ImportError:
+        from control_token import candidate_token_paths, read_control_token
+
     workspace_root = Path(
         os.getenv(
             "AUTODUB_WORKSPACE",
             str(Path(__file__).resolve().parent.parent / "workspace"),
         )
     )
-    candidate_paths = [
-        workspace_root / "bot_system" / ".dashboard_control_token",
-        workspace_root / ".dashboard_control_token",
-        Path(__file__).resolve().parent.parent / "workspace_backup_safety" / ".dashboard_control_token",
-        Path(__file__).resolve().parent / ".dashboard_control_token",
-    ]
-    for p in candidate_paths:
-        try:
-            if p.is_file():
-                tok = p.read_text(encoding="utf-8").strip()
-                if len(tok) >= 16:
-                    return tok
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in main._load_or_create_local_token (p.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
+    token = read_control_token(workspace_root)
+    if token:
+        return token
+    candidate_paths = candidate_token_paths(workspace_root)
     new_token = secrets.token_urlsafe(32)
     for p in candidate_paths[:2]:
         try:
