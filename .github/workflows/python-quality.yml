@@ -81,6 +81,8 @@ jobs:
           tests/test_cloud_v1_parity.py
           tests/test_url_utils.py
           tests/test_v1_checkpoint_orchestrator.py
+          tests/test_v1_checkpoint.py
+          tests/test_bench_job.py
           tests/test_speech_timeline_preservation.py
           tests/test_tts_caption_geometry.py
           tests/test_tts_final_fit.py

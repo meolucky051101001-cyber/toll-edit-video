@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,63 @@ from backend.v1_checkpoint import Checkpoint, ManifestManager
 from backend.ai.v1_asr_isolated import extract_subtitles_isolated
 
 class CheckpointTests(unittest.TestCase):
+    def test_stage_metrics_keep_json_scalars_and_scalar_dicts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'input'
+            source.write_bytes(b'input')
+            manager = ManifestManager(root)
+            manager.get_or_create_manifest('metrics-job', source)
+
+            manager.record_stage_metrics('metrics-job', 'visual_ocr', {
+                'calls': 4,
+                'ratio': 0.5,
+                'enabled': True,
+                'label': 'ocr',
+                'missing': None,
+                'summary': {'frames': 3, 'strategy': 'adaptive'},
+                'detected_watermarks': [{'text': 'drop me'}],
+                'nested_list': {'items': [1, 2]},
+                'not_json': object(),
+                'not_finite': float('nan'),
+            })
+
+            metrics = manager.load_manifest('metrics-job').stages['visual_ocr']['metrics']
+            self.assertEqual(metrics, {
+                'calls': 4,
+                'ratio': 0.5,
+                'enabled': True,
+                'label': 'ocr',
+                'missing': None,
+                'summary': {'frames': 3, 'strategy': 'adaptive'},
+            })
+
+    def test_stage_start_resets_metrics_and_old_manifest_loads_without_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'input'
+            source.write_bytes(b'input')
+            manager = ManifestManager(root)
+            manager.get_or_create_manifest('metrics-job', source)
+            manager.record_stage_metrics('metrics-job', 'visual_ocr', {'calls': 4})
+            manager.record_stage_start('metrics-job', 'visual_ocr')
+            self.assertEqual(
+                manager.load_manifest('metrics-job').stages['visual_ocr']['metrics'], {}
+            )
+
+            manifest_path = manager._manifest_file('metrics-job')
+            data = json.loads(manifest_path.read_text(encoding='utf-8'))
+            data['stages']['visual_ocr'].pop('metrics')
+            manifest_path.write_text(json.dumps(data), encoding='utf-8')
+            old_manifest = manager.load_manifest('metrics-job')
+            self.assertIsNotNone(old_manifest)
+            self.assertNotIn('metrics', old_manifest.stages['visual_ocr'])
+            manager.record_stage_metrics('metrics-job', 'visual_ocr', {'calls': 2})
+            self.assertEqual(
+                manager.load_manifest('metrics-job').stages['visual_ocr']['metrics'],
+                {'calls': 2},
+            )
+
     def test_publish_updates_artifact_without_counting_qc_as_render_time(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -61,4 +119,3 @@ class CheckpointTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

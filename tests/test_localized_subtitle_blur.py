@@ -2,7 +2,7 @@
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import json
 import pytest
 
@@ -347,6 +347,7 @@ def test_renderer_reads_ass_geometry_and_keeps_text_after_blur(tmp_path):
     source.write_bytes(b"input"); audio.write_bytes(b"input")
     generate_ass_file([segment()], [], ass, cover_style="localized_blur")
     commands = []
+    metrics = {}
     def fake_run(cmd, **kwargs):
         commands.append(cmd)
         output.write_bytes(b"x" * 12000)
@@ -355,10 +356,49 @@ def test_renderer_reads_ass_geometry_and_keeps_text_after_blur(tmp_path):
          patch.object(v1_media_streams, "validate_video_output"), \
          patch.object(video_utils, "run_batch_subprocess", side_effect=fake_run), \
          patch("canvas_settings.get_canvas_settings", return_value={"sub_cover_style": "solid_box"}):
-        assert video_utils.process_video(str(source), str(ass), str(audio), str(output))
+        assert video_utils.process_video(str(source), str(ass), str(audio), str(output),
+                                         metrics=metrics)
+    assert metrics["blur_path"] == "ffmpeg_filtergraph"
+    assert metrics["encoder"] == "h264_nvenc preset=p3"
+    assert metrics["encode_seconds"] >= 0
     graph = commands[0][commands[0].index("-vf") + 1]
     assert graph.index("boxblur=") < graph.index("subtitles=")
     assert "gte(t,0.400000)*lt(t,1.000000)" in graph
+
+
+def test_renderer_records_gpu_localized_blur_path(tmp_path):
+    import sys
+    from types import SimpleNamespace
+    from backend import video_utils, v1_media_streams
+    from backend.v1_media_streams import MainVideo
+
+    source, audio, subtitles, output = [
+        tmp_path / name for name in ("in.mp4", "mix.wav", "sub.srt", "out.mp4")
+    ]
+    source.write_bytes(b"x" * 21000)
+    audio.write_bytes(b"audio")
+    subtitles.write_text("subtitle", encoding="utf-8")
+    render_gpu = Mock(return_value=(True, "ok"))
+    gpu_module = SimpleNamespace(
+        gpu_localized_blur_available=lambda: True,
+        render_video_with_gpu_localized_blur=render_gpu,
+    )
+    metrics = {}
+    boxes = [box(0, 1), box(2, 3, x=.7, right=.9)]
+
+    with patch.object(v1_media_streams, "probe_main_video",
+                      return_value=MainVideo(0, 720, 1280, 30, 4, 1, 1, False)), \
+         patch.dict(sys.modules, {"v1_gpu_subtitle_blur": gpu_module}):
+        assert video_utils.process_video(
+            str(source), str(subtitles), str(audio), str(output),
+            delogo=False, subtitle_cover_style="localized_blur",
+            localized_blur_boxes=boxes, metrics=metrics,
+        )
+
+    assert metrics["blur_path"] == "gpu_frame_pipe"
+    assert metrics["encoder"] == "h264_nvenc preset=p3"
+    assert metrics["encode_seconds"] >= 0
+    render_gpu.assert_called_once()
 
 
 @pytest.mark.parametrize("endpoint", ["api_process_video", "api_process_url"])
