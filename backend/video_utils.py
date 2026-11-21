@@ -1007,7 +1007,6 @@ def process_video(
         if (
             cover_style == "localized_blur"
             and int(last_blur_metrics.get("slots", 0) or 0) >= 2
-            and not hasattr(run_batch_subprocess, "_mock_name")
             and os.path.isfile(video_path)
             and os.path.getsize(video_path) > 20000
         ):
