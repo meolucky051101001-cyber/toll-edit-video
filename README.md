@@ -52,7 +52,7 @@ Tool V1 quản lý các model tập trung qua `backend/v1_model_registry.py` và
 | **OCR** | PP-OCRv6 Tiny Det + PP-OCRv5 Server Rec (ONNX) | ONNX Runtime CUDA (GPU:0) | Smart Skip / Reuse visual bbox |
 | **Dịch thuật** | Gemini Flash (Multi-key Pool) | HTTP REST đa key + cache phiên | Secondary API keys / Tiered fallback |
 | **TTS** | CapCut TTS (6-workers) & Vie-TTS (VieNeu 14 giọng) | Async streaming pooling & fallback tự động | Edge-TTS (4-workers) |
-| **Render** | FFmpeg NVENC H.264 | NVIDIA NVENC Hardware Video Encoder | libx264 CPU encode |
+| **Render** | FFmpeg NVENC H.264 | NVIDIA NVENC Hardware Video Encoder | NVENC preset fast (không có fallback CPU cho render chính; Studio export trong workflow_api có libx264). |
 
 ---
 
