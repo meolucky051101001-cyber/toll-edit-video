@@ -1912,7 +1912,10 @@ async def _process_telegram_job(job):
                     await asyncio.shield(prefetch_task)
                 except asyncio.CancelledError:
                     current_task = asyncio.current_task()
-                    if current_task and current_task.cancelling():
+                    cancelling = getattr(current_task, "cancelling", None)
+                    if (
+                        callable(cancelling) and cancelling()
+                    ) or not prefetch_task.cancelled():
                         raise
                     job.pop("_prefetch_task", None)
                     logger.warning(

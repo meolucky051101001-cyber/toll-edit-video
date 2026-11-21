@@ -273,6 +273,37 @@ class TelegramPrefetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(calls, [False, True])
 
+    async def test_cancelled_prefetch_falls_back_without_task_cancelling_api(self):
+        job = self.make_job()
+        await self.queue.put(job)
+        calls = []
+
+        async def cancel_then_download(item, status_msg=None, *, reload_downloader=True):
+            calls.append(reload_downloader)
+            if not reload_downloader:
+                raise asyncio.CancelledError
+            return await self.fake_download(item, status_msg, reload_downloader=reload_downloader)
+
+        with patch.object(bot, "_download_job_source", side_effect=cancel_then_download), \
+             patch.object(bot, "prepare_telegram_job", side_effect=lambda item: item), \
+             patch("pipeline_v2.download_validation.probe_downloaded_video"), \
+             patch("v1_checkpoint.fingerprint", return_value="source-hash"), \
+             patch.object(bot, "run_pipeline_v1_for_telegram", AsyncMock(return_value={
+                 "status": "success",
+                 "final_video": str(self.root / "output" / "Dubbed_job-1.mp4"),
+                 "tracker_finalized": True,
+             })), \
+             patch.object(bot.job_tracker, "start_video"), \
+             patch.object(bot, "safe_edit_status", AsyncMock()):
+            task = bot._schedule_next_download_prefetch()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            with patch.object(bot.asyncio, "current_task", return_value=SimpleNamespace()):
+                result = await bot._process_telegram_job(job)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(calls, [False, True])
+
     async def test_stop_cancels_prefetch_and_removes_partial_telegram_download(self):
         started = asyncio.Event()
 
