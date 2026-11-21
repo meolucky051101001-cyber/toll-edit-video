@@ -266,9 +266,14 @@ def test_asr_session_expires_automatically_when_idle(tmp_path, monkeypatch):
         env=dict(os.environ),
     )
 
-    timer = v1_asr_session._idle_timer
-    assert timer is not None and timer.daemon
-    timer.join(timeout=2)
+    deadline = time.monotonic() + 2
+    while v1_asr_session._process is not None and time.monotonic() < deadline:
+        timer = v1_asr_session._idle_timer
+        if timer is None:
+            time.sleep(0.01)
+        else:
+            assert timer.daemon
+            timer.join(timeout=min(0.1, deadline - time.monotonic()))
     assert v1_asr_session._process is None
 
 
