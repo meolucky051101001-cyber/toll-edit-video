@@ -111,6 +111,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     or "/content/drive/MyDrive/AutoDubCloudCache",
     "cloud_cache_save_enabled": os.getenv("AUTODUB_CLOUD_CACHE_SAVE", "1").strip().lower()
     not in ("0", "false", "no"),
+    "cloud_cache_save_timeout_seconds": int(
+        os.getenv("AUTODUB_CLOUD_CACHE_SAVE_TIMEOUT_SECONDS", "900")
+    ),
     "cloud_drive_mount_timeout_seconds": int(
         os.getenv("AUTODUB_CLOUD_DRIVE_MOUNT_TIMEOUT_SECONDS", "180")
     ),

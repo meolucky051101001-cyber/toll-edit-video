@@ -11,6 +11,10 @@ Có thể đổi thư mục cache bằng `AUTODUB_CLOUD_CACHE_DRIVE_ROOT` (mặc
 `AUTODUB_CLOUD_CACHE_SAVE=0`. Ước tính cần khoảng **6–10 GB** dung lượng Drive; đây
 là ước tính và phụ thuộc runtime cùng các model đang dùng.
 
+Khi cache chưa có hoặc không hợp lệ, job chỉ lưu archive sau khi pipeline hoàn tất
+thành công. Archive chứa isolated venv, Python do uv quản lý và các thư mục model
+đã được điền; nếu pipeline thất bại thì cache không được lưu.
+
 Trước khi chạy job, hãy cấp quyền Drive một lần trong WSL ở chế độ tương tác:
 
 ```bash

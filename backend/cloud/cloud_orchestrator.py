@@ -1246,6 +1246,83 @@ class _JobRun:
                 f"Pipeline Colab thất bại ({pipe_err_code}):\n{pipeline_detail}",
             )
 
+    def _stage_cache_save(self):
+        if (
+            self.cache_backend != "gdrive"
+            or not self.cache_mounted
+            or not DEFAULT_CONFIG.get("cloud_cache_save_enabled", True)
+            or self.cache_status not in {"miss", "invalid"}
+        ):
+            return
+
+        self._mark_stage("cache_save")
+        cache_root = str(
+            DEFAULT_CONFIG.get(
+                "cloud_cache_drive_root",
+                "/content/drive/MyDrive/AutoDubCloudCache",
+            )
+            or "/content/drive/MyDrive/AutoDubCloudCache"
+        )
+        save_argv = [
+            "python3",
+            "setup_env.py",
+            "--cache-save-only",
+            "--cache-dir",
+            cache_root,
+            "--manifest-out",
+            "cache_save_result.json",
+        ]
+        save_timeout = max(
+            1,
+            min(900, int(DEFAULT_CONFIG.get("cloud_cache_save_timeout_seconds", 900) or 900)),
+        )
+        try:
+            if self.use_monitored_exec:
+                save_ok, save_output = self.orchestrator.adapter.run_argv_monitored(
+                    self.session_name,
+                    save_argv,
+                    cwd="/content",
+                    timeout=save_timeout,
+                    cancel_check=self._cancel_probe,
+                    job_tag="cache_save",
+                )
+            else:
+                save_ok, save_output = _call_with_cancel(
+                    self.orchestrator.adapter.exec_argv,
+                    self.session_name,
+                    save_argv,
+                    cwd="/content",
+                    timeout=save_timeout,
+                    cancel_check=self._cancel_probe,
+                )
+        except _JobAborted:
+            raise
+        except Exception:
+            self._raise_if_aborted()
+            self.cache_status = "save_failed"
+            logger.warning(
+                "Không lưu được Google Drive cache cho session %s; tiếp tục công việc.",
+                self.session_name,
+            )
+            return
+
+        self._raise_if_aborted()
+        safe_output = redact_secrets(save_output, extra_secrets=self.extra_secrets)
+        save_result = _parse_setup_env_result(safe_output) or {}
+        save_phases = save_result.get("phase_seconds")
+        if isinstance(save_phases, dict) and "cache_save" in save_phases:
+            self.setup_phase_seconds = dict(self.setup_phase_seconds or {})
+            self.setup_phase_seconds["cache_save"] = save_phases["cache_save"]
+        if save_ok and save_result.get("cache_status") == "saved":
+            self.cache_status = "saved"
+            return
+
+        self.cache_status = "save_failed"
+        logger.warning(
+            "Không lưu được Google Drive cache cho session %s; tiếp tục công việc.",
+            self.session_name,
+        )
+
     def _stage_download(self):
         self._mark_stage("download")
         # 6. Tải video thành phẩm và kết quả về vùng staging riêng theo job/attempt (`downloading`)
@@ -2639,6 +2716,7 @@ class CloudOrchestrator:
             run._stage_upload()
             run._stage_setup()
             run._stage_pipeline()
+            run._stage_cache_save()
             run._stage_download()
             run._stage_validate()
             return run._stage_cleanup()

@@ -155,6 +155,35 @@ def _run_setup_with_cache(
     return rc, json.loads(result_line[len(setup_env.RESULT_PREFIX) :])
 
 
+def _run_cache_save_only(
+    workdir: Path,
+    manifest_path: Path,
+    cache_root: Path,
+    *,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, dict]:
+    result_path = workdir / "cache_save_result.json"
+    rc = setup_env.main(
+        [
+            "--workdir",
+            str(workdir),
+            "--manifest",
+            str(manifest_path),
+            "--manifest-out",
+            str(result_path),
+            "--allow-local-test",
+            "--cache-dir",
+            str(cache_root),
+            "--cache-save-only",
+        ]
+    )
+    output = capsys.readouterr().out
+    result_line = next(
+        line for line in output.splitlines() if line.startswith(setup_env.RESULT_PREFIX)
+    )
+    return rc, json.loads(result_line[len(setup_env.RESULT_PREFIX) :])
+
+
 def test_setup_cache_restores_matching_sha256(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _use_temp_model_homes(monkeypatch, tmp_path)
     workdir, manifest_path = _prepare_setup_workdir(tmp_path)
@@ -282,7 +311,7 @@ def test_cache_save_is_atomic_and_prunes_old_keys(tmp_path: Path, monkeypatch: p
     assert not (failed_dir / "runtime.tar.partial").exists()
 
 
-def test_setup_no_cache_save_keeps_cache_miss(
+def test_setup_cache_miss_does_not_save_during_setup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -297,7 +326,7 @@ def test_setup_no_cache_save_keeps_cache_miss(
         workdir,
         manifest_path,
         cache_root,
-        no_cache_save=True,
+        no_cache_save=False,
         capsys=capsys,
     )
 
@@ -308,7 +337,7 @@ def test_setup_no_cache_save_keeps_cache_miss(
     assert not cache_root.exists() or not list(cache_root.iterdir())
 
 
-def test_setup_saves_cache_after_package_and_model_verification(
+def test_setup_cache_save_only_writes_after_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -333,19 +362,46 @@ def test_setup_saves_cache_after_package_and_model_verification(
         capsys=capsys,
     )
 
-    key_dir = cache_root / result["cache_key"]
     assert rc == setup_env.EXIT_OK
     assert calls == ["packages", "models"]
-    assert result["cache_status"] == "saved"
+    assert result["cache_status"] == "miss"
+    assert not cache_root.exists()
+
+    save_rc, save_result = _run_cache_save_only(
+        workdir,
+        manifest_path,
+        cache_root,
+        capsys=capsys,
+    )
+
+    key_dir = cache_root / result["cache_key"]
+    assert save_rc == setup_env.EXIT_OK
+    assert save_result["cache_status"] == "saved"
+    assert save_result["cache_key"] == result["cache_key"]
+    assert "cache_save" in save_result["phase_seconds"]
+    assert calls == ["packages", "models"]
     assert (key_dir / "runtime.tar").is_file()
     assert (key_dir / "runtime.tar.sha256").is_file()
 
 
 class _CacheJobAdapter:
-    def __init__(self, mount_result: tuple[bool, str], warm_session: str | None = None):
+    def __init__(
+        self,
+        mount_result: tuple[bool, str],
+        warm_session: str | None = None,
+        *,
+        setup_cache_status: str = "miss",
+        pipeline_result: tuple[bool, str] = (True, "PIPELINE_SUCCESS"),
+        cache_save_result: tuple[bool, str] = (True, ""),
+    ):
         self.mount_result = mount_result
         self.mount_calls = []
         self.setup_argv = None
+        self.save_only_argv = None
+        self.command_order = []
+        self.setup_cache_status = setup_cache_status
+        self.pipeline_result = pipeline_result
+        self.cache_save_result = cache_save_result
         self.active_sessions = {warm_session} if warm_session else set()
         self.video_bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42rendered"
         self.metadata = {
@@ -408,17 +464,30 @@ class _CacheJobAdapter:
         timeout=None,
         cancel_check=None,
     ):
+        if "--cache-save-only" in argv:
+            self.command_order.append("cache_save")
+            self.save_only_argv = list(argv)
+            if self.cache_save_result[1]:
+                return self.cache_save_result
+            result = {
+                "ok": True,
+                "cache_status": "saved",
+                "phase_seconds": {"cache_save": 0.2},
+            }
+            return True, f"{setup_env.RESULT_PREFIX}{json.dumps(result)}"
         if "setup_env.py" in argv:
+            self.command_order.append("setup")
             self.setup_argv = list(argv)
-            cache_status = "saved" if "--cache-dir" in argv else "disabled"
+            cache_status = self.setup_cache_status if "--cache-dir" in argv else "disabled"
             result = {
                 "ok": True,
                 "cache_status": cache_status,
-                "phase_seconds": {"cache_restore": 0.1, "cache_save": 0.2},
+                "phase_seconds": {"cache_restore": 0.1, "cache_save": 0.0},
             }
             return True, f"{setup_env.RESULT_PREFIX}{json.dumps(result)}"
         if "full_pipeline.py" in argv:
-            return True, "PIPELINE_SUCCESS"
+            self.command_order.append("pipeline")
+            return self.pipeline_result
         return True, "ok"
 
     def download_file(self, session_name, remote_filename, local_dir, cancel_check=None):
@@ -439,6 +508,11 @@ def _run_cache_job(
     mount_result: tuple[bool, str],
     *,
     warm_session: str | None = None,
+    setup_cache_status: str = "miss",
+    cache_save_enabled: bool = True,
+    pipeline_result: tuple[bool, str] = (True, "PIPELINE_SUCCESS"),
+    cache_save_result: tuple[bool, str] = (True, ""),
+    expected_job_success: bool = True,
 ):
     output_dir = tmp_path / "deliverables"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -451,7 +525,7 @@ def _run_cache_job(
         "cloud_cache_drive_root",
         "/content/drive/MyDrive/AutoDubCloudCache",
     )
-    monkeypatch.setitem(DEFAULT_CONFIG, "cloud_cache_save_enabled", False)
+    monkeypatch.setitem(DEFAULT_CONFIG, "cloud_cache_save_enabled", cache_save_enabled)
     monkeypatch.setitem(DEFAULT_CONFIG, "cloud_drive_mount_timeout_seconds", 10)
     monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_seconds", 0)
     monkeypatch.setattr(cloud_orchestrator, "_resolve_gemini_key_and_secrets", lambda: ("", ()))
@@ -460,7 +534,13 @@ def _run_cache_job(
     video = tmp_path / "input.mp4"
     video.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42source")
     store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
-    adapter = _CacheJobAdapter(mount_result, warm_session=warm_session)
+    adapter = _CacheJobAdapter(
+        mount_result,
+        warm_session=warm_session,
+        setup_cache_status=setup_cache_status,
+        pipeline_result=pipeline_result,
+        cache_save_result=cache_save_result,
+    )
     if warm_session:
         store.park_warm_session(
             warm_session,
@@ -493,25 +573,36 @@ def _run_cache_job(
             "qc_report": {"passed": True},
         },
     )
-    assert orchestrator.process_job(claimed, owner_id="cache-test") is True
+    assert orchestrator.process_job(claimed, owner_id="cache-test") is expected_job_success
     return adapter, store.get_job(job.job_id)
 
 
+@pytest.mark.parametrize("setup_cache_status", ["miss", "invalid"])
 def test_orchestrator_mounts_drive_and_passes_cache_arguments(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    setup_cache_status: str,
 ):
-    adapter, job = _run_cache_job(tmp_path, monkeypatch, (True, "mounted"))
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (True, "mounted"),
+        setup_cache_status=setup_cache_status,
+    )
 
     assert len(adapter.mount_calls) == 1
     assert adapter.setup_argv is not None
     assert "--cache-dir" in adapter.setup_argv
     assert "/content/drive/MyDrive/AutoDubCloudCache" in adapter.setup_argv
-    assert "--no-cache-save" in adapter.setup_argv
+    assert "--no-cache-save" not in adapter.setup_argv
+    assert adapter.save_only_argv is not None
+    assert adapter.command_order == ["setup", "pipeline", "cache_save"]
     assert job.output_manifest["cache_backend"] == "gdrive"
     assert job.output_manifest["cache_mounted"] is True
     assert job.output_manifest["cache_status"] == "saved"
     assert job.output_manifest["setup_phase_seconds"]["cache_restore"] == 0.1
+    assert job.output_manifest["setup_phase_seconds"]["cache_save"] == 0.2
+    assert "cache_save" in job.output_manifest["stage_timings_seconds"]
 
 
 @pytest.mark.parametrize(
@@ -534,6 +625,7 @@ def test_orchestrator_mount_failure_continues_without_cache(
     assert job.state == "completed"
     assert job.output_manifest["cache_mounted"] is False
     assert job.output_manifest["cache_status"] == "disabled"
+    assert adapter.save_only_argv is None
 
 
 def test_orchestrator_does_not_mount_for_warm_reused_session(
@@ -552,6 +644,59 @@ def test_orchestrator_does_not_mount_for_warm_reused_session(
     assert "--cache-dir" not in adapter.setup_argv
     assert job.output_manifest["cache_mounted"] is False
     assert job.output_manifest["cache_status"] == "disabled"
+    assert adapter.save_only_argv is None
+
+
+def test_orchestrator_does_not_save_on_cache_hit_or_when_saving_is_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    hit_adapter, hit_job = _run_cache_job(
+        tmp_path / "hit",
+        monkeypatch,
+        (True, "mounted"),
+        setup_cache_status="restored",
+    )
+    assert hit_adapter.save_only_argv is None
+    assert hit_job.output_manifest["cache_status"] == "restored"
+
+    disabled_adapter, disabled_job = _run_cache_job(
+        tmp_path / "disabled",
+        monkeypatch,
+        (True, "mounted"),
+        cache_save_enabled=False,
+    )
+    assert disabled_adapter.save_only_argv is None
+    assert disabled_job.output_manifest["cache_status"] == "miss"
+
+
+def test_orchestrator_saves_only_after_pipeline_success_and_continues_on_save_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    failed_pipeline_adapter, _ = _run_cache_job(
+        tmp_path / "pipeline-failed",
+        monkeypatch,
+        (True, "mounted"),
+        pipeline_result=(False, "pipeline failed"),
+        expected_job_success=False,
+    )
+    assert failed_pipeline_adapter.save_only_argv is None
+
+    save_failure = {
+        "ok": False,
+        "cache_status": "save_failed",
+        "phase_seconds": {"cache_save": 0.2},
+    }
+    save_failure_adapter, save_failure_job = _run_cache_job(
+        tmp_path / "save-failed",
+        monkeypatch,
+        (True, "mounted"),
+        cache_save_result=(False, f"{setup_env.RESULT_PREFIX}{json.dumps(save_failure)}"),
+    )
+    assert save_failure_adapter.save_only_argv is not None
+    assert save_failure_job.output_manifest["cache_status"] == "save_failed"
+    assert save_failure_job.state == "completed"
 
 
 def test_mount_drive_hides_authorization_url_and_closes_stdin(monkeypatch: pytest.MonkeyPatch):

@@ -1092,6 +1092,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--pip-timeout", type=int, default=120, help="Pip network timeout in seconds")
     parser.add_argument("--cache-dir", default="", help="Optional Drive-backed cache root")
     parser.add_argument("--no-cache-save", action="store_true", help="Restore cache but do not save it")
+    parser.add_argument("--cache-save-only", action="store_true", help="Save the current runtime/model cache and exit")
     parser.add_argument("--verify-installed", action="store_true", help="Verify in a fresh process after installation; never reinstall")
     parser.add_argument(
         "--allow-local-test",
@@ -1150,6 +1151,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"{manifest_sha}:{req_sha}:{sys.version.split()[0]}".encode("utf-8")
     ).hexdigest()
     _CURRENT_CACHE_KEY = setup_fingerprint
+
+    if args.cache_save_only:
+        cache_save_t0 = time.monotonic()
+        if not args.cache_dir or args.no_cache_save:
+            _CURRENT_CACHE_STATUS = "disabled"
+            cache_save_ok = True
+            cache_save_message = "Cache saving is disabled."
+        else:
+            _CURRENT_CACHE_STATUS = _save_cloud_cache(
+                args.cache_dir,
+                setup_fingerprint,
+                workdir,
+            )
+            if _CURRENT_CACHE_STATUS != "saved":
+                _CURRENT_CACHE_STATUS = "save_failed"
+            cache_save_ok = _CURRENT_CACHE_STATUS == "saved"
+            cache_save_message = (
+                "Cloud runtime and model cache saved."
+                if cache_save_ok
+                else "Cloud runtime and model cache could not be saved."
+            )
+        _record_phase("cache_save", cache_save_t0)
+        return _emit_and_exit(
+            workdir=workdir,
+            manifest_out=manifest_out,
+            started_at=started,
+            ok=cache_save_ok,
+            exit_code=EXIT_OK if cache_save_ok else EXIT_ENV_SETUP_FAILED,
+            error_code=None if cache_save_ok else "ENV_CACHE_SAVE_FAILED",
+            message=cache_save_message,
+            manifest_sha256=manifest_sha,
+        )
 
     # 1. Disk Space Preflight
     min_disk_mb = int(args.min_disk_mb or manifest.get("min_free_disk_mb", 4096))
@@ -1402,19 +1435,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             versions_info=versions_info,
             manifest_sha256=manifest_sha,
         )
-
-    cache_save_t0 = time.monotonic()
-    if (
-        args.cache_dir
-        and not args.no_cache_save
-        and _CURRENT_CACHE_STATUS in {"miss", "invalid"}
-    ):
-        _CURRENT_CACHE_STATUS = _save_cloud_cache(
-            args.cache_dir,
-            cache_key,
-            workdir,
-        )
-    _record_phase("cache_save", cache_save_t0)
 
     # 5. Bundle & Uploaded Video Verification
     bundle_verified = False
