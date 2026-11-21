@@ -63,7 +63,13 @@ def test_list_warm_sessions_includes_idle_seconds_and_cu_estimate(tmp_path: Path
     assert warm["expires_in_seconds"] == pytest.approx(1800)
 
 
-def _run_monitored_with_poll_payloads(monkeypatch: pytest.MonkeyPatch, payloads: list[dict], *, max_poll: float):
+def _run_monitored_with_poll_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+    payloads: list[dict],
+    *,
+    max_poll: float,
+    progress_callback=None,
+):
     from backend.cloud import colab_bridge
 
     waits: list[float] = []
@@ -86,8 +92,32 @@ def _run_monitored_with_poll_payloads(monkeypatch: pytest.MonkeyPatch, payloads:
         timeout=120,
         poll_interval_seconds=5,
         max_poll_interval_seconds=max_poll,
+        progress_callback=progress_callback,
     )
     return result, waits
+
+
+def test_adaptive_polling_ignores_progress_callback_exceptions(monkeypatch: pytest.MonkeyPatch):
+    payloads = [
+        {
+            "done": True,
+            "progress": {"percent": 10, "message": "step"},
+            "returncode": 0,
+            "log_tail": "ok",
+        }
+    ]
+
+    def raise_callback(_percent, _message):
+        raise RuntimeError("progress callback failed")
+
+    result, _waits = _run_monitored_with_poll_payloads(
+        monkeypatch,
+        payloads,
+        max_poll=30,
+        progress_callback=raise_callback,
+    )
+
+    assert result == (True, "ok")
 
 
 def test_adaptive_polling_grows_for_unchanged_progress_and_caps(monkeypatch: pytest.MonkeyPatch):

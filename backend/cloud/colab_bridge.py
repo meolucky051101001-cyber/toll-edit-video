@@ -1300,7 +1300,10 @@ def run_argv_monitored(
                 last_progress_sig = progress_sig
                 poll_sleep = base_poll_sleep
                 if progress_sig is not None and progress_callback is not None:
-                    progress_callback(*progress_sig)
+                    try:
+                        progress_callback(*progress_sig)
+                    except Exception:
+                        pass
             else:
                 poll_sleep = min(max_poll_sleep, poll_sleep * 1.5)
 
