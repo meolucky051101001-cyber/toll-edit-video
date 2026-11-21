@@ -68,6 +68,7 @@ _V1_CORE_MODULE_NAMES = (
     "v1_timing_solver.py",
     "v1_speech_guard.py",
     "visual_caption_timing.py",
+    "pipeline_v2/mixer.py",
 )
 
 _FONT_EXTENSIONS = frozenset({".ttf", ".otf", ".ttc"})
@@ -880,11 +881,10 @@ class CloudOrchestrator:
 
         backend_root = scripts_dir.parent.parent
         v1_core_paths = [backend_root / name for name in _V1_CORE_MODULE_NAMES]
+        v1_core_by_name = {path.name: path for path in v1_core_paths}
         missing_modules: List[str] = []
         for mod_name in env_manifest.get("required_v1_modules", []):
-            candidate_scripts = scripts_dir / mod_name
-            candidate_backend = backend_root / mod_name
-            target = candidate_backend if mod_name in _V1_CORE_MODULE_NAMES else candidate_scripts
+            target = v1_core_by_name.get(mod_name, scripts_dir / mod_name)
             if not target.is_file() or target.stat().st_size == 0:
                 missing_modules.append(mod_name)
         if missing_modules:

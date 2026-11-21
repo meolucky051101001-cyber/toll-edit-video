@@ -99,9 +99,12 @@ def test_env_manifest_pinned_requirements_wheel_sha256_and_config_defaults():
         assert wheel_file.is_file()
         assert _sha256_file(wheel_file) == wheel_spec["sha256"]
 
+    from backend.cloud.cloud_orchestrator import _V1_CORE_MODULE_NAMES
+
+    core_by_name = {Path(name).name: BACKEND_ROOT / name for name in _V1_CORE_MODULE_NAMES}
     for mod_name in manifest["required_v1_modules"]:
         in_scripts = scripts_dir / mod_name
-        in_backend = BACKEND_ROOT / mod_name
+        in_backend = core_by_name.get(mod_name, BACKEND_ROOT / mod_name)
         assert (in_scripts.is_file() and in_scripts.stat().st_size > 0) or (
             in_backend.is_file() and in_backend.stat().st_size > 0
         ), f"Missing required module {mod_name}"

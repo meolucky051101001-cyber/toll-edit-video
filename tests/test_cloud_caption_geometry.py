@@ -133,7 +133,7 @@ def test_cloud_bundle_runs_standalone_ass_with_new_caption_contract(tmp_path):
     root=Path(__file__).resolve().parents[1]
     bundle=tmp_path/'bundle';bundle.mkdir()
     for name in _V1_CORE_MODULE_NAMES:
-        shutil.copy2(root/'backend'/name,bundle/name)
+        shutil.copy2(root/'backend'/name,bundle/Path(name).name)
     for path in (root/'backend/cloud/gpu_scripts').glob('*.py'):
         shutil.copy2(path,bundle/path.name)
     script="""import sys
@@ -226,3 +226,14 @@ def test_same_line_word_split_and_two_line_cluster_agree_across_scales(monkeypat
     assert len(res_p) == 2
     assert res_p[0][0] == pytest.approx(0.2125) and res_p[0][2] == pytest.approx(0.7903)
 
+
+
+def test_cloud_bundle_ships_the_local_mixer(tmp_path):
+    from backend.cloud.cloud_orchestrator import _V1_CORE_MODULE_NAMES
+    root = Path(__file__).resolve().parents[1]
+    assert "pipeline_v2/mixer.py" in _V1_CORE_MODULE_NAMES
+    assert not (root / "backend/cloud/gpu_scripts/mixer.py").exists()
+    names = [Path(name).name for name in _V1_CORE_MODULE_NAMES]
+    assert len(names) == len(set(names))
+    script_names = {path.name for path in (root / "backend/cloud/gpu_scripts").glob("*.py")}
+    assert not script_names.intersection(names)
