@@ -65,7 +65,7 @@ _AUTODUB_LAUNCH_MARKER = "AUTODUB_LAUNCH_JSON:"
 _AUTODUB_POLL_MARKER = "AUTODUB_POLL_JSON:"
 _UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 _UPLOAD_BODY_REJECTED = re.compile(r"\b(?:400 Client Error|413 Client Error|413 (?:Payload|Content) Too Large)\b", re.I)
-_TRANSFER_FAILURE_RE = re.compile(r"\b(?:upload|download)\s+failed\b", re.I)
+_TRANSFER_FAILURE_RE = re.compile(r"^\[colab\]\s+(?:upload|download)\s+failed\b", re.I | re.M)
 _ASSEMBLE_VIDEO = """
 import hashlib
 from pathlib import Path

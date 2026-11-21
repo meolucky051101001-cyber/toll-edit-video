@@ -164,6 +164,12 @@ def test_upload_failure_output_is_not_treated_as_success(tmp_path, monkeypatch):
         (b"", "", 0, False),
         (b"partial", "[colab] Download failed: File or directory not found", 0, False),
         (b"partial", "", 1, False),
+        (
+            b"video",
+            "[colab] Downloaded 'content/x' to '/mnt/c/a/download failed/output_video.mp4'",
+            0,
+            True,
+        ),
         (b"video", "", 0, True),
     ],
 )
