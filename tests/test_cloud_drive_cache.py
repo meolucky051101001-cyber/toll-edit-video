@@ -425,7 +425,11 @@ def test_cache_save_is_atomic_and_prunes_old_keys(tmp_path: Path, monkeypatch: p
     old_key = "a" * 64
     old_dir = cache_root / old_key
     old_dir.mkdir(parents=True)
-    (old_dir / "old.txt").write_text("old", encoding="utf-8")
+    (old_dir / "runtime.tar").write_bytes(b"old archive")
+    unrelated_dir = cache_root / ("c" * 64)
+    unrelated_dir.mkdir()
+    unrelated_file = unrelated_dir / "unrelated.txt"
+    unrelated_file.write_text("preserve", encoding="utf-8")
     non_cache_dir = cache_root / "keep-me"
     non_cache_dir.mkdir()
     (non_cache_dir / "keep.txt").write_text("keep", encoding="utf-8")
@@ -438,6 +442,7 @@ def test_cache_save_is_atomic_and_prunes_old_keys(tmp_path: Path, monkeypatch: p
     assert archive_path.is_file() and checksum_path.is_file()
     assert setup_env._sha256_file(archive_path) == checksum_path.read_text(encoding="ascii").strip()
     assert not old_dir.exists()
+    assert unrelated_file.read_text(encoding="utf-8") == "preserve"
     assert (non_cache_dir / "keep.txt").is_file()
 
     failing_root = tmp_path / "failed-drive"

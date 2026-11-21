@@ -398,6 +398,8 @@ def _save_cloud_cache(
                 and re.fullmatch(r"[0-9a-f]{64}", sibling.name)
                 and sibling.is_dir()
                 and not sibling.is_symlink()
+                and (sibling / "runtime.tar").is_file()
+                and not (sibling / "runtime.tar").is_symlink()
             ):
                 _remove_cache_tree_without_crossing_mounts(sibling)
         return "saved"
