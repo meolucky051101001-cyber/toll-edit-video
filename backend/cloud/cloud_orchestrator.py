@@ -7,6 +7,7 @@ Quản lý chu kỳ sống có lease, hủy thực sự và thu hồi session th
 
 from __future__ import annotations
 
+import base64
 import errno
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -366,6 +367,13 @@ for path in root.iterdir():
 
 
 _WARM_RESET_SCRIPT = _build_warm_reset_script()
+
+
+def _build_warm_reset_argv() -> List[str]:
+    payload = base64.b64encode(_WARM_RESET_SCRIPT.encode("utf-8")).decode("ascii")
+    command = f"import base64;exec(base64.b64decode({payload!r}).decode())"
+    return ["python3", "-c", command]
+
 
 _GLOBAL_WARM_LOCK = threading.Lock()
 _GLOBAL_WARM_TIMERS: Dict[Tuple[str, str], threading.Timer] = {}
@@ -2002,7 +2010,7 @@ class CloudOrchestrator:
         try:
             ok, _ = exec_fn(
                 session_name,
-                ["python3", "-c", _WARM_RESET_SCRIPT],
+                _build_warm_reset_argv(),
                 cwd="/content",
                 timeout=30,
             )

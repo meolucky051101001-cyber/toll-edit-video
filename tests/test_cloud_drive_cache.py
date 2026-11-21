@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import base64
 import hashlib
 import io
 import json
@@ -92,6 +94,34 @@ def test_warm_reset_preserves_drive_and_nested_mounts(
     assert (drive / "user-file.txt").read_text(encoding="utf-8") == "keep"
     assert (nested_mount / "mounted-file.txt").read_text(encoding="utf-8") == "keep"
     assert not (content_root / "temporary" / "stale.txt").exists()
+
+
+def test_sanitize_warm_workdir_uses_validated_encoded_reset_script(tmp_path: Path):
+    class _ResetAdapter:
+        argv = None
+
+        def exec_argv(self, _session_name, argv, **_kwargs):
+            self.argv = list(argv)
+            return True, "reset"
+
+    adapter = _ResetAdapter()
+    orchestrator = CloudOrchestrator(
+        store=CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False),
+        adapter=adapter,
+        allowed_roots=[tmp_path],
+    )
+
+    assert orchestrator._sanitize_warm_workdir("reset-session") is True
+    assert adapter.argv is not None
+    assert colab_bridge._validate_argv(adapter.argv) == adapter.argv
+
+    command = adapter.argv[2]
+    prefix = "import base64;exec(base64.b64decode("
+    suffix = ").decode())"
+    assert command.startswith(prefix)
+    assert command.endswith(suffix)
+    payload = ast.literal_eval(command[len(prefix) : -len(suffix)])
+    assert base64.b64decode(payload).decode("utf-8") == cloud_orchestrator._WARM_RESET_SCRIPT
 
 
 def _write_cache_archive(
@@ -509,6 +539,7 @@ class _CacheJobAdapter:
         self.mount_calls = []
         self.setup_argv = None
         self.save_only_argv = None
+        self.warm_reset_argv = None
         self.command_order = []
         self.setup_cache_status = setup_cache_status
         self.pipeline_result = pipeline_result
@@ -581,8 +612,9 @@ class _CacheJobAdapter:
             self.command_order.append("drive_unmount")
             self.unmount_calls.append((session_name, list(argv), timeout))
             return self.unmount_result
-        if len(argv) >= 3 and argv[-1] == cloud_orchestrator._WARM_RESET_SCRIPT:
+        if len(argv) >= 3 and "base64.b64decode(" in argv[-1]:
             self.command_order.append("warm_reset")
+            self.warm_reset_argv = list(argv)
             return True, "reset"
         if "--cache-save-only" in argv:
             self.command_order.append("cache_save")
@@ -632,6 +664,7 @@ def _run_cache_job(
     cache_save_enabled: bool = True,
     pipeline_result: tuple[bool, str] = (True, "PIPELINE_SUCCESS"),
     cache_save_result: tuple[bool, str] = (True, ""),
+    cache_backend: str = "gdrive",
     warm_reuse_enabled: bool = False,
     warm_keepalive_seconds: int = 0,
     unmount_result: tuple[bool, str] = (True, "unmounted"),
@@ -642,7 +675,7 @@ def _run_cache_job(
     monkeypatch.setenv("AUTODUB_OUTPUT_DIR", str(output_dir))
     monkeypatch.setenv("AUTODUB_CLOUD_OUTPUT_DIR", "")
     monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "results"))
-    monkeypatch.setitem(DEFAULT_CONFIG, "cloud_cache_backend", "gdrive")
+    monkeypatch.setitem(DEFAULT_CONFIG, "cloud_cache_backend", cache_backend)
     monkeypatch.setitem(
         DEFAULT_CONFIG,
         "cloud_cache_drive_root",
@@ -700,6 +733,7 @@ def _run_cache_job(
     assert orchestrator.process_job(claimed, owner_id="cache-test") is expected_job_success
     for active_session in list(adapter.active_sessions):
         orchestrator._cancel_warm_timer(active_session)
+    adapter.parked_warm_sessions = store.list_warm_sessions()
     return adapter, store.get_job(job.job_id)
 
 
@@ -722,6 +756,8 @@ def test_orchestrator_mounts_drive_and_passes_cache_arguments(
     assert "/content/drive/MyDrive/AutoDubCloudCache" in adapter.setup_argv
     assert "--no-cache-save" not in adapter.setup_argv
     assert adapter.save_only_argv is not None
+    assert colab_bridge._validate_argv(adapter.setup_argv) == adapter.setup_argv
+    assert colab_bridge._validate_argv(adapter.save_only_argv) == adapter.save_only_argv
     assert adapter.command_order == ["setup", "pipeline", "cache_save"]
     assert job.output_manifest["cache_backend"] == "gdrive"
     assert job.output_manifest["cache_mounted"] is True
@@ -788,8 +824,31 @@ def test_orchestrator_unmounts_drive_before_parking_warm_session(
     assert job.state == "completed"
     assert len(adapter.unmount_calls) == 1
     assert adapter.unmount_calls[0][2] == 30
+    assert colab_bridge._validate_argv(adapter.unmount_calls[0][1]) == adapter.unmount_calls[0][1]
     assert adapter.command_order.index("drive_unmount") < adapter.command_order.index("warm_reset")
     assert adapter.active_sessions
+
+
+def test_warm_session_parks_when_drive_cache_is_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (True, "mounted"),
+        cache_backend="none",
+        warm_reuse_enabled=True,
+        warm_keepalive_seconds=300,
+    )
+
+    assert job.state == "completed"
+    assert adapter.mount_calls == []
+    assert adapter.unmount_calls == []
+    assert adapter.command_order == ["setup", "pipeline", "warm_reset"]
+    assert adapter.warm_reset_argv is not None
+    assert len(adapter.parked_warm_sessions) == 1
+    assert adapter.parked_warm_sessions[0]["session_name"] in adapter.active_sessions
 
 
 def test_orchestrator_does_not_unmount_drive_that_was_not_mounted(

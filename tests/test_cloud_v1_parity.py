@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import base64
 import io
 import json
 from pathlib import Path
@@ -968,9 +970,17 @@ def test_orchestrator_warm_session_handoff_across_batch_and_auto_release_on_fini
             self.reset_calls: list[str] = []
 
         def exec_argv(self, session_name, argv, *, cwd="/content", env_vars=None, timeout=None):
-            if len(argv) >= 3 and argv[0] == "python3" and argv[1] == "-c" and "keep=" in argv[2]:
-                self.reset_calls.append(session_name)
-                return True, "sanitized"
+            if (
+                len(argv) >= 3
+                and argv[0] == "python3"
+                and argv[1] == "-c"
+                and "base64.b64decode(" in argv[2]
+            ):
+                encoded = argv[2].split("base64.b64decode(", 1)[1].split(").decode())", 1)[0]
+                reset_script = base64.b64decode(ast.literal_eval(encoded)).decode("utf-8")
+                if "keep=" in reset_script:
+                    self.reset_calls.append(session_name)
+                    return True, "sanitized"
             return super().exec_argv(session_name, argv, cwd=cwd, env_vars=env_vars, timeout=timeout)
 
     store = CloudJobStore(db_path=str(tmp_path / "batch.db"), rollout_controlled=False)
