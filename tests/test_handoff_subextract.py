@@ -2,7 +2,7 @@
 
 Never loads models, never renders, never touches the live workspace: the Studio
 module is replaced by a stub whose WORKSPACE points at a TemporaryDirectory, and
-the path helpers are the real ones lifted from workflow_api.py source.
+the path helpers are the real ones lifted from workflow_api.py / workflow_helpers.py source.
 """
 import ast
 import json
@@ -41,13 +41,16 @@ for _directory in (WORKSPACE, OUTPUT_DIR, SX_JOBS):
 
 def _studio_stub():
     """safe_stem/artifact_stem/resolve_job_dir/format_srt_timestamp thật, gốc workspace tạm."""
-    tree = ast.parse((ROOT / "backend" / "workflow_api.py").read_text(encoding="utf-8-sig"))
+    nodes = []
+    for source_name in ("workflow_helpers.py", "workflow_api.py"):
+        source = (ROOT / "backend" / source_name).read_text(encoding="utf-8-sig")
+        nodes.extend(ast.parse(source).body)
     namespace = {"Path": Path, "Any": __import__("typing").Any,
                  "Optional": __import__("typing").Optional,
                  "HTTPException": HTTPException, "WORKSPACE": WORKSPACE,
                  "re": __import__("re")}
     body = []
-    for node in tree.body:
+    for node in nodes:
         if isinstance(node, ast.Assign):
             names = [getattr(target, "id", "") for target in node.targets]
             if any(name.startswith("_STEM_") for name in names):
