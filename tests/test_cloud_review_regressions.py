@@ -138,6 +138,101 @@ def test_colab_rejected_mp4_recovers_by_verified_parts(tmp_path, monkeypatch, co
         assert destination.read_bytes() == original
 
 
+def test_upload_failure_output_is_not_treated_as_success(tmp_path, monkeypatch):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"upload")
+    monkeypatch.setattr(colab_bridge, "to_wsl_path", str)
+    calls = []
+
+    def fake_upload(argv, **_kwargs):
+        calls.append(list(argv))
+        return 0, "[colab] Upload failed: File or directory not found", ""
+
+    monkeypatch.setattr(colab_bridge, "_run_wsl_colab_argv", fake_upload)
+
+    ok, detail = colab_bridge.upload_file("cjob_upload", source)
+
+    assert not ok
+    assert "Upload failed" in detail
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("payload", "output", "return_code", "expected_ok"),
+    [
+        (None, "", 0, False),
+        (b"", "", 0, False),
+        (b"partial", "[colab] Download failed: File or directory not found", 0, False),
+        (b"partial", "", 1, False),
+        (
+            b"video",
+            "[colab] Downloaded 'content/x' to '/mnt/c/a/download failed/output_video.mp4'",
+            0,
+            True,
+        ),
+        (b"video", "", 0, True),
+    ],
+)
+def test_download_requires_nonempty_file_and_no_failure_output(
+    tmp_path,
+    monkeypatch,
+    payload,
+    output,
+    return_code,
+    expected_ok,
+):
+    destination = tmp_path / "downloads" / "output_video.mp4"
+    monkeypatch.setattr(colab_bridge, "to_wsl_path", str)
+
+    def fake_download(argv, **_kwargs):
+        target = Path(argv[-1])
+        if payload is not None:
+            target.write_bytes(payload)
+        return return_code, output, ""
+
+    monkeypatch.setattr(colab_bridge, "_run_wsl_colab_argv", fake_download)
+
+    ok, result = colab_bridge.download_file("cjob_download", "output_video.mp4", destination.parent)
+
+    assert ok is expected_ok
+    if expected_ok:
+        assert Path(result).read_bytes() == b"video"
+    else:
+        assert not destination.exists()
+
+
+def test_download_removes_stale_and_partial_files_before_retry(tmp_path, monkeypatch):
+    destination_dir = tmp_path / "downloads"
+    destination_dir.mkdir()
+    destination = destination_dir / "output_video.mp4"
+    destination.write_bytes(b"stale")
+    monkeypatch.setattr(colab_bridge, "to_wsl_path", str)
+    monkeypatch.setattr(colab_bridge, "_wait_interruptible", lambda *_a, **_k: False)
+    calls = []
+
+    def fake_download(argv, **_kwargs):
+        target = Path(argv[-1])
+        assert not target.exists()
+        calls.append(list(argv))
+        if len(calls) == 1:
+            target.write_bytes(b"")
+            return 1, "", "ConnectionResetError"
+        target.write_bytes(b"recovered video")
+        return 0, "", ""
+
+    monkeypatch.setattr(colab_bridge, "_run_wsl_colab_argv", fake_download)
+
+    ok, result = colab_bridge.download_file(
+        "cjob_download",
+        "output_video.mp4",
+        destination_dir,
+    )
+
+    assert ok
+    assert len(calls) == 2
+    assert Path(result).read_bytes() == b"recovered video"
+
+
 @pytest.mark.parametrize('state', ['cancelled', 'failed', 'completed'])
 def test_terminal_state_rejects_late_progress_and_publication(cloud, state):
     job = claim(cloud)

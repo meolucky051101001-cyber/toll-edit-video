@@ -699,6 +699,37 @@ def test_orchestrator_propagates_pipeline_error_code_and_stops_session(tmp_path:
     assert list(out_dir.iterdir()) == []
 
 
+def test_orchestrator_preserves_download_failure_detail(tmp_path: Path, monkeypatch, caplog):
+    out_dir = tmp_path / "deliverables"
+    out_dir.mkdir(parents=True)
+    monkeypatch.setenv("GEMINI_API_KEY", "offline-fixture")
+    monkeypatch.setenv("AUTODUB_OUTPUT_DIR", str(out_dir))
+    monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "results"))
+
+    src_vid = _make_sample_video(tmp_path / "in", "download_error.mp4")
+    adapter = _Phase5Adapter()
+    original_download = adapter.download_file
+    detail = "[colab] Download failed: File or directory not found"
+
+    def fail_video_download(session_name, remote_filename, local_dir):
+        if remote_filename == "output_video.mp4":
+            return False, detail
+        return original_download(session_name, remote_filename, local_dir)
+
+    adapter.download_file = fail_video_download
+    store = CloudJobStore(db_path=str(tmp_path / "cloud.db"), rollout_controlled=False)
+    orch = CloudOrchestrator(store=store, adapter=adapter, allowed_roots=[tmp_path])
+    job = _enqueue_and_claim(store, src_vid)
+    caplog.set_level("ERROR", logger="backend.cloud.cloud_orchestrator")
+
+    assert orch.process_job(job, owner_id="w1") is False
+
+    saved = store.get_job(job.job_id)
+    assert saved.error_code == CloudErrorCode.DOWNLOAD_FAILED.value
+    assert detail in saved.error
+    assert detail in caplog.text
+
+
 def test_orchestrator_qc_blocks_truncated_no_audio_and_bad_duration_and_keeps_staging_evidence(tmp_path: Path, monkeypatch):
     out_dir = tmp_path / "deliverables"
     out_dir.mkdir(parents=True)
