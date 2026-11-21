@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ def _use_temp_model_homes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(setup_env, "_CLOUD_CACHE_MYDRIVE_ROOT", tmp_path)
     for name in (
         "XDG_CACHE_HOME",
         "TORCH_HOME",
@@ -63,6 +65,33 @@ def _cache_key(workdir: Path, manifest_path: Path) -> str:
     return hashlib.sha256(
         f"{manifest_sha}:{requirements_sha}:{sys.version.split()[0]}".encode("utf-8")
     ).hexdigest()
+
+
+def test_warm_reset_preserves_drive_and_nested_mounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    content_root = tmp_path / "content"
+    drive = content_root / "drive"
+    nested_mount = content_root / "temporary" / "mounted"
+    drive.mkdir(parents=True)
+    nested_mount.mkdir(parents=True)
+    (drive / "user-file.txt").write_text("keep", encoding="utf-8")
+    (nested_mount / "mounted-file.txt").write_text("keep", encoding="utf-8")
+    (content_root / "temporary" / "stale.txt").write_text("remove", encoding="utf-8")
+    mount_paths = {drive.resolve(), nested_mount.resolve()}
+    real_ismount = os.path.ismount
+    monkeypatch.setattr(
+        os.path,
+        "ismount",
+        lambda path: Path(path).resolve() in mount_paths or real_ismount(path),
+    )
+
+    exec(cloud_orchestrator._build_warm_reset_script(str(content_root)), {})
+
+    assert (drive / "user-file.txt").read_text(encoding="utf-8") == "keep"
+    assert (nested_mount / "mounted-file.txt").read_text(encoding="utf-8") == "keep"
+    assert not (content_root / "temporary" / "stale.txt").exists()
 
 
 def _write_cache_archive(
@@ -310,6 +339,9 @@ def test_cache_save_is_atomic_and_prunes_old_keys(tmp_path: Path, monkeypatch: p
     old_dir = cache_root / old_key
     old_dir.mkdir(parents=True)
     (old_dir / "old.txt").write_text("old", encoding="utf-8")
+    non_cache_dir = cache_root / "keep-me"
+    non_cache_dir.mkdir()
+    (non_cache_dir / "keep.txt").write_text("keep", encoding="utf-8")
     current_key = "b" * 64
 
     assert setup_env._save_cloud_cache(cache_root, current_key, workdir) == "saved"
@@ -319,6 +351,7 @@ def test_cache_save_is_atomic_and_prunes_old_keys(tmp_path: Path, monkeypatch: p
     assert archive_path.is_file() and checksum_path.is_file()
     assert setup_env._sha256_file(archive_path) == checksum_path.read_text(encoding="ascii").strip()
     assert not old_dir.exists()
+    assert (non_cache_dir / "keep.txt").is_file()
 
     failing_root = tmp_path / "failed-drive"
 
@@ -350,6 +383,42 @@ def test_cache_save_is_atomic_and_prunes_old_keys(tmp_path: Path, monkeypatch: p
     assert not (failed_dir / "runtime.tar").exists()
     assert not (failed_dir / "runtime.tar.sha256").exists()
     assert not (failed_dir / "runtime.tar.partial").exists()
+
+
+def test_cache_prune_does_not_descend_into_mounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _use_temp_model_homes(monkeypatch, tmp_path)
+    workdir, _manifest_path = _prepare_setup_workdir(tmp_path)
+    (workdir / ".autodub_venv").mkdir()
+    cache_root = tmp_path / "drive"
+    old_dir = cache_root / ("a" * 64)
+    mounted_dir = old_dir / "mounted"
+    mounted_dir.mkdir(parents=True)
+    mounted_file = mounted_dir / "user-file.txt"
+    mounted_file.write_text("keep", encoding="utf-8")
+    mount_path = mounted_dir.resolve()
+    real_ismount = os.path.ismount
+    monkeypatch.setattr(
+        os.path,
+        "ismount",
+        lambda path: Path(path).resolve() == mount_path or real_ismount(path),
+    )
+
+    assert setup_env._save_cloud_cache(cache_root, "b" * 64, workdir) == "saved"
+    assert mounted_file.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize(
+    "cache_root",
+    ["/content/drive", "/content/drive/MyDrive", "/tmp/outside-cloud-cache"],
+)
+def test_cache_save_refuses_unsafe_roots(tmp_path: Path, cache_root: str):
+    workdir, _manifest_path = _prepare_setup_workdir(tmp_path)
+
+    assert setup_env._validated_cloud_cache_root(cache_root) is None
+    assert setup_env._save_cloud_cache(cache_root, "f" * 64, workdir) == "save_failed"
 
 
 def test_setup_cache_miss_does_not_save_during_setup(
@@ -434,6 +503,7 @@ class _CacheJobAdapter:
         setup_cache_status: str = "miss",
         pipeline_result: tuple[bool, str] = (True, "PIPELINE_SUCCESS"),
         cache_save_result: tuple[bool, str] = (True, ""),
+        unmount_result: tuple[bool, str] = (True, "unmounted"),
     ):
         self.mount_result = mount_result
         self.mount_calls = []
@@ -443,6 +513,8 @@ class _CacheJobAdapter:
         self.setup_cache_status = setup_cache_status
         self.pipeline_result = pipeline_result
         self.cache_save_result = cache_save_result
+        self.unmount_result = unmount_result
+        self.unmount_calls = []
         self.active_sessions = {warm_session} if warm_session else set()
         self.video_bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42rendered"
         self.metadata = {
@@ -505,6 +577,13 @@ class _CacheJobAdapter:
         timeout=None,
         cancel_check=None,
     ):
+        if len(argv) >= 3 and "flush_and_unmount" in argv[-1]:
+            self.command_order.append("drive_unmount")
+            self.unmount_calls.append((session_name, list(argv), timeout))
+            return self.unmount_result
+        if len(argv) >= 3 and argv[-1] == cloud_orchestrator._WARM_RESET_SCRIPT:
+            self.command_order.append("warm_reset")
+            return True, "reset"
         if "--cache-save-only" in argv:
             self.command_order.append("cache_save")
             self.save_only_argv = list(argv)
@@ -553,6 +632,9 @@ def _run_cache_job(
     cache_save_enabled: bool = True,
     pipeline_result: tuple[bool, str] = (True, "PIPELINE_SUCCESS"),
     cache_save_result: tuple[bool, str] = (True, ""),
+    warm_reuse_enabled: bool = False,
+    warm_keepalive_seconds: int = 0,
+    unmount_result: tuple[bool, str] = (True, "unmounted"),
     expected_job_success: bool = True,
 ):
     output_dir = tmp_path / "deliverables"
@@ -568,7 +650,7 @@ def _run_cache_job(
     )
     monkeypatch.setitem(DEFAULT_CONFIG, "cloud_cache_save_enabled", cache_save_enabled)
     monkeypatch.setitem(DEFAULT_CONFIG, "cloud_drive_mount_timeout_seconds", 10)
-    monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_seconds", 0)
+    monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_seconds", warm_keepalive_seconds)
     monkeypatch.setattr(cloud_orchestrator, "_resolve_gemini_key_and_secrets", lambda: ("", ()))
     monkeypatch.setattr(cloud_orchestrator, "_resolve_local_font_files_for_bundle", lambda _font: ())
 
@@ -581,6 +663,7 @@ def _run_cache_job(
         setup_cache_status=setup_cache_status,
         pipeline_result=pipeline_result,
         cache_save_result=cache_save_result,
+        unmount_result=unmount_result,
     )
     if warm_session:
         store.park_warm_session(
@@ -597,7 +680,7 @@ def _run_cache_job(
         store=store,
         adapter=adapter,
         allowed_roots=[tmp_path],
-        enable_warm_session_reuse=bool(warm_session),
+        enable_warm_session_reuse=bool(warm_session) or warm_reuse_enabled,
     )
     monkeypatch.setattr(
         orchestrator,
@@ -615,6 +698,8 @@ def _run_cache_job(
         },
     )
     assert orchestrator.process_job(claimed, owner_id="cache-test") is expected_job_success
+    for active_session in list(adapter.active_sessions):
+        orchestrator._cancel_warm_timer(active_session)
     return adapter, store.get_job(job.job_id)
 
 
@@ -686,6 +771,61 @@ def test_orchestrator_does_not_mount_for_warm_reused_session(
     assert job.output_manifest["cache_mounted"] is False
     assert job.output_manifest["cache_status"] == "disabled"
     assert adapter.save_only_argv is None
+
+
+def test_orchestrator_unmounts_drive_before_parking_warm_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (True, "mounted"),
+        warm_reuse_enabled=True,
+        warm_keepalive_seconds=300,
+    )
+
+    assert job.state == "completed"
+    assert len(adapter.unmount_calls) == 1
+    assert adapter.unmount_calls[0][2] == 30
+    assert adapter.command_order.index("drive_unmount") < adapter.command_order.index("warm_reset")
+    assert adapter.active_sessions
+
+
+def test_orchestrator_does_not_unmount_drive_that_was_not_mounted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (False, "mount failed"),
+        warm_reuse_enabled=True,
+        warm_keepalive_seconds=300,
+    )
+
+    assert job.state == "completed"
+    assert adapter.unmount_calls == []
+    assert "warm_reset" in adapter.command_order
+
+
+def test_drive_unmount_failure_stops_session_instead_of_parking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (True, "mounted"),
+        warm_reuse_enabled=True,
+        warm_keepalive_seconds=300,
+        unmount_result=(False, "unmount failed"),
+    )
+
+    assert job.state == "completed"
+    assert len(adapter.unmount_calls) == 1
+    assert "warm_reset" not in adapter.command_order
+    assert adapter.active_sessions == set()
 
 
 def test_orchestrator_does_not_save_on_cache_hit_or_when_saving_is_disabled(

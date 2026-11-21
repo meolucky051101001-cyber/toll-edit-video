@@ -44,6 +44,7 @@ _CACHE_INDEX_MEMBER = "autodub_cache_index.json"
 _CACHE_RESTORE_DONE_ENV = "AUTODUB_INTERNAL_CACHE_RESTORE_DONE"
 _CACHE_STATUS_ENV = "AUTODUB_INTERNAL_CACHE_STATUS"
 _CACHE_KEY_ENV = "AUTODUB_INTERNAL_CACHE_KEY"
+_CLOUD_CACHE_MYDRIVE_ROOT = Path("/content/drive/MyDrive")
 
 _NETWORK_ERROR_MARKERS = (
     "newconnectionerror",
@@ -124,6 +125,36 @@ def _cache_target_has_symlink_component(path: Path) -> bool:
         if current.is_symlink():
             return True
     return False
+
+
+def _validated_cloud_cache_root(cache_dir: Union[str, Path]) -> Optional[Path]:
+    try:
+        root = Path(cache_dir).expanduser()
+        if not root.is_absolute() or _cache_target_has_symlink_component(root):
+            return None
+        root = root.resolve()
+        mydrive_root = _CLOUD_CACHE_MYDRIVE_ROOT.resolve()
+        if root == mydrive_root or not root.is_relative_to(mydrive_root):
+            return None
+        return root
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _remove_cache_tree_without_crossing_mounts(path: Path) -> None:
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+        return
+    if os.path.ismount(path):
+        return
+    if not path.is_dir():
+        path.unlink(missing_ok=True)
+        return
+    for child in path.iterdir():
+        if not os.path.ismount(child):
+            _remove_cache_tree_without_crossing_mounts(child)
+    if not os.path.ismount(path) and not any(path.iterdir()):
+        path.rmdir()
 
 
 def _validate_cache_archive_members(
@@ -226,7 +257,10 @@ def _restore_cloud_cache(
     if re.fullmatch(r"[0-9a-f]{64}", cache_key or "") is None:
         return "invalid"
 
-    key_dir = Path(cache_dir) / cache_key
+    cache_root = _validated_cloud_cache_root(cache_dir)
+    if cache_root is None:
+        return "invalid"
+    key_dir = cache_root / cache_key
     archive_path = key_dir / "runtime.tar"
     checksum_path = key_dir / "runtime.tar.sha256"
     if key_dir.is_symlink() or archive_path.is_symlink() or checksum_path.is_symlink():
@@ -308,7 +342,10 @@ def _save_cloud_cache(
     if re.fullmatch(r"[0-9a-f]{64}", cache_key or "") is None:
         return "save_failed"
 
-    key_dir = Path(cache_dir) / cache_key
+    cache_root = _validated_cloud_cache_root(cache_dir)
+    if cache_root is None:
+        return "save_failed"
+    key_dir = cache_root / cache_key
     archive_path = key_dir / "runtime.tar"
     checksum_path = key_dir / "runtime.tar.sha256"
     archive_partial = key_dir / "runtime.tar.partial"
@@ -353,14 +390,15 @@ def _save_cloud_cache(
         os.replace(checksum_partial, checksum_path)
         checksum_published = True
 
-        for sibling in key_dir.parent.iterdir():
+        for sibling in cache_root.iterdir():
             if (
-                sibling.name != cache_key
+                sibling.parent == cache_root
+                and sibling.name != cache_key
                 and re.fullmatch(r"[0-9a-f]{64}", sibling.name)
                 and sibling.is_dir()
                 and not sibling.is_symlink()
             ):
-                shutil.rmtree(sibling)
+                _remove_cache_tree_without_crossing_mounts(sibling)
         return "saved"
     except Exception:
         for partial_path in (archive_partial, checksum_partial):

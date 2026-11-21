@@ -314,12 +314,58 @@ def _call_with_cancel(fn: Any, *args: Any, cancel_check: Optional[Callable[[], b
     return fn(*args, **kwargs)
 
 
-_WARM_RESET_SCRIPT = (
-    "import pathlib, shutil; "
-    "keep={'.autodub_venv','.autodub_bootstrap','.autodub_python','.autodub_uv_cache','.autodub_env_state.json','model_cache','fonts'}; "
-    "[shutil.rmtree(p, ignore_errors=True) if p.is_dir() and not p.is_symlink() else p.unlink(missing_ok=True) "
-    "for p in pathlib.Path('/content').iterdir() if p.name not in keep]"
-)
+def _build_warm_reset_script(content_root: str = "/content") -> str:
+    return f"""import os
+from pathlib import Path
+
+root = Path({content_root!r})
+root_resolved = root.resolve()
+keep={{'.autodub_venv', '.autodub_bootstrap', '.autodub_python', '.autodub_uv_cache', '.autodub_env_state.json', 'model_cache', 'fonts', 'drive'}}
+
+def is_mount_or_nested(path):
+    try:
+        if os.path.ismount(path):
+            return True
+        resolved = path.resolve()
+    except OSError:
+        return True
+    if not resolved.is_relative_to(root_resolved):
+        return True
+    current = resolved
+    while current != root_resolved:
+        if os.path.ismount(current):
+            return True
+        current = current.parent
+    return False
+
+def remove(path):
+    if is_mount_or_nested(path):
+        return
+    if path.is_symlink() or not path.is_dir():
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        return
+    for child in children:
+        remove(child)
+    if not is_mount_or_nested(path):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+for path in root.iterdir():
+    if path.name not in keep:
+        remove(path)
+"""
+
+
+_WARM_RESET_SCRIPT = _build_warm_reset_script()
 
 _GLOBAL_WARM_LOCK = threading.Lock()
 _GLOBAL_WARM_TIMERS: Dict[Tuple[str, str], threading.Timer] = {}
@@ -1364,6 +1410,35 @@ class _JobRun:
                 )
         self._raise_if_aborted()
 
+    def _unmount_drive_before_warm_park(self) -> bool:
+        exec_fn = getattr(self.orchestrator.adapter, "exec_argv", None)
+        if not callable(exec_fn):
+            logger.warning("Không tháo được Google Drive khỏi session %s trước khi giữ ấm.", self.session_name)
+            return False
+        try:
+            unmount_ok, unmount_msg = _call_with_cancel(
+                exec_fn,
+                self.session_name,
+                [
+                    "python3",
+                    "-c",
+                    "from google.colab import drive; drive.flush_and_unmount()",
+                ],
+                cwd="/content",
+                timeout=30,
+                cancel_check=self._cancel_probe,
+            )
+        except Exception as exc:
+            unmount_ok, unmount_msg = False, str(exc)
+        if not unmount_ok:
+            logger.warning(
+                "Không tháo được Google Drive khỏi session %s trước khi giữ ấm; session sẽ được thu hồi: %s",
+                self.session_name,
+                redact_secrets(str(unmount_msg), extra_secrets=self.extra_secrets),
+            )
+            return False
+        return True
+
     def _stage_validate(self):
         self._mark_stage("validate")
         # 7. Kiểm tra QC tại vùng staging & xuất thành phẩm atomic an toàn (`validating`)
@@ -1390,7 +1465,12 @@ class _JobRun:
         if (
             self.session_may_exist
             and not self.cleanup_done
-            and self.orchestrator._park_warm_session_on_success(self.session_name, self.gpu_type, source_job_id=self.job_id)
+            and self.orchestrator._park_warm_session_on_success(
+                self.session_name,
+                self.gpu_type,
+                source_job_id=self.job_id,
+                before_park=self._unmount_drive_before_warm_park if self.cache_mounted else None,
+            )
         ):
             self.parked_warm = True
             self.cleanup_done = True
@@ -2018,6 +2098,7 @@ class CloudOrchestrator:
         gpu_type: str,
         *,
         source_job_id: Optional[str] = None,
+        before_park: Optional[Callable[[], bool]] = None,
     ) -> bool:
         if not self.enable_warm_session_reuse:
             return False
@@ -2034,6 +2115,8 @@ class CloudOrchestrator:
         )
         ttl_s = handoff_s if waiting_next else keepalive_s
         if ttl_s <= 0:
+            return False
+        if before_park is not None and not before_park():
             return False
         if not self._sanitize_warm_workdir(session_name):
             return False
