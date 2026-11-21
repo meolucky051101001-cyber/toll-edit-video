@@ -34,7 +34,7 @@ def read_control_token(
                 token = token_path.read_text(encoding="utf-8").strip()
                 if len(token) >= min_length:
                     return token
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
     return ""
 

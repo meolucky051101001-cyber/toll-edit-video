@@ -57,6 +57,16 @@ def test_unreadable_candidate_is_skipped(tmp_path, monkeypatch):
     assert control_token.read_control_token(tmp_path) == "valid-control-token"
 
 
+def test_invalid_utf8_candidate_is_skipped_for_later_valid_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("AUTODUB_LOCAL_TOKEN", raising=False)
+    malformed, valid, *_ = control_token.candidate_token_paths(tmp_path)
+    malformed.parent.mkdir(parents=True)
+    malformed.write_bytes(b"\xff\xfe")
+    valid.write_text("valid-control-token", encoding="utf-8")
+
+    assert control_token.read_control_token(tmp_path) == "valid-control-token"
+
+
 def test_workflow_api_resolves_token_from_bot_system(tmp_path, monkeypatch):
     from backend import workflow_api
 
