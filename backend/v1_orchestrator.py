@@ -1125,7 +1125,7 @@ class V1Orchestrator:
                 run_early_voice_lock = bool(
                     srt_segments
                     and (vocals_audio or original_audio)
-                    and (not c.visual_sub_to_speech or asr_was_empty)
+                    and not c.visual_sub_to_speech
                     and v_mode != "manual"
                     and (v_cfg.get("enabled") or v_mode in ("auto", "dialogue", "smart_dialogue", "dual"))
                 )

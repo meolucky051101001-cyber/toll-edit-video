@@ -547,13 +547,12 @@ class TestDot3StructuredTranslationAndDomainPresets(unittest.TestCase):
                  patch("ai.translation.translate_subtitles", side_effect=fake_translate_subtitles), \
                  patch("ai.transcription.save_srt"):
                 translated, _ = asyncio.run(orch._stage_translate(ctx, [s1, s2], original_audio=vocals, vocals_audio=vocals))
-                ctx.visual_sub_to_speech = True
                 asyncio.run(orch._stage_translate(
                     ctx, [s1, s2], original_audio=vocals, vocals_audio=vocals, asr_was_empty=True
                 ))
 
             self.assertEqual([s.content for s in translated], ["Dịch 1", "Dịch 2"])
-            self.assertTrue(voice_calls[-1]["visual_sub_to_speech"])
+            self.assertFalse(voice_calls[-1]["visual_sub_to_speech"])
             meta = captured["kwargs"]["cue_meta"]
             self.assertEqual(len(meta), 2)
             self.assertEqual(meta[0]["speaker"], "male")
