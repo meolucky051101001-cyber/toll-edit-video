@@ -1,10 +1,13 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from backend.v1_checkpoint import Checkpoint, ManifestManager
+
 from backend.ai.v1_asr_isolated import extract_subtitles_isolated
+from backend.v1_checkpoint import Checkpoint, ManifestManager
+
 
 ASR_PYTHON = Path(__file__).resolve().parents[1] / 'backend' / 'venv' / 'Scripts' / 'python.exe'
 
@@ -111,7 +114,9 @@ class CheckpointTests(unittest.TestCase):
     def test_asr_reuse_and_audio_change(self):
         def fake_run(args, **kw):
             Path(args[-1]).write_text('1\n00:00:00,000 --> 00:00:01,000\nhello\n', encoding='utf-8')
-        with tempfile.TemporaryDirectory() as d, patch('backend.batch_control.run', side_effect=fake_run) as run:
+        with tempfile.TemporaryDirectory() as d, \
+             patch.dict(os.environ, {'V1_ASR_KEEP_WARM': '0'}), \
+             patch('backend.batch_control.run', side_effect=fake_run) as run:
             source, output = Path(d)/'in.wav', Path(d)/'out.srt'
             source.write_bytes(b'fixture')
             extract_subtitles_isolated(source, output)

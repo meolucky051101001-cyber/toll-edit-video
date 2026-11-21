@@ -102,6 +102,7 @@ jobs:
           tests/test_release_review_regressions.py
           tests/test_gemini_model_order.py
           tests/test_v1_asr_pyav_compat.py
+          tests/test_v1_asr_warm_session.py
           tests/test_runtime_health.py
           tests/test_v1_model_upgrades_20261118.py
           tests/test_studio_audio_sub_tts.py

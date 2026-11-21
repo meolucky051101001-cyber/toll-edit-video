@@ -145,6 +145,17 @@ def _evict_warm_sessions(current_stage_name: str) -> bool:
                 evicted = True
         except Exception:
             pass
+    if current_stage_name != "speech_asr":
+        try:
+            try:
+                from .ai import v1_asr_session as _asr_sess_mod
+            except ImportError:
+                from ai import v1_asr_session as _asr_sess_mod
+            if getattr(_asr_sess_mod, "_process", None) is not None:
+                _asr_sess_mod.close_session()
+                evicted = True
+        except Exception:
+            pass
     return evicted
 
 
@@ -352,4 +363,3 @@ async def async_gpu_gatekeeper(
 import sys as _sys  # noqa: E402
 _sys.modules.setdefault("v1_gpu_gatekeeper", _sys.modules[__name__])
 _sys.modules.setdefault("backend.v1_gpu_gatekeeper", _sys.modules[__name__])
-
