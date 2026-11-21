@@ -247,3 +247,77 @@ def test_faster_whisper_engine_uses_cloud_decode_policy_and_retry(
     assert audit["device"] == expected_device
     assert audit["recognition_track"] == "vocals_retry"
     assert "hello" in output_path.read_text(encoding="utf-8")
+
+
+def test_faster_whisper_drops_tolerable_short_low_confidence_segment(tmp_path, monkeypatch):
+    audio = [0.0] * 48000
+    windows = [{"start": 0.0, "end": 3.0}]
+    transcribe_calls = []
+
+    def segment(start, end, text, score):
+        word = SimpleNamespace(word=text, start=start, end=end, probability=0.9)
+        return SimpleNamespace(
+            start=start,
+            end=end,
+            text=text,
+            words=[word],
+            tokens=[101],
+            temperature=0.0,
+            avg_logprob=score,
+            compression_ratio=0.5,
+            no_speech_prob=0.0,
+        )
+
+    raw_segments = [
+        segment(0.0, 1.3, "hello first", -0.1),
+        segment(1.3, 1.5, "false tail", -1.31),
+        segment(1.5, 3.0, "hello last", -0.1),
+    ]
+
+    class FakeWhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(self, target_audio, **_kwargs):
+            transcribe_calls.append(target_audio)
+            return iter(raw_segments), SimpleNamespace(language="en")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)),
+    )
+    monkeypatch.setitem(sys.modules, "whisper", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    monkeypatch.setenv("AUTODUB_CLOUD_ASR_ENGINE", "faster-whisper")
+    monkeypatch.setattr(
+        full_pipeline,
+        "_asr_speech_audio",
+        lambda *_args: (
+            audio,
+            {"speech_windows_seconds": windows, "track_windows_seconds": {"original": windows}},
+        ),
+    )
+    monkeypatch.setattr(full_pipeline, "validate_asr_source_timeline", lambda *_args: None)
+
+    audit_path = tmp_path / "audit.json"
+    output_path = tmp_path / "captions.srt"
+    result = full_pipeline.step3_asr_whisper(
+        "vocals.wav",
+        str(output_path),
+        audit_path=str(audit_path),
+    )
+
+    assert transcribe_calls == [audio]
+    assert "false tail" not in [segment["text"] for segment in result]
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit["low_confidence_segments"] == [
+        {"start": 1.3, "end": 1.5, "avg_logprob": -1.31}
+    ]
+    assert audit["dropped_low_confidence_segments"] == [
+        {"start": 1.3, "end": 1.5, "avg_logprob": -1.31, "text": "false tail"}
+    ]

@@ -38,6 +38,9 @@ PIPELINE_RESULT_PREFIX = "PIPELINE_RESULT_JSON:"
 PIPELINE_VERSION = "v1_cloud_phase9_full_v1_parity_v1"
 WHISPER_MODEL = "large-v3-turbo"
 ASR_MIN_AVG_LOGPROB = -1.0  # Whisper's default decoder failure threshold.
+ASR_SEVERE_AVG_LOGPROB = -2.0
+ASR_TOLERATED_LOW_CONF_MAX_SECONDS = 1.5
+ASR_TOLERATED_LOW_CONF_MAX_RATIO = 0.10
 
 VOICE_FEMALE_PARAM = "BV562_streaming"
 VOICE_MALE_PARAM = "BV075_streaming"
@@ -467,13 +470,56 @@ def _asr_uncovered_speech(raw_segments: list[dict], windows: list[dict]) -> list
 
 
 def _asr_low_confidence(raw_segments: list[dict]) -> list[dict]:
-    """Reject severely uncertain decoder output even when its timestamps fit."""
+    """List every below-threshold decoder segment for retry and audit."""
     failures = []
     for segment in raw_segments:
         score = float(segment.get("avg_logprob", 0.0))
         if not math.isfinite(score) or score < ASR_MIN_AVG_LOGPROB:
             failures.append({"start": segment["start"], "end": segment["end"], "avg_logprob": score})
     return failures
+
+
+def _partition_asr_low_confidence(
+    raw_segments: list[dict],
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    uncertain = _asr_low_confidence(raw_segments)
+    tolerated = []
+    blocking = []
+    dropped = []
+    for segment in raw_segments:
+        score = float(segment.get("avg_logprob", 0.0))
+        if math.isfinite(score) and score >= ASR_MIN_AVG_LOGPROB:
+            continue
+        try:
+            start, end = float(segment["start"]), float(segment["end"])
+            duration = end - start
+        except (KeyError, TypeError, ValueError):
+            start = end = duration = float("nan")
+        detail = {"start": segment.get("start"), "end": segment.get("end"), "avg_logprob": score}
+        if (
+            math.isfinite(score)
+            and score >= ASR_SEVERE_AVG_LOGPROB
+            and math.isfinite(duration)
+            and 0.0 <= duration <= ASR_TOLERATED_LOW_CONF_MAX_SECONDS
+        ):
+            tolerated.append(segment)
+            dropped.append({"start": start, "end": end, "avg_logprob": score, "text": segment.get("text", "")})
+        else:
+            blocking.append(detail)
+    return uncertain, tolerated, blocking, dropped
+
+
+def _asr_speech_duration(raw_segments: list[dict], windows: list[dict]) -> float:
+    duration_sources = windows if windows else raw_segments
+    total = 0.0
+    for item in duration_sources:
+        try:
+            duration = float(item["end"]) - float(item["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(duration) and duration > 0.0:
+            total += duration
+    return total
 
 
 def _asr_alignment_error(raw_segments: list[dict], windows: list[dict]) -> str | None:
@@ -595,14 +641,33 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
         gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
         uncertain = _asr_low_confidence(result.get("segments", []))
         alignment_error = _asr_alignment_error(result.get("segments", []), windows)
+    uncertain, tolerated, blocking, dropped = _partition_asr_low_confidence(result.get("segments", []))
+    tolerated_duration = sum(float(segment["end"]) - float(segment["start"]) for segment in tolerated)
+    speech_duration = _asr_speech_duration(result.get("segments", []), windows)
+    confidence_budget_exceeded = tolerated_duration > speech_duration * ASR_TOLERATED_LOW_CONF_MAX_RATIO
+    low_confidence_blocking = bool(blocking) or confidence_budget_exceeded
+    if tolerated and not low_confidence_blocking:
+        tolerated_ids = {id(segment) for segment in tolerated}
+        result["segments"] = [
+            segment for segment in result.get("segments", []) if id(segment) not in tolerated_ids
+        ]
+        print(
+            f"  -> ASR bỏ {len(dropped)} đoạn ngắn độ tin cậy thấp ({tolerated_duration:.2f}s tổng).",
+            flush=True,
+        )
+    else:
+        dropped = []
+    gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
+    alignment_error = _asr_alignment_error(result.get("segments", []), windows)
     audit["uncovered_speech"] = gaps
     audit["low_confidence_segments"] = uncertain
+    audit["dropped_low_confidence_segments"] = dropped
     audit["alignment_error"] = alignment_error
     audit["segments"] = result.get("segments", [])
     audit_file.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
     if gaps:
         raise PipelineStageError("ASR_TIMING_INVALID", f"ASR bỏ trống vùng có lời {gaps}; chặn bản nhận dạng thiếu.")
-    if uncertain:
+    if low_confidence_blocking:
         raise PipelineStageError("ASR_TIMING_INVALID", f"ASR có độ tin cậy quá thấp {uncertain}; cần kiểm tra audio nguồn.")
     if alignment_error:
         raise PipelineStageError("ASR_TIMING_INVALID", alignment_error)
