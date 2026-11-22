@@ -13,6 +13,7 @@ import logging
 import os
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -21,6 +22,8 @@ PROJECT_ROOT = ROOT.parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(PROJECT_ROOT / "workspace")))
 DASHBOARD_URL = "http://127.0.0.1:8088/api/status"
 CONTROL_URL = "http://127.0.0.1:8090/status"
+CONTROL_HEALTH_URL = "http://127.0.0.1:8090/health"
+CONTROL_PROBE_TIMEOUT = 10.0
 HEARTBEAT_MAX_AGE = 30.0
 ALERT_REPEAT_SECONDS = 1800
 HEAL_COOLDOWN_SECONDS = 300
@@ -160,15 +163,33 @@ def _dashboard_component(now: float) -> dict:
         }
 
 
+def _control_probe():
+    try:
+        return _http_json(CONTROL_HEALTH_URL, timeout=CONTROL_PROBE_TIMEOUT)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+    return _http_json(CONTROL_URL, timeout=CONTROL_PROBE_TIMEOUT)
+
+
 def _control_component(now: float) -> dict:
     try:
-        data = _http_json(CONTROL_URL)
+        data = _control_probe()
+        tools = len(data) if isinstance(data, list) else data.get("tools", 1) if isinstance(data, dict) else 1
         return {
             "severity": "ok",
             "status": "ok",
-            "detail": f"{len(data) if isinstance(data, list) else 1} tool",
+            "detail": f"{tools} tool",
         }
     except Exception as exc:
+        pids = _pids_for(ROOT / "tool_control.py")
+        if pids:
+            return {
+                "severity": "warning",
+                "status": "slow",
+                "pids": pids,
+                "detail": f"tiến trình còn sống nhưng không phản hồi ({type(exc).__name__})",
+            }
         return {
             "severity": "critical",
             "status": "down",
