@@ -35,8 +35,7 @@ def measured_duration(path):
         return len(AudioSegment.from_file(path)) / 1000.
 
 
-@pytest.fixture
-def run_tts(tmp_path, monkeypatch):
+def compile_generate_dubbing_audio(monkeypatch):
     """Compile only the production orchestration; replace its service adapters."""
     source = Path(__file__).resolve().parents[1] / "backend/ai/voice_cloning.py"
     tree = ast.parse(source.read_text(encoding="utf-8-sig"), filename=str(source))
@@ -72,6 +71,12 @@ def run_tts(tmp_path, monkeypatch):
                      trim_audio_silence=lambda audio, **kwargs: audio,
                      build_atempo_filter=lambda _: "anull", print=lambda *args, **kwargs: None)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+    return namespace, translation, cache_write
+
+
+@pytest.fixture
+def run_tts(tmp_path, monkeypatch):
+    namespace, translation, cache_write = compile_generate_dubbing_audio(monkeypatch)
 
     def run(actual_duration, reported_duration, *, speed=1.5, fitted_duration=None,
             fitted_metadata=None, condensation_error=None, text="xin chào", window=.95):
@@ -179,3 +184,94 @@ def test_measured_rewrite_budget_uses_available_speed(run_tts, speed, targets):
     assert [call.args[0][0]["target_words"] for call in job.condense.call_args_list
             if call.kwargs["job_id"] in measured_rounds] == targets
     assert job.path.read_bytes() == job.original
+
+
+def tempo_fit(path, target, output=None, *, max_speed=1.5, allow_emergency=False):
+    """Simulate fit_audio_file: refuse beyond the speed cap, otherwise shorten the wave."""
+    duration = measured_duration(path)
+    if duration <= target:
+        return str(path), duration, 1.0
+    ratio = duration / max(0.001, target - 0.015)
+    if ratio > max_speed:
+        return str(path), duration, 1.0
+    write_wave(path, duration / ratio)
+    return str(path), measured_duration(path), ratio
+
+
+@pytest.fixture
+def run_pair(tmp_path, monkeypatch):
+    namespace, _translation, _cache = compile_generate_dubbing_audio(monkeypatch)
+
+    def run(cues, video_duration):
+        segments, durations = [], {}
+        for index, (start, text, duration, speed) in enumerate(cues, start=1):
+            segments.append(NS(index=index, start=timedelta(seconds=start), end=timedelta(seconds=start + 1),
+                               content=text, voice_source="fixture", voice_param="female", gender="female"))
+            durations[index] = (duration, speed)
+
+        async def generate(seg, folder, *args, **kwargs):
+            duration, speed = durations[seg.index]
+            path = Path(folder) / f"{seg.index}.mp3"
+            write_wave(path, duration)
+            start = seg.start.total_seconds()
+            return dict(index=seg.index, path=str(path), start=start, end=start + duration,
+                        actual_audio_duration=duration, speed_ratio=speed, content=seg.content)
+
+        async def fit(*args, **kwargs):
+            return tempo_fit(*args, **kwargs)
+
+        fits = Mock(wraps=fit)
+        namespace["generate_single_tts"] = generate
+        namespace["fit_audio_file"] = fits
+        namespace["calculate_reading_windows"] = guard.calculate_reading_windows
+        result = asyncio.run(namespace["generate_dubbing_audio"](
+            segments, str(tmp_path), voice_source="fixture", video_duration=video_duration))
+        return {item["index"]: item for item in result}, fits
+
+    return run
+
+
+def test_unutterable_interjection_delays_next_cue_instead_of_failing(run_pair):
+    long_line = " ".join(["mẫu"] * 14)
+    result, fits = run_pair([(0.0, "Gì?", 0.696, 1.0), (0.38, long_line, 4.25, 1.0)], video_duration=4.70)
+
+    first, second = result[1], result[2]
+    assert first["start"] == 0.0
+    assert first["actual_audio_duration"] == pytest.approx(0.696, abs=1e-3)
+    assert second["start"] == pytest.approx(0.746, abs=1e-3)
+    assert second["start"] - 0.38 <= 0.5
+    assert first["start"] + first["actual_audio_duration"] <= second["start"] - 0.05 + 0.005
+    assert second["start"] + second["actual_audio_duration"] <= 4.65 + 0.005
+    assert 1.0 < second["speed_ratio"] <= 1.5
+    assert all(call.kwargs["max_speed"] <= 1.75 for call in fits.call_args_list)
+
+
+def test_delay_is_capped_and_first_cue_is_tempo_fitted(run_pair, monkeypatch):
+    monkeypatch.setenv("V1_SPEECH_MAX_FOLLOW_DELAY_S", "0.2")
+    long_line = " ".join(["mẫu"] * 14)
+    result, _fits = run_pair([(0.0, "Gì?", 0.696, 1.0), (0.38, long_line, 4.25, 1.0)], video_duration=4.70)
+
+    first, second = result[1], result[2]
+    assert second["start"] == pytest.approx(0.58, abs=1e-3)
+    assert first["actual_audio_duration"] <= second["start"] - 0.05 + 0.005
+    assert first["speed_ratio"] <= 1.75
+
+
+def test_next_cue_without_room_keeps_the_speech_timing_failure(run_pair):
+    long_line = " ".join(["mẫu"] * 14)
+    with pytest.raises(guard.SpeechTimingError):
+        run_pair([(0.0, "Gì?", 0.696, 1.0), (0.38, long_line, 4.25, 1.5)], video_duration=4.70)
+
+
+def test_follow_delay_can_be_disabled(run_pair, monkeypatch):
+    monkeypatch.setenv("V1_SPEECH_MAX_FOLLOW_DELAY_S", "0")
+    long_line = " ".join(["mẫu"] * 14)
+    with pytest.raises(guard.SpeechTimingError):
+        run_pair([(0.0, "Gì?", 0.696, 1.0), (0.38, long_line, 4.25, 1.0)], video_duration=4.70)
+
+
+def test_fitting_cues_keep_their_original_starts(run_pair):
+    result, fits = run_pair([(0.0, "Xin chào", 0.8, 1.0), (1.2, "các bạn", 0.9, 1.0)], video_duration=3.0)
+
+    assert [result[1]["start"], result[2]["start"]] == [0.0, 1.2]
+    fits.assert_not_called()
