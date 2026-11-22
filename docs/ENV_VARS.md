@@ -6,7 +6,7 @@ File này được sinh tự động bởi `python scripts/gen_env_docs.py`. Kh�
 Cột *Mặc định* là giá trị viết trong code. Nhiều giá trị nghĩa là các module dùng
 mặc định khác nhau cho cùng một biến; nên xem lại những dòng đó.
 
-Tổng: 222 biến.
+Tổng: 225 biến.
 
 | Biến | Mặc định | Nơi đọc |
 |---|---|---|
@@ -181,6 +181,7 @@ Tổng: 222 biến.
 | `V1_GEMINI_VISION_DOMAIN_CLASSIFY` | `0` | `backend/ai/translation.py` |
 | `V1_GPU_LOCALIZED_BLUR` | `True` | `backend/v1_gpu_subtitle_blur.py` |
 | `V1_HANDOFF_ALLOWED_DIRS` | — | `backend/handoff_api.py` |
+| `V1_KEEP_WARM_EVICT_BELOW_MB` | `4000` | `backend/v1_gpu_gatekeeper.py` |
 | `V1_MAX_NATURAL_SPEED` | `(tính lúc chạy)` | `backend/v1_speech_guard.py` |
 | `V1_MAX_VIDEO_DURATION_MINUTES` | `60.0` | `backend/v1_video_router.py` |
 | `V1_MEDIUM_MAX_SECONDS` | `420.0` | `backend/v1_video_router.py` |
@@ -190,6 +191,7 @@ Tổng: 222 biến.
 | `V1_NVENC_PRESET` | `p3` | `backend/video_utils.py` |
 | `V1_OCR_BACKEND` | — | `backend/ai/v1_model_policy.py` |
 | `V1_OCR_KEEP_WARM` | `1` | `backend/ocr_utils.py` |
+| `V1_OCR_KEEP_WARM_IDLE_S` | `180` | `backend/ai/v1_ocr_session.py` |
 | `V1_OCR_KEEP_WARM_MIN_RAM_MB` | `1500` | `backend/ocr_utils.py` |
 | `V1_OCR_KEEP_WARM_MIN_VRAM_MB` | `1800` | `backend/ocr_utils.py` |
 | `V1_OCR_MAX_SAMPLES_PER_SEGMENT` | `8` | `backend/ocr_utils.py` |
@@ -210,6 +212,7 @@ Tổng: 222 biến.
 | `V1_SCRIPT_MODE` | `default` | `backend/model_workers/v1_voice_worker.py` |
 | `V1_SEPARATOR_BACKEND` | — | `backend/ai/v1_model_policy.py`, `backend/video_utils.py` |
 | `V1_SEPARATOR_KEEP_WARM` | `(tính lúc chạy)` | `backend/video_utils.py` |
+| `V1_SEPARATOR_KEEP_WARM_IDLE_S` | `300` | `backend/ai/v1_separator_session.py` |
 | `V1_SEPARATOR_KEEP_WARM_MIN_RAM_MB` | `2000` | `backend/ai/v1_separator_session.py` |
 | `V1_SEPARATOR_MODEL` | — | `backend/ai/v1_model_policy.py` |
 | `V1_SEPARATOR_PYTHON` | — | `backend/ai/v1_model_policy.py` |

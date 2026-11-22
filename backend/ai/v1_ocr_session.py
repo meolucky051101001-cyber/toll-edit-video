@@ -2,6 +2,7 @@
 import atexit
 import json
 import math
+import os
 import subprocess
 import threading
 import time
@@ -11,13 +12,16 @@ _lock = threading.RLock()
 _process = None
 _key = None
 _last_used_at = 0.0
+_idle_timer = None
 
 def close_session():
-    global _process, _key, _last_used_at
-    import os
+    global _process, _key, _last_used_at, _idle_timer
     with _lock:
         process, _process, _key = _process, None, None
         _last_used_at = 0.0
+        idle_timer, _idle_timer = _idle_timer, None
+        if idle_timer is not None:
+            idle_timer.cancel()
         if process is not None:
             if process.stdin:
                 try:
@@ -57,6 +61,33 @@ def close_if_idle(max_idle_s: float = 180.0) -> bool:
         return True
     finally:
         _lock.release()
+
+
+def _close_if_idle_after_delay(idle_s):
+    if close_if_idle(idle_s):
+        return
+    with _lock:
+        if _process is None or threading.current_thread() is not _idle_timer:
+            return
+        remaining = idle_s - (time.monotonic() - _last_used_at)
+        _schedule_idle_close(max(remaining, 0.001))
+
+
+def _schedule_idle_close(idle_s):
+    global _idle_timer
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+    _idle_timer = threading.Timer(idle_s, _close_if_idle_after_delay, args=(idle_s,))
+    _idle_timer.daemon = True
+    _idle_timer.start()
+
+
+def _idle_seconds():
+    try:
+        idle_s = float(os.getenv("V1_OCR_KEEP_WARM_IDLE_S", "180"))
+    except ValueError:
+        return 180.0
+    return idle_s if math.isfinite(idle_s) and idle_s >= 0 else 180.0
 
 
 def run_request(args, *, timeout, env, creationflags=0, **kwargs):
@@ -104,6 +135,7 @@ def run_request(args, *, timeout, env, creationflags=0, **kwargs):
                 remaining = check_budget()
                 if response.is_file():
                     _last_used_at = time.monotonic()
+                    _schedule_idle_close(_idle_seconds())
                     return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
                 if _process.poll() is not None:
                     raise RuntimeError("V1 OCR worker exited before returning results")
