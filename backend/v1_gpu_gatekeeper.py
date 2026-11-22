@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextvars
 import gc
 import logging
+import math
 import os
 import threading
 import time
@@ -115,6 +116,22 @@ def _release_gpu_context(cid, stage_name, handle=None):
                 except Exception:
                     pass
         logger.info("[GPU_GATEKEEPER] <<< ĐÃ GIẢI PHÓNG QUYỀN GPU từ stage: '%s' (holder=%s)", stage_name, cid)
+
+
+def _available_ram_below_keep_warm_floor() -> Optional[float]:
+    """Return available RAM in MB when it is below the keep-warm eviction floor."""
+    try:
+        try:
+            floor_mb = float(os.getenv("V1_KEEP_WARM_EVICT_BELOW_MB", "4000"))
+        except ValueError:
+            floor_mb = 4000.0
+        if not math.isfinite(floor_mb) or floor_mb <= 0:
+            return None
+        import psutil
+        available_mb = psutil.virtual_memory().available / (1024.0 * 1024.0)
+    except Exception:
+        return None
+    return available_mb if available_mb < floor_mb else None
 
 
 def _evict_warm_sessions(current_stage_name: str) -> bool:
@@ -226,6 +243,13 @@ def gpu_gatekeeper(
 
             # 2. Đã chiếm khóa file, kiểm tra an toàn VRAM
             if acquired:
+                low_ram_mb = _available_ram_below_keep_warm_floor()
+                if low_ram_mb is not None and _evict_warm_sessions(stage_name):
+                    logger.info(
+                        "[GPU_GATEKEEPER] RAM khả dụng %.0f MB thấp: đã đóng worker giữ ấm của stage khác trước '%s'",
+                        low_ram_mb,
+                        stage_name,
+                    )
                 if auto_guard:
                     safe, reason = is_vram_safe_for_gpu_step(min_free_mb=min_free_mb)
                     if not safe and _evict_warm_sessions(stage_name):

@@ -263,6 +263,7 @@ def test_release_ocr_reader_vram_ram_guards_and_gatekeeper_eviction(tmp_path, mo
     assert len(close_calls) == 2
 
     # Case 4: gpu_gatekeeper evicts idle warm sessions and re-checks VRAM before cooldown sleep
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(available=8192 * 1024 * 1024))
     evicted = []
     monkeypatch.setattr(v1_ocr_session, "_process", object())
     monkeypatch.setattr(v1_separator_session, "_process", object())

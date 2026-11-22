@@ -20,6 +20,7 @@ _process: Optional[subprocess.Popen] = None
 _key: Optional[tuple] = None
 _last_used_at: float = 0.0
 _stderr_thread: Optional[threading.Thread] = None
+_idle_timer: Optional[threading.Timer] = None
 
 
 def _creation_flags(creationflags: int = 0) -> int:
@@ -81,14 +82,19 @@ def _read_worker_response(response_path: Path) -> Dict[str, Any]:
 
 def close_session() -> None:
     """Terminate the persistent BS-RoFormer worker and reap its process tree."""
-    global _process, _key, _last_used_at, _stderr_thread
+    global _process, _key, _last_used_at, _stderr_thread, _idle_timer
     with _lock:
         process = _process
         stderr_t = _stderr_thread
+        idle_timer = _idle_timer
         _process = None
         _key = None
         _last_used_at = 0.0
         _stderr_thread = None
+        _idle_timer = None
+
+    if idle_timer is not None:
+        idle_timer.cancel()
 
     if process is None:
         return
@@ -133,6 +139,33 @@ def close_if_idle(max_idle_s: float = 300.0) -> bool:
             return False
     close_session()
     return True
+
+
+def _close_if_idle_after_delay(idle_s: float) -> None:
+    if close_if_idle(idle_s):
+        return
+    with _lock:
+        if _process is None or threading.current_thread() is not _idle_timer:
+            return
+        remaining = idle_s - (time.monotonic() - _last_used_at)
+        _schedule_idle_close(max(remaining, 0.001))
+
+
+def _schedule_idle_close(idle_s: float) -> None:
+    global _idle_timer
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+    _idle_timer = threading.Timer(idle_s, _close_if_idle_after_delay, args=(idle_s,))
+    _idle_timer.daemon = True
+    _idle_timer.start()
+
+
+def _idle_seconds() -> float:
+    try:
+        idle_s = float(os.getenv("V1_SEPARATOR_KEEP_WARM_IDLE_S", "300"))
+    except ValueError:
+        return 300.0
+    return idle_s if math.isfinite(idle_s) and idle_s >= 0 else 300.0
 
 
 def _below_ram_threshold() -> bool:
@@ -234,6 +267,7 @@ def run_separator_request(
                         _last_used_at = time.monotonic()
                         if not result:
                             raise RuntimeError("Separator warm worker produced an empty response")
+                        _schedule_idle_close(_idle_seconds())
                         return result
                     if _process.poll() is not None:
                         raise RuntimeError(

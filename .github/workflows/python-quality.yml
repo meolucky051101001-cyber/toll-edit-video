@@ -59,6 +59,7 @@ jobs:
           tests/test_control_boot_pause.py
           tests/test_ops_watchdog.py
           tests/test_frozen_config_retention.py
+          tests/test_keep_warm_ram_eviction.py
           tests/test_localized_subtitle_blur.py
           tests/test_localized_blur_ffmpeg.py
           tests/test_visual_caption_timing.py
