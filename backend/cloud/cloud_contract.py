@@ -225,6 +225,7 @@ class CloudErrorCode(str, Enum):
     TTS_GENERATION_FAILED = "TTS_GENERATION_FAILED"
     NO_SPEECH_DETECTED = "NO_SPEECH_DETECTED"
     SUBTITLE_BUILD_FAILED = "SUBTITLE_BUILD_FAILED"
+    SUBTITLE_COVERAGE_GAP = "SUBTITLE_COVERAGE_GAP"
     RENDER_FAILED = "RENDER_FAILED"
     QC_FAILED = "QC_FAILED"
     ROLLOUT_PAUSED = "ROLLOUT_PAUSED"
@@ -313,6 +314,7 @@ ERROR_REMEDIATION_MAP: Dict[str, str] = {
     CloudErrorCode.TTS_GENERATION_FAILED.value: "Tạo giọng đọc CapCut TTS thất bại. Kiểm tra kết nối CapCut TTS và mã giọng.",
     CloudErrorCode.NO_SPEECH_DETECTED.value: "Video không phát hiện được thoại hoặc phụ đề rỗng. Nếu muốn giữ nhạc nền, bật tuỳ chọn allow_no_speech.",
     CloudErrorCode.SUBTITLE_BUILD_FAILED.value: "Không tạo được file phụ đề .ass hợp lệ từ bản dịch.",
+    CloudErrorCode.SUBTITLE_COVERAGE_GAP.value: "Phụ đề gốc đổi vị trí theo cảnh và chưa được che đủ. Job bị chặn để tránh lộ chữ Trung; thử lại hoặc báo đội kỹ thuật.",
     CloudErrorCode.RENDER_FAILED.value: "FFmpeg render video đầu ra thất bại. Kiểm tra log render trên Colab.",
     CloudErrorCode.QC_FAILED.value: "Thành phẩm không vượt qua cổng QC (thiếu hình, mất tiếng, sai thời lượng hoặc màn hình đen/im lặng).",
     CloudErrorCode.ASR_TIMING_INVALID.value: "Mốc ASR không khớp thời lượng video nguồn. Kiểm tra transcript và mô hình nhận dạng; không tăng thời lượng nguồn hoặc bỏ câu để vượt QC.",

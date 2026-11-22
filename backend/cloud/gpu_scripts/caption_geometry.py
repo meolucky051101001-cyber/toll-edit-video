@@ -205,12 +205,26 @@ def _reconcile_two_scales(first, second, *, band_top, band_bottom):
     return sorted(merged)
 
 
-def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_bounds=None):
+def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_bounds=None,
+                          bands=None):
     """Return measured boxes, or verified empty; ambiguous detections raise.
 
     A supported dialogue-caption band is needed to classify detected text as
     captions. Without an anchor, a genuinely text-free frame can still pass.
     """
+    if bands is not None:
+        distinct = []
+        for top_b, bottom_b in bands:
+            pair = (float(top_b), float(bottom_b))
+            if pair not in distinct:
+                distinct.append(pair)
+        merged = []
+        for top_b, bottom_b in distinct:
+            for box in observe_caption_boxes(reader, frame, band_top=top_b,
+                                             band_bottom=bottom_b, x_bounds=x_bounds):
+                if not any(_iou(box, kept) >= 0.8 for kept in merged):
+                    merged.append(box)
+        return merged
     anchored = band_top is not None and band_bottom is not None
     if anchored:
         margin = max(.03, (band_bottom - band_top) * .65)
@@ -372,8 +386,8 @@ def _coalesce_segment_tracking_blocks(rows: list[dict], width: int, height: int)
 
 
 def acquire_caption_geometry(input_video, segments, reader, *, band_top=None, band_bottom=None,
-                             x_bounds=None, duration, audit_path, sample_step=.35, max_samples=4000,
-                             max_extra_frames=2000):
+                             x_bounds=None, bands=None, duration, audit_path, sample_step=.35,
+                             max_samples=4000, max_extra_frames=2000):
     """Reacquire source geometry across the timeline, including speech gaps.
 
     Changed sampled boxes are refined to adjacent decoded frames. Identical
@@ -436,6 +450,17 @@ def acquire_caption_geometry(input_video, segments, reader, *, band_top=None, ba
                     raise _CaptionFrameClockError(f"Source frame {index} could not be verified")
                 times[index] = pts
                 try:
+                    if bands is not None:
+                        active = [(top_b, bottom_b) for start_b, end_b, top_b, bottom_b in bands
+                                  if start_b <= pts <= end_b]
+                        if not active:
+                            previous = max((w for w in bands if w[1] < pts),
+                                           key=lambda w: w[1], default=None)
+                            following = min((w for w in bands if w[0] > pts),
+                                            key=lambda w: w[0], default=None)
+                            active = [(w[2], w[3]) for w in (previous, following) if w is not None]
+                        return observe_caption_boxes(reader, frame, x_bounds=x_bounds,
+                                                     bands=active)
                     return observe_caption_boxes(reader, frame, band_top=band_top, band_bottom=band_bottom,
                                                  x_bounds=x_bounds)
                 except CaptionGeometryError as exc:
@@ -507,6 +532,57 @@ def acquire_caption_geometry(input_video, segments, reader, *, band_top=None, ba
     finally:
         capture.release()
         Path(audit_path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def uncovered_caption_cues(segments, cue_rows, *, min_overlap=0.45, min_time_fraction=0.5):
+    """Cues whose measured masks do not cover their detected caption row.
+
+    cue_rows maps a cue id to its (top, bottom) caption row. A cue is uncovered
+    when the tracking-block masks that vertically overlap that row (at least
+    min_overlap of the row height) cover less than min_time_fraction of the
+    cue's own time window. Cues with a zero-length window keep the any-hit
+    behaviour.
+    """
+    uncovered = []
+    for segment in segments or []:
+        row = cue_rows.get(segment.get("id"))
+        if row is None:
+            continue
+        top, bottom = float(row[0]), float(row[1])
+        row_height = bottom - top
+        if row_height <= 0:
+            continue
+        cue_start = float(segment.get("start", 0.0) or 0.0)
+        cue_end = float(segment.get("end", cue_start) or cue_start)
+        intervals = []
+        for block in segment.get("tracking_blocks") or []:
+            overlap = (min(float(block.get("max_y_pct", 0.0)), bottom)
+                       - max(float(block.get("y_pct", 0.0)), top))
+            if overlap < min_overlap * row_height:
+                continue
+            lo = max(float(block.get("start", cue_start)), cue_start)
+            hi = min(float(block.get("end", cue_end)), cue_end)
+            if hi > lo:
+                intervals.append((lo, hi))
+        if cue_end <= cue_start:
+            if not intervals:
+                uncovered.append(segment.get("id"))
+            continue
+        intervals.sort()
+        covered_time = 0.0
+        cur_lo = cur_hi = None
+        for lo, hi in intervals:
+            if cur_hi is None or lo > cur_hi:
+                if cur_hi is not None:
+                    covered_time += cur_hi - cur_lo
+                cur_lo, cur_hi = lo, hi
+            else:
+                cur_hi = max(cur_hi, hi)
+        if cur_hi is not None:
+            covered_time += cur_hi - cur_lo
+        if covered_time < min_time_fraction * (cue_end - cue_start):
+            uncovered.append(segment.get("id"))
+    return uncovered
 
 
 def validate_caption_evidence(evidence, *, cue_count):

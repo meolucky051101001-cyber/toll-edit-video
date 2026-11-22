@@ -375,7 +375,7 @@ def test_cloud_ocr_locates_top_caption_before_any_band_classification(tmp_path, 
     from backend.cloud.gpu_scripts import caption_geometry
     monkeypatch.setitem(sys.modules, "caption_geometry", caption_geometry)
     monkeypatch.setattr(caption_geometry, "acquire_caption_geometry", lambda *a, **kw: _caption_evidence(3))
-    result, y, _, _, _ = full_pipeline.step3b_ocr_and_fix_subtitles(
+    result, y, _, _, _, _cb = full_pipeline.step3b_ocr_and_fix_subtitles(
         "source.mp4", segments, str(tmp_path / "source.srt"))
     assert all(s["ocr_mask_status"] == "located" for s in result)
     assert 0.18 < y < 0.25
