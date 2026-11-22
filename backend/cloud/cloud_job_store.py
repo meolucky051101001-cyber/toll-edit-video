@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from .cloud_config import DEFAULT_CONFIG
@@ -107,6 +107,10 @@ def _day_bounds_epoch(target_ts: float, tz_name: Optional[str] = None) -> Tuple[
     day_start = dt.datetime(local_dt.year, local_dt.month, local_dt.day, tzinfo=tz)
     day_end = day_start + dt.timedelta(days=1)
     return day_start.timestamp(), day_end.timestamp(), day_start.strftime("%Y-%m-%d")
+
+
+# A parked session is stopped at expiry; allow this long for the stop to take effect.
+_WARM_IDLE_STOP_GRACE_SECONDS = 60.0
 
 
 def _allocate_cu_to_window(
@@ -450,6 +454,18 @@ class CloudJobStore:
                         expires_at REAL NOT NULL,
                         keepalive_mode INTEGER NOT NULL DEFAULT 0,
                         owner_pid INTEGER
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cloud_warm_idle_usage (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_name TEXT NOT NULL,
+                        gpu_type TEXT NOT NULL,
+                        started_at REAL NOT NULL,
+                        ended_at REAL NOT NULL,
+                        cu REAL NOT NULL
                     )
                     """
                 )
@@ -1470,6 +1486,53 @@ class CloudJobStore:
             ).fetchone()
             return row is not None
 
+    @staticmethod
+    def _warm_idle_interval(row: Any, now_ts: float) -> Tuple[float, float, float]:
+        """(start, billed end, CU/hour) of a parked session; billing stops shortly after its expiry."""
+        start = float(row["parked_at"] or now_ts)
+        limit = max(start, float(row["expires_at"] or start)) + _WARM_IDLE_STOP_GRACE_SECONDS
+        rate = float(GPU_CU_RATES.get(str(row["gpu_type"] or "T4").upper(), 1.96))
+        return start, max(start, min(float(now_ts), limit)), rate
+
+    def _record_warm_idle_in_db(self, db: sqlite3.Connection, rows: Sequence[Any], now_ts: float) -> None:
+        """Keep the idle GPU time of sessions leaving the warm registry in the daily budget."""
+        for row in rows:
+            start, end, rate = self._warm_idle_interval(row, now_ts)
+            if end > start:
+                db.execute(
+                    "INSERT INTO cloud_warm_idle_usage (session_name, gpu_type, started_at, ended_at, cu) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (row["session_name"], str(row["gpu_type"] or "T4").upper(), start, end,
+                     (end - start) * rate / 3600.0),
+                )
+
+    def _warm_idle_budget_in_db(
+        self, db: sqlite3.Connection, now_ts: float, win_start: float, win_end: float
+    ) -> Tuple[float, float]:
+        """(spent, reserved) CU of warm sessions: recorded idle intervals plus sessions still parked.
+
+        The remaining standby is held against every job, even one that would
+        take the session over, so all budget gates agree and standby cost can
+        never abort a job that was admitted without it.
+        """
+        spent = 0.0
+        reserved = 0.0
+        for r in db.execute(
+            "SELECT started_at, ended_at, cu FROM cloud_warm_idle_usage WHERE ended_at >= ? AND started_at < ?",
+            (win_start, win_end),
+        ).fetchall():
+            spent += _allocate_cu_to_window(float(r["cu"]), float(r["started_at"]), float(r["ended_at"]), win_start, win_end)
+        for row in db.execute("SELECT * FROM cloud_warm_sessions").fetchall():
+            start, end, rate = self._warm_idle_interval(row, now_ts)
+            spent += _allocate_cu_to_window((end - start) * rate / 3600.0, start, end, win_start, win_end)
+            hold_start = max(float(now_ts), start)
+            hold_end = float(row["expires_at"] or 0.0)
+            if hold_end > hold_start:
+                reserved += _allocate_cu_to_window(
+                    (hold_end - hold_start) * rate / 3600.0, hold_start, hold_end, win_start, win_end
+                )
+        return spent, reserved
+
     def park_warm_session(
         self,
         session_name: str,
@@ -1489,10 +1552,15 @@ class CloudJobStore:
             db.execute("BEGIN IMMEDIATE")
             try:
                 old_rows = db.execute(
-                    "SELECT session_name FROM cloud_warm_sessions WHERE UPPER(gpu_type) = ? AND session_name != ?",
+                    "SELECT * FROM cloud_warm_sessions WHERE UPPER(gpu_type) = ? OR session_name = ?",
                     (gpu_norm, session_name),
                 ).fetchall()
-                evicted = [str(r["session_name"]) for r in old_rows if r["session_name"]]
+                self._record_warm_idle_in_db(db, old_rows, ts)
+                evicted = [
+                    str(r["session_name"]) for r in old_rows
+                    if r["session_name"] and r["session_name"] != session_name
+                    and str(r["gpu_type"] or "").upper() == gpu_norm
+                ]
                 if evicted:
                     db.execute(
                         "DELETE FROM cloud_warm_sessions WHERE UPPER(gpu_type) = ? AND session_name != ?",
@@ -1551,6 +1619,7 @@ class CloudJobStore:
                 if not row:
                     db.execute("COMMIT")
                     return None
+                self._record_warm_idle_in_db(db, [row], check_now)
                 db.execute(
                     "DELETE FROM cloud_warm_sessions WHERE session_name = ?",
                     (row["session_name"],),
@@ -1567,14 +1636,15 @@ class CloudJobStore:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                sql = "DELETE FROM cloud_warm_sessions WHERE session_name = ?"
+                where = "WHERE session_name = ?"
                 args: tuple = (session_name,)
                 if expires_at is not None:
-                    sql += " AND expires_at = ?"
+                    where += " AND expires_at = ?"
                     args = (session_name, expires_at)
-                cur = db.execute(
-                    sql, args,
+                self._record_warm_idle_in_db(
+                    db, db.execute(f"SELECT * FROM cloud_warm_sessions {where}", args).fetchall(), time.time()
                 )
+                cur = db.execute(f"DELETE FROM cloud_warm_sessions {where}", args)
                 db.execute("COMMIT")
                 return cur.rowcount > 0
             except Exception:
@@ -1606,6 +1676,7 @@ class CloudJobStore:
                 else:
                     rows = db.execute("SELECT * FROM cloud_warm_sessions").fetchall()
                     db.execute("DELETE FROM cloud_warm_sessions")
+                self._record_warm_idle_in_db(db, rows, time.time())
                 db.execute("COMMIT")
                 return [dict(r) for r in rows]
             except Exception:
@@ -2708,6 +2779,12 @@ class CloudJobStore:
             if allocated > 0.0:
                 spent_raw += allocated
                 sources_used.add(CloudCostMeasurementSource.UNVERIFIED_ESTIMATE.value)
+
+        warm_spent, warm_reserved = self._warm_idle_budget_in_db(db, check_now, win_start, win_end)
+        spent_raw += warm_spent
+        reserved_raw += warm_reserved
+        if warm_spent > 0.0:
+            sources_used.add(CloudCostMeasurementSource.UNVERIFIED_ESTIMATE.value)
 
         spent_today = round(spent_raw, 4)
         reserved_today = round(reserved_raw, 4)

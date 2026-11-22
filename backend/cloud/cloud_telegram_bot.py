@@ -488,6 +488,13 @@ class CloudTelegramBotService:
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=max(0.5, float(timeout)))
+        # The expiry timer dies with the process, so a parked GPU must be stopped here.
+        release_fn = getattr(self._cloud_worker.orchestrator, "release_warm_sessions", None)
+        if callable(release_fn):
+            try:
+                release_fn()
+            except Exception as rel_exc:
+                logger.warning("Cảnh báo giải phóng session giữ ấm khi dừng Cloud Bot: %s", redact_secrets(str(rel_exc)))
         alive = bool(thread and thread.is_alive())
         if not alive:
             self._running = False
