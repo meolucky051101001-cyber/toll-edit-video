@@ -189,3 +189,65 @@ def test_status_inventory_does_not_include_downloader_media_child(local_root):
     with patch.object(control.shutdown, "enumerate_live_processes", return_value=records), \
          patch.object(control.psutil, "Process", side_effect=lambda pid: Mock(pid=pid)):
         assert [(p.pid, name) for p, name in control.processes("v1")] == [(10, "main.py")]
+
+
+def test_status_polls_reuse_recent_process_inventory(local_root, monkeypatch):
+    monkeypatch.setattr(control, "_PROCESS_SNAPSHOTS", {})
+    monkeypatch.setattr(control, "_SNAPSHOT_REFRESHING", set())
+    bot = Mock(pid=77)
+    with patch.object(control, "processes", return_value=[(bot, "telegram_bot.py")]) as inventory,          patch.object(control, "read_telemetry", return_value={"pid": 77, "at": control.time.time(), "polling": True}),          patch.object(control.urllib.request, "urlopen", side_effect=OSError("offline")):
+        first = control.status("v1", cached=True)
+        second = control.status("v1", cached=True)
+    assert inventory.call_count == 1
+    assert first["bot"] is True and second["heartbeat"] is True
+
+
+def test_stale_inventory_is_served_while_single_refresh_runs(local_root, monkeypatch):
+    monkeypatch.setattr(control, "_PROCESS_SNAPSHOTS", {"v1": (control.time.monotonic() - 60, [(5, "telegram_bot.py")])})
+    monkeypatch.setattr(control, "_SNAPSHOT_REFRESHING", set())
+    started = []
+    monkeypatch.setattr(control.threading, "Thread",
+                        lambda target, args, daemon: Mock(start=lambda: started.append(args)))
+    with patch.object(control, "processes") as inventory:
+        assert control.process_snapshot("v1") == [(5, "telegram_bot.py")]
+        assert control.process_snapshot("v1") == [(5, "telegram_bot.py")]
+    inventory.assert_not_called()
+    assert started == [("v1",)]
+
+
+def test_refresh_replaces_snapshot_and_releases_single_flight(local_root, monkeypatch):
+    monkeypatch.setattr(control, "_PROCESS_SNAPSHOTS", {})
+    monkeypatch.setattr(control, "_SNAPSHOT_REFRESHING", {"v1"})
+    with patch.object(control, "processes", return_value=[(Mock(pid=9), "main.py")]):
+        control._refresh_process_snapshot("v1")
+    assert control._PROCESS_SNAPSHOTS["v1"][1] == [(9, "main.py")]
+    assert "v1" not in control._SNAPSHOT_REFRESHING
+
+
+def test_explicit_status_checks_stay_fresh(local_root, monkeypatch):
+    monkeypatch.setattr(control, "_PROCESS_SNAPSHOTS", {"v1": (control.time.monotonic(), [(5, "telegram_bot.py")])})
+    with patch.object(control, "processes", return_value=[]) as inventory,          patch.object(control, "read_telemetry", return_value={}),          patch.object(control.urllib.request, "urlopen", side_effect=OSError("offline")):
+        result = control.status("v1")
+    inventory.assert_called_once_with("v1")
+    assert result["bot"] is False
+
+
+def test_health_endpoint_answers_without_process_inventory(local_root):
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), control.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/health",
+                                         headers={"Host": "127.0.0.1:8090"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with patch.object(control, "processes", side_effect=AssertionError("inventory used")),              opener.open(request, timeout=5) as response:
+            payload = json.load(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert response.status == 200
+    assert payload == {"ok": True, "pid": os.getpid(), "tools": len(control.ROOTS)}

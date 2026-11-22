@@ -141,6 +141,14 @@ class TestHealGuardrails(WatchdogTestBase):
         self.assertIn("đã chạy AutoDubV1-dashboard", state["components"]["dashboard"]["heal"])
         self.assertIn(self.now, self.read_state()["heal"]["dashboard"])
 
+    def test_slow_control_with_live_process_is_not_healed(self):
+        slow = {"severity": "warning", "status": "slow", "pids": [4242],
+                "detail": "tiến trình còn sống nhưng không phản hồi (TimeoutError)"}
+        state = self.run_watchdog(heal=True, control=slow)
+        self.run_task.assert_not_called()
+        self.assertEqual(state["overall"], "warning")
+        self.assertNotIn("heal", state["components"]["control"])
+
     def test_heal_blocked_while_batch_active(self):
         (self.ws / "bot_system" / "job_status.json").write_text(
             json.dumps({"active": True}), encoding="utf-8"
@@ -306,9 +314,45 @@ class TestProcessAndHttpProbes(WatchdogTestBase):
         self.assertEqual(comp["status"], "down")
 
     def test_control_http_failure_is_critical(self):
-        with patch.object(ops_watchdog, "_http_json", side_effect=OSError("refused")):
+        with patch.object(ops_watchdog, "_http_json", side_effect=OSError("refused")),              patch.object(ops_watchdog, "_pids_for", return_value=[]):
             comp = ops_watchdog._control_component(self.now)
         self.assertEqual(comp["severity"], "critical")
+        self.assertEqual(comp["status"], "down")
+
+    def test_control_timeout_with_live_process_is_slow_warning(self):
+        with patch.object(ops_watchdog, "_http_json", side_effect=TimeoutError("timed out")),              patch.object(ops_watchdog, "_pids_for", return_value=[4242]) as pids:
+            comp = ops_watchdog._control_component(self.now)
+        pids.assert_called_once_with(ops_watchdog.ROOT / "tool_control.py")
+        self.assertEqual(comp["severity"], "warning")
+        self.assertEqual(comp["status"], "slow")
+        self.assertEqual(comp["pids"], [4242])
+
+    def test_control_probe_uses_cheap_health_endpoint(self):
+        with patch.object(ops_watchdog, "_http_json", return_value={"ok": True, "tools": 1}) as http:
+            comp = ops_watchdog._control_component(self.now)
+        http.assert_called_once_with(ops_watchdog.CONTROL_HEALTH_URL, timeout=ops_watchdog.CONTROL_PROBE_TIMEOUT)
+        self.assertEqual(comp["severity"], "ok")
+        self.assertEqual(comp["detail"], "1 tool")
+
+    def test_control_probe_falls_back_to_status_for_old_controller(self):
+        import urllib.error
+
+        missing = urllib.error.HTTPError(ops_watchdog.CONTROL_HEALTH_URL, 404, "Not Found", {}, None)
+        with patch.object(ops_watchdog, "_http_json", side_effect=[missing, [{"key": "v1"}]]) as http:
+            comp = ops_watchdog._control_component(self.now)
+        self.assertEqual([c.args[0] for c in http.call_args_list],
+                         [ops_watchdog.CONTROL_HEALTH_URL, ops_watchdog.CONTROL_URL])
+        self.assertEqual(comp["severity"], "ok")
+        self.assertEqual(comp["detail"], "1 tool")
+
+    def test_control_health_server_error_is_not_masked_by_status(self):
+        import urllib.error
+
+        broken = urllib.error.HTTPError(ops_watchdog.CONTROL_HEALTH_URL, 500, "Error", {}, None)
+        with patch.object(ops_watchdog, "_http_json", side_effect=broken) as http,              patch.object(ops_watchdog, "_pids_for", return_value=[]):
+            comp = ops_watchdog._control_component(self.now)
+        http.assert_called_once()
+        self.assertEqual(comp["status"], "down")
 
     def test_dashboard_http_reports_active_batch(self):
         with patch.object(ops_watchdog, "_http_json", return_value={"active": True}):

@@ -57,6 +57,7 @@ jobs:
           tests/test_local_runtime_stability.py
           tests/test_control_scoped_shutdown.py
           tests/test_control_boot_pause.py
+          tests/test_ops_watchdog.py
           tests/test_localized_subtitle_blur.py
           tests/test_localized_blur_ffmpeg.py
           tests/test_visual_caption_timing.py

@@ -81,6 +81,47 @@ def processes(key):
     return found
 
 
+PROCESS_SNAPSHOT_MAX_AGE_S = 5.0
+_SNAPSHOT_LOCK = threading.Lock()
+_PROCESS_SNAPSHOTS = {}
+_SNAPSHOT_REFRESHING = set()
+
+
+def _refresh_process_snapshot(key):
+    try:
+        found = [(process.pid, name) for process, name in processes(key)]
+        with _SNAPSHOT_LOCK:
+            _PROCESS_SNAPSHOTS[key] = (time.monotonic(), found)
+    except Exception as exc:
+        logger.debug('Process snapshot refresh failed for %s: %s', key, type(exc).__name__)
+    finally:
+        with _SNAPSHOT_LOCK:
+            _SNAPSHOT_REFRESHING.discard(key)
+
+
+def _start_snapshot_refresh(key):
+    with _SNAPSHOT_LOCK:
+        if key in _SNAPSHOT_REFRESHING:
+            return False
+        _SNAPSHOT_REFRESHING.add(key)
+    threading.Thread(target=_refresh_process_snapshot, args=(key,), daemon=True).start()
+    return True
+
+
+def process_snapshot(key, max_age=PROCESS_SNAPSHOT_MAX_AGE_S):
+    """Return a recent (pid, name) inventory; stale entries refresh off the request path."""
+    with _SNAPSHOT_LOCK:
+        entry = _PROCESS_SNAPSHOTS.get(key)
+    if entry is None:
+        found = [(process.pid, name) for process, name in processes(key)]
+        with _SNAPSHOT_LOCK:
+            _PROCESS_SNAPSHOTS[key] = (time.monotonic(), found)
+        return found
+    if time.monotonic() - entry[0] > max_age:
+        _start_snapshot_refresh(key)
+    return entry[1]
+
+
 def read_telemetry(key):
     best = {}
     best_at = -1
@@ -96,10 +137,10 @@ def read_telemetry(key):
                 logger.debug('Suppressed error in tool_control.read_telemetry (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
     return best
 
-def status(key):
+def status(key, *, cached=False):
     paused = any(p.exists() for p in get_control_paths(key, key + '.pause'))
-    procs = processes(key)
-    bots = [p.pid for p, name in procs if name == 'telegram_bot.py']
+    procs = process_snapshot(key) if cached else [(process.pid, name) for process, name in processes(key)]
+    bots = [pid for pid, name in procs if name == 'telegram_bot.py']
     data = read_telemetry(key)
     fresh = data.get('pid') in bots and time.time() - data.get('at', 0) < 12
     dashboard = False
@@ -1324,7 +1365,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed_path = urllib.parse.urlparse(self.path).path
         if parsed_path == '/': return self.send(200, HTML.replace('__TOKEN__', TOKEN), 'text/html')
         if parsed_path == '/voices': return self.send(200, {'voices': voice_selection.catalog(), 'selected': voice_selection.selected()})
-        if parsed_path == '/status': return self.send(200, [status(k) for k in ROOTS])
+        if parsed_path == '/health': return self.send(200, {'ok': True, 'pid': os.getpid(), 'tools': len(ROOTS)})
+        if parsed_path == '/status': return self.send(200, [status(k, cached=True) for k in ROOTS])
 
         if parsed_path.startswith('/voice-preview-video/'):
             filename = Path(parsed_path).name
@@ -1451,6 +1493,8 @@ if __name__ == '__main__':
     # Start UI hosts and resume processing only when no operator pause exists.
     try:
         threading.Thread(target=apply_boot_defaults, daemon=True).start()
+        for key in ROOTS:
+            _start_snapshot_refresh(key)
         server.serve_forever()
     except Exception as e:
         with open(log_path, "a", encoding="utf-8") as lf:
