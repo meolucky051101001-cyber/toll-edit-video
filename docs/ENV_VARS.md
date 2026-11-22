@@ -6,7 +6,7 @@ File này được sinh tự động bởi `python scripts/gen_env_docs.py`. Kh�
 Cột *Mặc định* là giá trị viết trong code. Nhiều giá trị nghĩa là các module dùng
 mặc định khác nhau cho cùng một biến; nên xem lại những dòng đó.
 
-Tổng: 221 biến.
+Tổng: 222 biến.
 
 | Biến | Mặc định | Nơi đọc |
 |---|---|---|
@@ -177,6 +177,7 @@ Tổng: 221 biến.
 | `V1_DELOGO_MODE` | — | `backend/cloud/cloud_orchestrator.py`, `backend/v1_orchestrator.py` |
 | `V1_DEMUCS_MODEL` | — | `backend/ai/v1_model_policy.py` |
 | `V1_EDGE_WORKERS` | `4` | `backend/ai/voice_cloning.py` |
+| `V1_FROZEN_CONFIG_RETENTION_DAYS` | `14` | `backend/job_config_service.py` |
 | `V1_GEMINI_VISION_DOMAIN_CLASSIFY` | `0` | `backend/ai/translation.py` |
 | `V1_GPU_LOCALIZED_BLUR` | `True` | `backend/v1_gpu_subtitle_blur.py` |
 | `V1_HANDOFF_ALLOWED_DIRS` | — | `backend/handoff_api.py` |

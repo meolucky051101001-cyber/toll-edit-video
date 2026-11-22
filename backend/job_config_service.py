@@ -7,6 +7,7 @@ Lưu trữ:
 
 import os
 import json
+import math
 import time
 import uuid
 import sqlite3
@@ -25,6 +26,7 @@ DRAFTS_FILE = CONTROL_DIR / "video_draft_configs.json"
 FROZEN_FILE = CONTROL_DIR / "job_frozen_configs.json"
 
 _IDEMPOTENCY_TTL_SEC = 300.0  # 5 minutes
+_DEFAULT_FROZEN_RETENTION_DAYS = 14.0
 
 
 def _migrate_snapshot_asr(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -205,6 +207,47 @@ def delete_video_draft(video_name: str) -> bool:
 
 # ===== FROZEN CONFIGS (Cấu hình đóng băng gắn vào Job lúc Enqueue/Chạy) =====
 
+def _snapshot_last_touched(snapshot: Any) -> Optional[float]:
+    if not isinstance(snapshot, dict):
+        return None
+    stamps = []
+    for field in ("created_at", "updated_at"):
+        try:
+            value = float(snapshot.get(field))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            stamps.append(value)
+    return max(stamps) if stamps else None
+
+
+def _prune_frozen_snapshots(frozen: Dict[str, Any], now: float) -> int:
+    """Drop every alias of snapshots untouched for longer than the retention window.
+
+    Planned jobs carry their settings in the job manifest; snapshots without a
+    usable timestamp are kept.
+    """
+    try:
+        days = float(os.getenv("V1_FROZEN_CONFIG_RETENTION_DAYS", "14"))
+    except ValueError:
+        days = _DEFAULT_FROZEN_RETENTION_DAYS
+    if not math.isfinite(days) or days <= 0:
+        return 0
+    cutoff = now - days * 86400.0
+    stale = []
+    for alias, snapshot in frozen.items():
+        touched = _snapshot_last_touched(snapshot)
+        if touched is not None and touched < cutoff:
+            stale.append(alias)
+    for alias in stale:
+        del frozen[alias]
+    if stale:
+        import logging
+        logging.getLogger(__name__).info(
+            "Pruned %d frozen config alias(es) older than %.1f day(s)", len(stale), days)
+    return len(stale)
+
+
 def list_frozen_configs(workspace_path: Optional[str | Path] = None) -> Dict[str, Any]:
     """Danh sách các snapshot cấu hình đóng băng."""
     return _read_frozen_store(_frozen_file_for_workspace(workspace_path))
@@ -366,6 +409,7 @@ def freeze_job_config(
     }
 
     with _config_transaction(_frozen_file_for_workspace(workspace_path)) as frozen:
+        _prune_frozen_snapshots(frozen, now)
         frozen[snapshot_id] = snapshot
         frozen[video_name] = snapshot
         if job_id:
