@@ -6,7 +6,7 @@ File này được sinh tự động bởi `python scripts/gen_env_docs.py`. Kh�
 Cột *Mặc định* là giá trị viết trong code. Nhiều giá trị nghĩa là các module dùng
 mặc định khác nhau cho cùng một biến; nên xem lại những dòng đó.
 
-Tổng: 220 biến.
+Tổng: 221 biến.
 
 | Biến | Mặc định | Nơi đọc |
 |---|---|---|
@@ -214,6 +214,7 @@ Tổng: 220 biến.
 | `V1_SEPARATOR_PYTHON` | — | `backend/ai/v1_model_policy.py` |
 | `V1_SHORT_MAX_SECONDS` | `420.0` | `backend/ai/transcription.py`, `backend/ocr_utils.py`, `backend/v1_orchestrator.py`, `backend/v1_video_router.py` |
 | `V1_SMART_SKIP_OCR` | `(tính lúc chạy)` / `true` | `backend/main.py`, `backend/ocr_utils.py` |
+| `V1_SPEECH_MAX_FOLLOW_DELAY_S` | `0.5` | `backend/ai/voice_cloning.py` |
 | `V1_STRICT_OCR_GEOMETRY` | `1` | `backend/v1_ocr_geometry.py` |
 | `V1_SUBTITLE_COVER_STYLE` | — | `backend/ass_utils.py`, `backend/cloud/cloud_orchestrator.py`, `backend/cloud/gpu_scripts/full_pipeline.py`, `backend/job_config_service.py` (+2) |
 | `V1_TELEGRAM_PREFETCH` | `1` | `backend/telegram_bot.py` |
