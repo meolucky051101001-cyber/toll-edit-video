@@ -67,6 +67,9 @@ jobs:
           tests/test_v1_voice_ocr_optimization.py
           tests/test_telegram_progress.py
           tests/test_telegram_prefetch.py
+          tests/test_v1_render_resolution_cap.py
+          tests/test_tool_control_venv_guard.py
+          tests/test_v1_speech_truncation.py
           tests/test_qc_stage_progress.py
           tests/test_runtime_lock_regressions.py
           tests/test_environment_isolation.py

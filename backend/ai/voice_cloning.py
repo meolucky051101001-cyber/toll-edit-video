@@ -488,6 +488,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
     from config.env import env_flag
     emergency_enabled = env_flag("V1_ALLOW_EMERGENCY_SPEED", True)
     emergency_speed_cap = float(globals().get("MAX_EMERGENCY_SPEED") or getattr(_speech_guard_mod, "MAX_EMERGENCY_SPEED", 1.75))
+    allow_speech_truncation = env_flag("V1_ALLOW_SPEECH_TRUNCATION", True)
     if segment_voices:
         for seg in translated_segments:
             info = segment_voices[str(seg.index)]
@@ -522,7 +523,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
             })
 
     limiter = asyncio.Semaphore(int(os.getenv("V1_TTS_WORKERS", "6")))
-    async def run_one(seg):
+    async def run_one(seg, write_cache=True):
         async with limiter:
             if not seg.content.strip() or not re.search(r'\w', seg.content):
                 return None
@@ -568,7 +569,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
             
             # Ghi nhận cache version 8
             if os.path.exists(path) and os.path.getsize(path) > 128 and result.get("actual_audio_duration", 0) > 0.1:
-                if result["actual_audio_duration"] <= hard_max + 0.005 and result.get("speed_ratio", 1.0) <= MAX_NATURAL_SPEED:
+                if write_cache and result["actual_audio_duration"] <= hard_max + 0.005 and result.get("speed_ratio", 1.0) <= MAX_NATURAL_SPEED:
                     write_voice_cache(path, key, result["actual_audio_duration"], seg.content.strip())
             else:
                 if os.path.exists(path):
@@ -885,10 +886,71 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 raise TTSIncompleteError(
                     f"Speech cue {seg.index} still exceeds its reading window after a temporary condensation failure; audio retained"
                 ) from failure
-            raise SpeechTimingError(
-                f"Speech cue {seg.index} requires {dur:.3f}s but its reading window "
-                f"is {hard_max:.3f}s; shorten translation before retry; audio retained"
-            )
+            cur_words = len(seg.content.split())
+            truncated = False
+            if allow_speech_truncation and cur_words > 1:
+                original_text = seg.content
+                trunc_speed_cap = emergency_speed_cap if emergency_enabled else MAX_NATURAL_SPEED
+                prev_k = None
+                for _trunc_attempt in range(3):
+                    speed_ratio = float(r.get("speed_ratio", 1.0))
+                    raw = dur * speed_ratio
+                    k_words = int(cur_words * (hard_max - 0.05) * trunc_speed_cap / raw) if raw > 0 else 1
+                    k_words = max(1, min(k_words, cur_words - 1))
+                    if prev_k is not None:
+                        if k_words >= prev_k:
+                            k_words = prev_k - 1
+                        if k_words < 1:
+                            break
+                    new_text = " ".join(original_text.split()[:k_words]).rstrip(",;:-–")
+                    if not new_text:
+                        break
+                    seg.content = new_text
+                    try:
+                        new_r = await run_one(seg, write_cache=False)
+                    except Exception as exc:
+                        raise TTSIncompleteError(
+                            "Truncated TTS regeneration failed; stale dialogue is not published"
+                        ) from exc
+                    if not isinstance(new_r, dict) or new_r.get("error"):
+                        raise TTSIncompleteError(
+                            "Truncated TTS regeneration failed; stale dialogue is not published"
+                        )
+                    res_by_idx[seg.index] = new_r
+                    r = new_r
+                    r.setdefault("truncated_from", original_text)
+                    dur = float(sf.info(r["path"]).duration)
+                    r["actual_audio_duration"] = dur
+                    r["start"] = cur_start
+                    r["end"] = cur_start + dur
+                    previous_speed = float(r.get("speed_ratio", 1.0))
+                    if dur > hard_max + 0.005 and previous_speed < trunc_speed_cap:
+                        try:
+                            _, fitted_dur, extra_spd = await fit_audio_file(
+                                r["path"], hard_max, r["path"],
+                                max_speed=trunc_speed_cap / previous_speed,
+                                allow_emergency=emergency_enabled,
+                            )
+                            fitted_dur = float(sf.info(r["path"]).duration)
+                            r["actual_audio_duration"] = fitted_dur
+                            r["end"] = cur_start + fitted_dur
+                            r["speed_ratio"] = previous_speed * extra_spd
+                            dur = fitted_dur
+                        except Exception as exc:
+                            logger.warning("[VOICE_GUARD] Truncated fit for cue %s warning: %s", seg.index, exc)
+                    prev_k = k_words
+                    if dur <= hard_max + 0.005:
+                        truncated = True
+                        logger.warning(
+                            "[VOICE_GUARD] Last-resort truncation applied to cue %s (%s -> %s words, duration=%.3fs, window=%.3fs)",
+                            seg.index, cur_words, k_words, dur, hard_max,
+                        )
+                        break
+            if not truncated:
+                raise SpeechTimingError(
+                    f"Speech cue {seg.index} requires {dur:.3f}s but its reading window "
+                    f"is {hard_max:.3f}s; shorten translation before retry; audio retained"
+                )
         speed_ceiling = emergency_speed_cap if emergency_enabled else MAX_NATURAL_SPEED
         if float(r.get("speed_ratio", 1.0)) > speed_ceiling + 1e-9:
             raise SpeechTimingError(
