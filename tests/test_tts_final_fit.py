@@ -38,6 +38,7 @@ def measured_duration(path):
 @pytest.fixture
 def run_tts(tmp_path, monkeypatch):
     """Compile only the production orchestration; replace its service adapters."""
+    monkeypatch.setenv("V1_ALLOW_SPEECH_TRUNCATION", "0")
     source = Path(__file__).resolve().parents[1] / "backend/ai/voice_cloning.py"
     tree = ast.parse(source.read_text(encoding="utf-8-sig"), filename=str(source))
     function = next(node for node in tree.body

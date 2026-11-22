@@ -957,13 +957,22 @@ def process_video(
         else:
             filter_parts = []
             max_dim = max(w, h)
-            if max_dim > 3840 or min(w, h) > 2160 or max_dim > 4096:
-                ratio = min(1080.0 / min(w, h), 1920.0 / max_dim)
+            try:
+                from .config.env import env_int
+            except ImportError:
+                from config.env import env_int
+            render_cap = env_int("V1_RENDER_MAX_SHORT_SIDE", 1080)
+            nvenc_bounds = max_dim > 3840 or min(w, h) > 2160 or max_dim > 4096
+            cap_hit = render_cap > 0 and min(w, h) > render_cap
+            if cap_hit or nvenc_bounds:
+                short_target = render_cap if render_cap > 0 else 1080
+                ratio = min(short_target / min(w, h), (short_target * 16 / 9) / max(w, h))
                 target_w = int(w * ratio) // 2 * 2
                 target_h = int(h * ratio) // 2 * 2
                 filter_parts.append(f"scale={target_w}:{target_h}")
                 w, h = target_w, target_h
-                logger.info("NVENC H.264 bounds enforced: scaled %dx%d -> %dx%d", orig_w, orig_h, w, h)
+                reason = f"V1_RENDER_MAX_SHORT_SIDE={render_cap} cap" if cap_hit else "NVENC H.264 bounds"
+                logger.info("%s enforced: scaled %dx%d -> %dx%d", reason, orig_w, orig_h, w, h)
             else:
                 logger.info("Video dọc 9:16 giữ nguyên kích thước gốc: %dx%d", w, h)
 

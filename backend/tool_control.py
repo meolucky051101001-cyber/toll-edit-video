@@ -5,8 +5,25 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def _venv_matches_interpreter(venv_dir: Path, version_info=sys.version_info) -> bool:
+    try:
+        cfg = (venv_dir / "pyvenv.cfg").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in cfg.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip().lower() in ("version", "version_info"):
+            parts = value.strip().split(".")
+            try:
+                return (int(parts[0]), int(parts[1])) == tuple(version_info[:2])
+            except (ValueError, IndexError):
+                return False
+    return False
+
+
 _backend_dir = Path(__file__).resolve().parent
-_site_packages = _backend_dir / "venv" / "Lib" / "site-packages"
+_venv_dir = _backend_dir / "venv"
+_site_packages = _venv_dir / "Lib" / "site-packages"
 # Control plane chay bang Python base (khong phai venv) nen can tro thang vao site-packages
 # cua venv song. Neu dang chay trong mot venv khac (vd venv_py312), chen duong nay se nap
 # binary cp310 vao tien trinh 3.12 va lam hong import (onnxruntime, soxr...).
@@ -14,6 +31,7 @@ _running_inside_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
 if (
     not _running_inside_venv
     and _site_packages.is_dir()
+    and _venv_matches_interpreter(_venv_dir)
     and str(_site_packages) not in sys.path
 ):
     sys.path.insert(0, str(_site_packages))

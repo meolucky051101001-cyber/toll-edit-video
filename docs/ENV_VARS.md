@@ -6,7 +6,7 @@ File này được sinh tự động bởi `python scripts/gen_env_docs.py`. Kh�
 Cột *Mặc định* là giá trị viết trong code. Nhiều giá trị nghĩa là các module dùng
 mặc định khác nhau cho cùng một biến; nên xem lại những dòng đó.
 
-Tổng: 220 biến.
+Tổng: 222 biến.
 
 | Biến | Mặc định | Nơi đọc |
 |---|---|---|
@@ -163,6 +163,7 @@ Tổng: 220 biến.
 | `TTS_BATCH_SEGMENTS` | `64` | `backend/pipeline_v2/config.py` |
 | `TTS_CONCURRENCY` | `3` | `backend/pipeline_v2/tts.py` |
 | `V1_ALLOW_EMERGENCY_SPEED` | `True` | `backend/ai/voice_cloning.py` |
+| `V1_ALLOW_SPEECH_TRUNCATION` | `True` | `backend/ai/voice_cloning.py` |
 | `V1_ALLOW_TRANSLATION_FALLBACK` | `false` | `backend/ai/translation.py` |
 | `V1_ASR_CHUNKING` | `true` | `backend/ai/transcription.py`, `backend/main.py` |
 | `V1_ASR_JOB_OPTIONS` | `{}` | `backend/model_workers/v1_asr_worker.py` |
@@ -203,6 +204,7 @@ Tổng: 220 biến.
 | `V1_PADDLE_RECOGNITION_MODEL` | — | `backend/ai/v1_model_policy.py`, `backend/job_tracker.py` |
 | `V1_PARAFORMER_CO_ASR` | `selective` | `backend/ai/transcription.py` |
 | `V1_QC_POLICY` | `(tính lúc chạy)` / `WARN` | `backend/main.py`, `backend/v1_quality_gate.py` |
+| `V1_RENDER_MAX_SHORT_SIDE` | `1080` | `backend/video_utils.py` |
 | `V1_RESUME_MANIFEST_SCAN_LIMIT` | `50` | `backend/v1_orchestrator.py` |
 | `V1_ROFORMER_BATCH_SIZE` | `0` | `backend/model_workers/v1_separator_worker.py` |
 | `V1_ROFORMER_OVERLAP` | `2` | `backend/model_workers/v1_separator_worker.py` |
