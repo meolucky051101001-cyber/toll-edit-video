@@ -795,6 +795,50 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
     # Final Hard Guard: Ensure EVERY single audio cue strictly fits its reading window
     # to guarantee zero audio overlap in the mixer.
     sorted_active_segs = sorted([s for s in translated_segments if s.index in res_by_idx], key=lambda s: s.start)
+    max_follow_delay = max(0.0, float(os.getenv("V1_SPEECH_MAX_FOLLOW_DELAY_S", "0.5")))
+
+    async def _delay_following_cue(k, cur_start, cur_dur, hard_max):
+        """Give an unfittable cue room by delaying the next cue, tightened only within the natural limit."""
+        nxt = sorted_active_segs[k + 1]
+        rn = res_by_idx.get(nxt.index)
+        if max_follow_delay <= 0 or not rn or not rn.get("path"):
+            return hard_max
+        next_start = float(rn.get("start", nxt.start.total_seconds()))
+        if k + 2 < len(sorted_active_segs):
+            next_limit = float(sorted_active_segs[k + 2].start.total_seconds()) - 0.05
+        elif video_duration is not None:
+            next_limit = float(video_duration) - 0.05
+        else:
+            next_limit = None
+        next_dur = float(sf.info(rn["path"]).duration)
+        next_speed = float(rn.get("speed_ratio", 1.0))
+        tightest = next_dur * min(1.0, next_speed / MAX_NATURAL_SPEED) + 0.03
+        room = max_follow_delay if next_limit is None else min(max_follow_delay, next_limit - next_start - tightest)
+        delay = min(room, cur_start + cur_dur + 0.05 - next_start)
+        if delay <= 0.005:
+            return hard_max
+        new_start = next_start + delay
+        if next_limit is not None and next_dur > next_limit - new_start + 0.005:
+            try:
+                _, _, extra_spd = await fit_audio_file(
+                    rn["path"], next_limit - new_start, rn["path"], max_speed=MAX_NATURAL_SPEED / next_speed
+                )
+                rn["speed_ratio"] = next_speed * extra_spd
+            except Exception as exc:
+                logger.warning("[VOICE_GUARD] Could not tighten cue %s for a delayed start: %s", nxt.index, exc)
+                return hard_max
+            next_dur = float(sf.info(rn["path"]).duration)
+            if next_dur > next_limit - new_start + 0.005:
+                return hard_max
+        rn["start"] = new_start
+        rn["end"] = new_start + next_dur
+        rn["actual_audio_duration"] = next_dur
+        logger.warning(
+            "[VOICE_GUARD] Delayed cue %s by %.3fs (speed=%.2fx) so cue %s keeps all of its speech",
+            nxt.index, delay, float(rn.get("speed_ratio", 1.0)), sorted_active_segs[k].index,
+        )
+        return max(0.05, new_start - cur_start - 0.05)
+
     for k, seg in enumerate(sorted_active_segs):
         r = res_by_idx.get(seg.index)
         if not r:
@@ -871,6 +915,26 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                     )
             except Exception as exc:
                 logger.warning("[VOICE_GUARD] Emergency fit for cue %s warning: %s", seg.index, exc)
+
+        dur = float(sf.info(r["path"]).duration)
+        if dur > hard_max + 0.005 and k + 1 < len(sorted_active_segs):
+            delayed_max = await _delay_following_cue(k, cur_start, dur, hard_max)
+            if delayed_max > hard_max:
+                hard_max = delayed_max
+                windows[seg.index] = hard_max
+                for ceiling, emergency in ((MAX_NATURAL_SPEED, False), (emergency_speed_cap, True)):
+                    dur = float(sf.info(r["path"]).duration)
+                    previous_speed = float(r.get("speed_ratio", 1.0))
+                    if dur <= hard_max + 0.005 or previous_speed >= ceiling or (emergency and not emergency_enabled):
+                        continue
+                    try:
+                        _, _, extra_spd = await fit_audio_file(
+                            r["path"], hard_max, r["path"], max_speed=ceiling / previous_speed,
+                            **({"allow_emergency": True} if emergency else {}),
+                        )
+                        r["speed_ratio"] = previous_speed * extra_spd
+                    except Exception as exc:
+                        logger.warning("[VOICE_GUARD] Fit after delaying the next cue failed for cue %s: %s", seg.index, exc)
 
         # Condensation and bounded tempo fitting have already had their chance.
         # Retain every spoken sample when the remaining window cannot fit it.
