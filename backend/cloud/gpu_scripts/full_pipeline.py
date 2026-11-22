@@ -256,6 +256,35 @@ def log_step(step_num: int, total: int, message: str):
     _write_pipeline_progress(_STEP_PERCENT_MAP.get(int(step_num), 55), step_num, total, safe_msg)
 
 
+_FILTER_SCRIPT_OPTION: str | None = None
+
+
+def _ffmpeg_filter_script_option() -> str:
+    global _FILTER_SCRIPT_OPTION
+    if _FILTER_SCRIPT_OPTION is not None:
+        return _FILTER_SCRIPT_OPTION
+
+    option = "-filter_script:v"
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            shell=False,
+        )
+        if res.returncode == 0:
+            first_line = (res.stdout or "").splitlines()
+            match = re.search(r"ffmpeg version n?(\d+)\.", first_line[0]) if first_line else None
+            if match and int(match.group(1)) >= 7:
+                option = "-/filter:v"
+    except Exception:
+        pass
+
+    _FILTER_SCRIPT_OPTION = option
+    return option
+
+
 def run_cmd(cmd: list[str], desc: str, *, timeout: int = 900):
     print(f"  -> Chạy: {' '.join(cmd[:6])}...", flush=True)
     try:
@@ -263,9 +292,13 @@ def run_cmd(cmd: list[str], desc: str, *, timeout: int = 900):
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"{desc} quá thời gian chờ ({timeout}s)") from exc
     if res.returncode != 0:
-        safe_stderr = _redact_secrets_local(res.stderr[-600:])
-        print(f"  [ERROR] {desc} thất bại:\n{safe_stderr}", file=sys.stderr, flush=True)
-        raise RuntimeError(f"{desc} thất bại (rc={res.returncode})")
+        safe_stderr = _redact_secrets_local(res.stderr or "")
+        print(f"  [ERROR] {desc} thất bại:\n{safe_stderr[-600:]}", file=sys.stderr, flush=True)
+        tail = " ".join(safe_stderr[-300:].split())
+        error = f"{desc} thất bại (rc={res.returncode})"
+        if tail:
+            error = f"{error}: {tail}"
+        raise RuntimeError(error)
     return res.stdout
 
 
@@ -3098,7 +3131,7 @@ def step7_render_video(
         if len(filter_graph) > 8000:
             filter_script_path = os.path.join(os.path.dirname(os.path.abspath(output_mp4)) or ".", "_v1_render_filters.txt")
             Path(filter_script_path).write_text(filter_graph, encoding="utf-8")
-            video_filter_args = ["-/filter:v", filter_script_path]
+            video_filter_args = [_ffmpeg_filter_script_option(), filter_script_path]
         else:
             video_filter_args = ["-vf", filter_graph]
 

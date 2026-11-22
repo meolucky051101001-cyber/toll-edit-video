@@ -7,6 +7,8 @@ import base64
 import io
 import json
 from pathlib import Path
+import re
+import subprocess
 import sys
 import tarfile
 import types
@@ -599,6 +601,166 @@ def test_pytest_guard_never_leaks_deliverables_into_production_d_toolv1_cloud(tm
     prod_dir = Path(r"D:\ToolV1_Cloud")
     if prod_dir.is_dir():
         assert not any(job.job_id in p.name for p in prod_dir.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("version_output", "expected_option"),
+    [
+        ("ffmpeg version 6.1.1-3ubuntu5", "-filter_script:v"),
+        ("ffmpeg version 4.4.2-0ubuntu0.22.04.1", "-filter_script:v"),
+        ("ffmpeg version 7.1", "-/filter:v"),
+        ("ffmpeg version n8.1.3-39-gabc", "-/filter:v"),
+        ("ffmpeg version N-118000-gabc", "-filter_script:v"),
+    ],
+)
+def test_ffmpeg_filter_script_option_selects_by_version(
+    monkeypatch,
+    version_output: str,
+    expected_option: str,
+):
+    monkeypatch.setattr(full_pipeline, "_FILTER_SCRIPT_OPTION", None)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout=version_output, stderr="")
+
+    monkeypatch.setattr(full_pipeline.subprocess, "run", fake_run)
+
+    assert full_pipeline._ffmpeg_filter_script_option() == expected_option
+    assert full_pipeline._ffmpeg_filter_script_option() == expected_option
+    assert calls == [
+        (
+            ["ffmpeg", "-hide_banner", "-version"],
+            {"capture_output": True, "text": True, "timeout": 15, "shell": False},
+        )
+    ]
+
+
+@pytest.mark.parametrize("probe_error", ["missing", "nonzero"])
+def test_ffmpeg_filter_script_option_falls_back_when_probe_fails(monkeypatch, probe_error: str):
+    monkeypatch.setattr(full_pipeline, "_FILTER_SCRIPT_OPTION", None)
+
+    def fake_run(*_args, **_kwargs):
+        if probe_error == "missing":
+            raise FileNotFoundError("ffmpeg")
+        return SimpleNamespace(returncode=1, stdout="ffmpeg version 8.1.3", stderr="")
+
+    monkeypatch.setattr(full_pipeline.subprocess, "run", fake_run)
+
+    assert full_pipeline._ffmpeg_filter_script_option() == "-filter_script:v"
+
+
+def test_step7_uses_legacy_filter_script_option_for_large_graph(tmp_path: Path, monkeypatch):
+    filter_graph = "null," * 2000 + "format=yuv420p"
+    commands = []
+    monkeypatch.setattr(full_pipeline, "log_step", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        full_pipeline,
+        "_probe_main_video_cloud",
+        lambda _path: {"width": 720, "height": 1280, "input_map": "0:v:0", "duration": 1.0},
+    )
+    monkeypatch.setattr(
+        full_pipeline,
+        "_build_v1_video_filter_graph",
+        lambda *_args, **_kwargs: (filter_graph, 720, 1280, "localized_blur"),
+    )
+    monkeypatch.setattr(full_pipeline, "_FILTER_SCRIPT_OPTION", None)
+    monkeypatch.setattr(
+        full_pipeline.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="ffmpeg version 6.1.1-3ubuntu5",
+            stderr="",
+        ),
+    )
+
+    def fake_run_cmd(cmd, _desc, **_kwargs):
+        commands.append(list(cmd))
+        option_idx = cmd.index("-filter_script:v")
+        assert Path(cmd[option_idx + 1]).read_text(encoding="utf-8") == filter_graph
+
+    monkeypatch.setattr(full_pipeline, "run_cmd", fake_run_cmd)
+    full_pipeline.step7_render_video(
+        "input.mp4",
+        "audio.wav",
+        str(tmp_path / "output.mp4"),
+        canvas_cfg={"sub_cover_style": "solid_box"},
+    )
+
+    assert len(filter_graph) > 8000
+    assert len(commands) == 1
+    option_idx = commands[0].index("-filter_script:v")
+    assert commands[0][option_idx + 1] == str(tmp_path / "_v1_render_filters.txt")
+
+
+def test_run_cmd_error_includes_redacted_stderr_tail(monkeypatch):
+    secret = "fake-gemini-secret-123456"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+    stderr = ("x" * 350) + f"\n{secret}\n  encoder   detail failed\n"
+    monkeypatch.setattr(
+        full_pipeline.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=8, stdout="", stderr=stderr),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        full_pipeline.run_cmd(["ffmpeg"], "Render video")
+
+    message = str(exc_info.value)
+    assert message.startswith("Render video thất bại (rc=8): ")
+    assert secret not in message
+    assert "encoder detail failed" in message
+    assert "\n" not in message
+
+
+def test_legacy_filter_script_option_works_with_system_ffmpeg(tmp_path: Path):
+    ffmpeg = Path("/usr/bin/ffmpeg")
+    if not ffmpeg.is_file():
+        pytest.skip("/usr/bin/ffmpeg is not installed")
+
+    version = subprocess.run(
+        [str(ffmpeg), "-hide_banner", "-version"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    first_line = version.stdout.splitlines()
+    match = re.search(r"ffmpeg version n?(\d+)\.", first_line[0]) if first_line else None
+    if version.returncode != 0 or not match or int(match.group(1)) >= 7:
+        pytest.skip("/usr/bin/ffmpeg is not a parseable version older than 7")
+
+    filter_script = tmp_path / "long_filter_graph.txt"
+    filter_graph = ",".join(["null"] * 1700 + ["scale=320:240", "format=yuv420p"])
+    assert len(filter_graph) > 8000
+    filter_script.write_text(filter_graph, encoding="utf-8")
+    output = tmp_path / "legacy_filter_script.mp4"
+
+    result = subprocess.run(
+        [
+            str(ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=d=1",
+            "-filter_script:v",
+            str(filter_script),
+            "-c:v",
+            "libx264",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.is_file()
 
 
 def test_bundled_local_fonts_and_50_cue_localized_blur_ffmpeg_render(tmp_path: Path, monkeypatch):
