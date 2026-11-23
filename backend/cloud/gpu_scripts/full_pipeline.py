@@ -1038,10 +1038,10 @@ def step3b_ocr_and_fix_subtitles(
     input_video: str,
     segments: list[dict],
     output_srt: str = "subtitles.srt",
-) -> tuple[list[dict], float, int, int, float]:
+) -> tuple[list[dict], float, int, int, float, dict]:
     """
     Quét EasyOCR GPU để định vị chính xác vùng phụ đề gốc và tự sửa lỗi đồng âm Whisper ASR.
-    Trả về (segments, main_y_pct, video_w, video_h, video_duration).
+    Trả về (segments, main_y_pct, video_w, video_h, video_duration, caption_band).
     """
     print("\n[3b/8] Quét OCR GPU định vị hộp che phụ đề & chuẩn hóa chữ Trung...", flush=True)
     _write_pipeline_progress(64, 3, 8, "Quét OCR GPU định vị hộp che phụ đề & chuẩn hóa chữ Trung...")
@@ -1053,7 +1053,9 @@ def step3b_ocr_and_fix_subtitles(
         import cv2
         import torch
         import easyocr
-        from ocr_subtitle_locator import select_chinese_subtitle_band
+        from ocr_subtitle_locator import (
+            locate_cue_caption_rows, per_cue_caption_mode_needed, select_chinese_subtitle_band,
+        )
         from ass_utils import _merge_contiguous_tracking_blocks
 
         cap = cv2.VideoCapture(input_video)
@@ -1208,6 +1210,22 @@ def step3b_ocr_and_fix_subtitles(
                 anchored = True
                 print(f"  -> Đã xác minh dải phụ đề nhỏ sát đáy (Y={main_y_pct:.3f}–{band_bottom:.3f}).", flush=True)
         cap.release()
+
+        cue_rows = {}
+        try:
+            cue_rows = locate_cue_caption_rows(
+                all_blocks, seg_texts, frame_width=video_w, frame_height=video_h,
+            )
+        except Exception as _cue_row_exc:
+            print(f"  [WARN] locate_cue_caption_rows lỗi ({_cue_row_exc}); giữ dải phụ đề toàn cục.", flush=True)
+            cue_rows = {}
+        per_cue_mode, outside_rows = per_cue_caption_mode_needed(
+            cue_rows, main_y_pct, band_bottom, anchored=anchored, cue_count=len(segments),
+        )
+        if caption_x_bounds is not None:
+            per_cue_mode = False
+        if per_cue_mode:
+            print(f"  -> Phụ đề gốc đổi vị trí theo cảnh ({len(outside_rows)} câu ngoài dải Y={main_y_pct:.3f}–{band_bottom:.3f}); bật che theo từng câu.", flush=True)
         band_h_limit = max(0.08, (band_bottom - main_y_pct) * 1.8)
         ocr_fixed = 0
         located_count = 0
@@ -1329,19 +1347,48 @@ def step3b_ocr_and_fix_subtitles(
                     s["ocr_mask_status"] = "no_caption_evidence"
 
         refinement_cap.release()
+        if per_cue_mode:
+            for s in segments:
+                row = cue_rows.get(s["id"])
+                if row is not None:
+                    s["y_pct"] = float(row.top)
+                    s["max_y_pct"] = float(row.bottom)
         _write_pipeline_progress(66, 3, 8, "Đối soát tọa độ hộp che phụ đề gốc đa tỷ lệ...")
         # A recognizer's confidence measures text, not the detector's geometry.
         # Reacquire source boxes (including speech gaps) before translation/TTS.
-        from caption_geometry import acquire_caption_geometry, validate_caption_evidence
+        from caption_geometry import (
+            acquire_caption_geometry, uncovered_caption_cues, validate_caption_evidence,
+        )
+        caption_bands = None
+        if per_cue_mode:
+            caption_bands = []
+            for s in segments:
+                row = cue_rows.get(s["id"])
+                if row is not None:
+                    caption_bands.append((float(s["start"]) - 0.4, float(s["end"]) + 0.4,
+                                          float(row.top), float(row.bottom)))
+                elif anchored:
+                    caption_bands.append((float(s["start"]) - 0.4, float(s["end"]) + 0.4,
+                                          main_y_pct, band_bottom))
         evidence = acquire_caption_geometry(
             input_video, segments, reader,
             band_top=main_y_pct if anchored else None,
             band_bottom=band_bottom if anchored else None,
             x_bounds=caption_x_bounds,
+            bands=caption_bands,
             duration=video_duration,
             audit_path=Path(output_srt).with_name("caption_geometry.json"),
         )
         validate_caption_evidence(evidence, cue_count=len(segments))
+        uncovered_cues = (
+            uncovered_caption_cues(segments, {sid: (row.top, row.bottom) for sid, row in cue_rows.items()})
+            if per_cue_mode else []
+        )
+        if len(uncovered_cues) >= 2 or len(uncovered_cues) >= 0.2 * len(segments):
+            raise PipelineStageError(
+                "SUBTITLE_COVERAGE_GAP",
+                f"Burnt-in captions not covered for cues {uncovered_cues}",
+            )
         located_count = sum(s.get("ocr_mask_status") == "located" for s in segments)
         by_id = {s["id"]: s for s in segments}
         for row in ocr_audit:
@@ -1354,11 +1401,22 @@ def step3b_ocr_and_fix_subtitles(
                     f.write(f"{idx}\n{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}\n{seg['text']}\n\n")
 
         print(f"  -> OCR xong: {located_count}/{len(segments)} câu có hộp phụ đề (Y={main_y_pct:.3f}), đã sửa {ocr_fixed} lỗi đồng âm.", flush=True)
+    except PipelineStageError:
+        raise
     except Exception as exc:
         raise PipelineStageError("SUBTITLE_BUILD_FAILED",
                                  f"Source-caption geometry requires review: {exc}") from exc
 
-    return segments, main_y_pct, video_w, video_h, video_duration
+    caption_band = {
+        "mode": "per_cue" if per_cue_mode else "global",
+        "global_band": [round(main_y_pct, 4), round(band_bottom, 4)],
+        "cue_rows": {
+            str(sid): [round(float(row.top), 4), round(float(row.bottom), 4), row.source]
+            for sid, row in cue_rows.items()
+        },
+        "uncovered_cues": uncovered_cues,
+    }
+    return segments, main_y_pct, video_w, video_h, video_duration, caption_band
 
 
 _VI_LETTER_RE = re.compile(r"[A-Za-zÀ-ỹ]")
@@ -3447,7 +3505,7 @@ def main():
             )
 
         # Bước 3b: Quét OCR GPU định vị hộp che phụ đề & sửa lỗi đồng âm
-        segments, main_y_pct, video_w, video_h, video_duration = step3b_ocr_and_fix_subtitles(
+        segments, main_y_pct, video_w, video_h, video_duration, caption_band = step3b_ocr_and_fix_subtitles(
             input_video, segments, output_srt
         )
 
@@ -3609,6 +3667,7 @@ def main():
                 "dubbing_volume_db": float(audio_cfg.get("dubbing_volume_db", 1.0)),
             },
             "ocr_subtitle_band": round(main_y_pct, 4),
+            "caption_band": caption_band,
             "ass_subtitles": has_ass,
             "output_video": output_video,
             "output_video_probe": qc_probe,

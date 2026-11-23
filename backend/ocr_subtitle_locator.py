@@ -1025,3 +1025,230 @@ def detect_static_watermarks(
 
     results.sort(key=lambda r: (-int(r["token_match"]), -int(r["hits"])))
     return results[:4]
+
+
+@dataclass(frozen=True)
+class CueCaptionRow:
+    top: float
+    bottom: float
+    x1: float
+    x2: float
+    source: str          # "asr_match" | "visual" | "visual_weak"
+    support: int         # distinct samples in the cue containing this row
+    text_score: float
+
+
+def locate_cue_caption_rows(
+    blocks: Iterable[Any],
+    segment_texts: Mapping[int, str],
+    frame_width: int,
+    frame_height: int,
+) -> Dict[int, "CueCaptionRow"]:
+    """Locate the burnt-in caption row for each cue independently.
+
+    The global subtitle band follows wherever the recognizer happened to read
+    text; per-cue rows follow the detector geometry, so captions that move per
+    scene still get covered. Recognition confidence is ignored on purpose:
+    white-on-outline subtitles are read as garbage yet still get boxes.
+    """
+
+    # (a) Centered Chinese caption lines, grouped per sample.
+    samples: Dict[Any, List[Dict[str, Any]]] = {}
+    for source in blocks:
+        if (_value(source, "is_subtitle") is False
+                or _value(source, "is_packaging") is True
+                or _value(source, "is_static") is True
+                or _value(source, "in_subtitle_band") is False
+                or str(_value(source, "type", "")).lower() in
+                ("packaging", "background", "logo", "watermark")):
+            continue
+        text = str(_value(source, "text", "") or "").strip()
+        if not text or text.startswith(("@", "＠")) or len(_chinese_text(text)) < 2:
+            continue
+        x1 = float(_value(source, "x_pct", 0.0) or 0.0)
+        x2 = float(_value(source, "max_x_pct", 0.0) or 0.0)
+        y1 = float(_value(source, "y_pct", 0.0) or 0.0)
+        y2 = float(_value(source, "max_y_pct", 0.0) or 0.0)
+        if abs((x1 + x2) * 0.5 - 0.5) > 0.12:
+            continue
+        if x2 - x1 < 0.18 or not 0.018 <= y2 - y1 <= 0.09:
+            continue
+        raw_sid = _value(source, "sample_segment_id")
+        if raw_sid is None:
+            continue
+        sample_time = float(_value(source, "sample_time", 0.0) or 0.0)
+        samples.setdefault((int(raw_sid), round(sample_time, 4)), []).append(
+            {"text": text, "x1": x1, "x2": x2, "y1": y1, "y2": y2,
+             "sample_time": sample_time}
+        )
+
+    # (b) Merge vertically-adjacent centered lines inside one sample into a row.
+    cue_sample_rows: Dict[int, List[Dict[str, Any]]] = {}
+    for (sid, _st), lines in samples.items():
+        lines.sort(key=lambda line: line["y1"])
+        rows: List[Dict[str, Any]] = []
+        for line in lines:
+            row = rows[-1] if rows else None
+            gap = line["y1"] - (row["y2"] if row else -9.0)
+            overlap_x = row is not None and min(line["x2"], row["x2"]) > max(line["x1"], row["x1"])
+            if row is not None and gap <= 0.02 and overlap_x:
+                row["x1"] = min(row["x1"], line["x1"])
+                row["x2"] = max(row["x2"], line["x2"])
+                row["y2"] = max(row["y2"], line["y2"])
+                row["text"] += line["text"]
+            else:
+                rows.append(dict(line))
+        cue_sample_rows.setdefault(sid, []).extend(rows)
+
+    # (c) Cluster a cue's rows across samples by vertical overlap.
+    cue_clusters: Dict[int, List[Dict[str, Any]]] = {}
+    for sid, rows in cue_sample_rows.items():
+        rows.sort(key=lambda r: (r["y1"] + r["y2"]) * 0.5)
+        clusters: List[Dict[str, Any]] = []
+        for row in rows:
+            cy = (row["y1"] + row["y2"]) * 0.5
+            cluster = clusters[-1] if clusters else None
+            row_h = row["y2"] - row["y1"]
+            cluster_h = cluster["y2"] - cluster["y1"] if cluster else 0.0
+            overlap = (min(row["y2"], cluster["y2"]) - max(row["y1"], cluster["y1"])
+                       if cluster else 0.0)
+            if cluster is not None and overlap >= 0.5 * min(row_h, cluster_h):
+                cluster["y1"] = min(cluster["y1"], row["y1"])
+                cluster["y2"] = max(cluster["y2"], row["y2"])
+                cluster["x1"] = min(cluster["x1"], row["x1"])
+                cluster["x2"] = max(cluster["x2"], row["x2"])
+                cluster["cy"] = (cluster["y1"] + cluster["y2"]) * 0.5
+                cluster["rows"].append(row)
+            else:
+                clusters.append({"y1": row["y1"], "y2": row["y2"], "x1": row["x1"],
+                                 "x2": row["x2"], "cy": cy, "rows": [row]})
+        cue_clusters[sid] = clusters
+
+    # (d) A row that keeps the same text at the same position across many cues is
+    # a static label, not a moving caption.
+    every_row = [(sid, row) for sid, rows in cue_sample_rows.items() for row in rows]
+
+    def _is_static_label(row: Dict[str, Any]) -> bool:
+        if len(_chinese_text(row["text"])) < 2:
+            return False
+        norm = _normalized_text(row["text"])
+        cy = (row["y1"] + row["y2"]) * 0.5
+        seen: set = set()
+        for sid, other in every_row:
+            if len(_chinese_text(other["text"])) < 2:
+                continue
+            if abs((other["y1"] + other["y2"]) * 0.5 - cy) > 0.015:
+                continue
+            if SequenceMatcher(None, _normalized_text(other["text"]), norm,
+                               autojunk=False).ratio() >= 0.8:
+                seen.add(sid)
+        return len(seen) >= 3
+
+    # (e) Eligible clusters carry repeated evidence inside their cue. Clusters
+    # seen only once are weak evidence: still usable when the cue has nothing
+    # stronger, so the coverage gate can see them.
+    eligible_map: Dict[int, List[Dict[str, Any]]] = {}
+    for sid, clusters in cue_clusters.items():
+        cue_samples = len({row["sample_time"] for row in cue_sample_rows[sid]})
+        eligible: List[Dict[str, Any]] = []
+        weak: List[Dict[str, Any]] = []
+        for cluster in clusters:
+            if any(_is_static_label(row) for row in cluster["rows"]):
+                continue
+            support = len({row["sample_time"] for row in cluster["rows"]})
+            scores = [_text_match(row["text"], segment_texts.get(sid, ""))
+                      for row in cluster["rows"]]
+            cluster["support"] = support
+            cluster["text_score"] = max((score for score, _strong in scores), default=0.0)
+            cluster["strong"] = any(strong for _score, strong in scores)
+            if support >= min(2, cue_samples):
+                cluster["weak"] = False
+                eligible.append(cluster)
+            else:
+                cluster["weak"] = True
+                weak.append(cluster)
+        chosen = eligible if eligible else weak
+        if chosen:
+            eligible_map[sid] = chosen
+
+    ordered_sids = sorted(segment_texts)
+    decided: Dict[int, Tuple[Dict[str, Any], str]] = {}
+
+    # Pass 1: evidence that needs no neighbours.
+    for sid in ordered_sids:
+        clusters = eligible_map.get(sid, [])
+        strong = [cluster for cluster in clusters if cluster["strong"]]
+        if strong:
+            decided[sid] = (max(strong, key=lambda c: c["text_score"]), "asr_match")
+        elif len(clusters) == 1:
+            decided[sid] = (clusters[0], "visual_weak" if clusters[0]["weak"] else "visual")
+
+    # Pass 2: ambiguous cues inherit the nearest decided row position.
+    for sid in ordered_sids:
+        if sid in decided or sid not in eligible_map:
+            continue
+        clusters = eligible_map[sid]
+        index = ordered_sids.index(sid)
+        prev_decided = [d for d in ordered_sids[:index] if d in decided]
+        next_decided = [d for d in ordered_sids[index + 1:] if d in decided]
+        ref_sid = None
+        if prev_decided and next_decided:
+            prev_gap = index - ordered_sids.index(prev_decided[-1])
+            next_gap = ordered_sids.index(next_decided[0]) - index
+            ref_sid = prev_decided[-1] if prev_gap <= next_gap else next_decided[0]
+        elif prev_decided or next_decided:
+            ref_sid = prev_decided[-1] if prev_decided else next_decided[0]
+        if ref_sid is not None:
+            ref_cy = decided[ref_sid][0]["cy"]
+            chosen = min(clusters, key=lambda c: abs(c["cy"] - ref_cy))
+        else:
+            chosen = max(
+                clusters,
+                key=lambda c: (c["cy"] >= 0.5, c["support"],
+                               (c["x2"] - c["x1"]) * (c["y2"] - c["y1"])),
+            )
+        source = ("asr_match" if chosen["strong"]
+                  else "visual_weak" if chosen["weak"] else "visual")
+        decided[sid] = (chosen, source)
+
+    return {
+        sid: CueCaptionRow(
+            top=cluster["y1"], bottom=cluster["y2"],
+            x1=cluster["x1"], x2=cluster["x2"],
+            source=source, support=int(cluster["support"]),
+            text_score=float(cluster["text_score"]),
+        )
+        for sid, (cluster, source) in decided.items()
+    }
+
+
+def per_cue_caption_mode_needed(
+    cue_rows: Mapping[int, Any],
+    band_top: Optional[float],
+    band_bottom: Optional[float],
+    *,
+    anchored: bool,
+    cue_count: int,
+) -> Tuple[bool, List[int]]:
+    """Decide whether cue rows escape the single global band.
+
+    A cue row is outside the global band when the band is not anchored or its
+    vertical overlap with [band_top, band_bottom] covers less than 45% of the
+    row height. Per-cue mode needs >= 2 outside rows or >= 20% of all cues.
+    """
+    outside: List[int] = []
+    for sid in sorted(cue_rows):
+        row = cue_rows[sid]
+        if hasattr(row, "top"):
+            top, bottom = float(row.top), float(row.bottom)
+        else:
+            top, bottom = float(row[0]), float(row[1])
+        height = bottom - top
+        if not anchored or band_top is None or band_bottom is None or height <= 0:
+            outside.append(sid)
+            continue
+        overlap = min(bottom, float(band_bottom)) - max(top, float(band_top))
+        if overlap < 0.45 * height:
+            outside.append(sid)
+    enabled = len(outside) >= 2 or (cue_count > 0 and len(outside) >= 0.2 * cue_count)
+    return enabled, outside

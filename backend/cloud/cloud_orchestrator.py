@@ -3047,6 +3047,15 @@ class CloudOrchestrator:
                 _persist_qc_and_fail(CloudErrorCode.QC_FAILED.value,
                                      "Rendered source-caption coverage has not been verified.")
             qc_report["checks"].append("source_caption_geometry_and_ass_coverage")
+            caption_band = remote_meta.get("caption_band")
+            if isinstance(caption_band, dict):
+                uncovered = caption_band.get("uncovered_cues") or []
+                if len(uncovered) >= 2 or (seg_count and len(uncovered) >= 0.2 * seg_count):
+                    _persist_qc_and_fail(
+                        CloudErrorCode.QC_FAILED.value,
+                        f"Phụ đề gốc chưa được che đủ tại các câu {uncovered}.",
+                    )
+                qc_report["checks"].append("caption_row_coverage")
 
         qc_report["passed"] = True
         try:
