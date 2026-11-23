@@ -205,6 +205,18 @@ def _reconcile_two_scales(first, second, *, band_top, band_bottom):
     return sorted(merged)
 
 
+class CaptionScaleDisagreement(CaptionGeometryError):
+    """Detector scales disagree on one frame; union_boxes covers every scale's text."""
+
+    def __init__(self, message, union_boxes):
+        super().__init__(message)
+        self.union_boxes = union_boxes
+
+
+MAX_SCALE_DISAGREEMENT_FRAMES = 3
+MAX_SCALE_DISAGREEMENT_RATIO = 0.05
+
+
 def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_bounds=None,
                           bands=None):
     """Return measured boxes, or verified empty; ambiguous detections raise.
@@ -219,11 +231,18 @@ def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_b
             if pair not in distinct:
                 distinct.append(pair)
         merged = []
+        disagreement = None
         for top_b, bottom_b in distinct:
-            for box in observe_caption_boxes(reader, frame, band_top=top_b,
-                                             band_bottom=bottom_b, x_bounds=x_bounds):
+            try:
+                boxes = observe_caption_boxes(reader, frame, band_top=top_b,
+                                              band_bottom=bottom_b, x_bounds=x_bounds)
+            except CaptionScaleDisagreement as exc:
+                disagreement, boxes = exc, exc.union_boxes
+            for box in boxes:
                 if not any(_iou(box, kept) >= 0.8 for kept in merged):
                     merged.append(box)
+        if disagreement is not None:
+            raise CaptionScaleDisagreement(str(disagreement), merged)
         return merged
     anchored = band_top is not None and band_bottom is not None
     if anchored:
@@ -265,6 +284,7 @@ def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_b
     agreed = _reconcile_two_scales(first, second, band_top=band_top, band_bottom=band_bottom)
     if agreed is not None:
         return agreed
+    measured_scales = [first, second]
     if reader is not None:
         raw_mid = probe(scales[2])
         mid = _coalesce_same_line([b for b in raw_mid if in_band(b)])
@@ -277,6 +297,7 @@ def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_b
         # passes. It must corroborate an existing measurement of visible text.
         raw_large = probe(scales[3])
         large = _coalesce_same_line([b for b in raw_large if in_band(b)])
+        measured_scales += [mid, large]
         consensus = []
         for earlier in (first, mid, second):
             measured = _reconcile_two_scales(earlier, large, band_top=band_top, band_bottom=band_bottom)
@@ -291,8 +312,9 @@ def observe_caption_boxes(reader, frame, *, band_top=None, band_bottom=None, x_b
             if agreed:
                 return agreed
 
-    raise CaptionGeometryError(
-        f"Caption detector scales disagree; geometry needs review (band {band_top:.3f}–{band_bottom:.3f})"
+    raise CaptionScaleDisagreement(
+        f"Caption detector scales disagree; geometry needs review (band {band_top:.3f}–{band_bottom:.3f})",
+        _coalesce_same_line([box for boxes in measured_scales for box in boxes]),
     )
 
 
@@ -418,7 +440,10 @@ def acquire_caption_geometry(input_video, segments, reader, *, band_top=None, ba
             if not capture.isOpened():
                 raise _CaptionFrameClockError("Cannot reopen the source for sequential decoding")
 
+        disagreements = []
+
         def collect_samples(frame_times=None):
+            disagreements.clear()
             verified_clock = frame_times is not None
             frame_count = len(frame_times) if verified_clock else count
             step = max(1, int(fps * sample_step))
@@ -463,6 +488,12 @@ def acquire_caption_geometry(input_video, segments, reader, *, band_top=None, ba
                                                      bands=active)
                     return observe_caption_boxes(reader, frame, band_top=band_top, band_bottom=band_bottom,
                                                  x_bounds=x_bounds)
+                except CaptionScaleDisagreement as exc:
+                    # A caption animating in can be measured differently at each
+                    # scale on one frame; cover everything any scale saw and let
+                    # the frame budget below decide whether geometry is unusable.
+                    disagreements.append({"frame": index, "time": round(pts, 3), "error": str(exc)})
+                    return exc.union_boxes
                 except CaptionGeometryError as exc:
                     raise CaptionGeometryError(f"Frame {index} at {pts:.3f}s: {exc}") from exc
 
@@ -491,6 +522,14 @@ def acquire_caption_geometry(input_video, segments, reader, *, band_top=None, ba
                 report["frame_clock"] = "source_presentation_timestamps"
                 collected = collect_samples(_verified_frame_times(input_video, duration))
         samples, times, ordered, extra, signature = collected
+        report["scale_disagreement_frames"] = list(disagreements)
+        allowed = max(MAX_SCALE_DISAGREEMENT_FRAMES, int(len(samples) * MAX_SCALE_DISAGREEMENT_RATIO))
+        if len(disagreements) > allowed:
+            first = disagreements[0]
+            raise CaptionGeometryError(
+                f"{len(disagreements)} frames have disagreeing detector scales (> {allowed}); "
+                f"first at frame {first['frame']} {first['time']:.3f}s: {first['error']}"
+            )
         blocks = []
         for position, (boxes, start, end) in enumerate(observation_intervals(samples, fps, duration, frame_times=times)):
             neighbour = samples[ordered[position + 1]] if position + 1 < len(ordered) else boxes

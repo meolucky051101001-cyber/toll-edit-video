@@ -366,3 +366,52 @@ def test_cloud_bundle_ships_the_local_mixer(tmp_path):
     assert len(names) == len(set(names))
     script_names = {path.name for path in (root / "backend/cloud/gpu_scripts").glob("*.py")}
     assert not script_names.intersection(names)
+
+
+def test_scale_disagreement_carries_union_of_every_scale(monkeypatch):
+    # Real be2abe frame 2334 (77.8s): an emphasis caption animating in, read differently per scale.
+    boxes = {1.: [[.332, .723, .67, .782]], 1.5: [[.339, .731, .485, .777]],
+             1.25: [[.574, .73, .664, .777]], 2.: [[.542, .73, .642, .771], [.346, .738, .377, .772]]}
+    monkeypatch.setattr(geometry, "_detect", lambda *a, scale, **kw: boxes[scale])
+    with pytest.raises(geometry.CaptionScaleDisagreement, match="scales disagree") as error:
+        geometry.observe_caption_boxes(object(), np.zeros((10, 10, 3)), band_top=.7461, band_bottom=.7969)
+    assert error.value.union_boxes == [pytest.approx([.332, .723, .67, .782])]
+    with pytest.raises(geometry.CaptionScaleDisagreement) as multi:
+        geometry.observe_caption_boxes(object(), np.zeros((10, 10, 3)), bands=[(.7461, .7969)])
+    assert multi.value.union_boxes == error.value.union_boxes
+
+
+def _fake_capture(monkeypatch, frames):
+    import cv2
+    position = [0]
+    capture = SimpleNamespace(isOpened=lambda: True, release=lambda: None,
+        set=lambda key, value: (position.__setitem__(0, int(value)) or True),
+        get=lambda key: {cv2.CAP_PROP_FRAME_WIDTH: 720, cv2.CAP_PROP_FRAME_HEIGHT: 1280,
+                         cv2.CAP_PROP_FPS: 10., cv2.CAP_PROP_FRAME_COUNT: frames,
+                         cv2.CAP_PROP_POS_MSEC: position[0] * 100.,
+                         cv2.CAP_PROP_POS_FRAMES: position[0] + 1.}[key],
+        read=lambda: (True, np.full((1, 1, 3), position[0], dtype=np.uint8)))
+    monkeypatch.setattr(cv2, 'VideoCapture', lambda path: capture)
+
+
+@pytest.mark.parametrize('bad_frames, passes', [({3}, True), ({0, 3, 6, 9, 12}, False)])
+def test_isolated_scale_disagreement_is_covered_but_widespread_fails(tmp_path, monkeypatch, bad_frames, passes):
+    _fake_capture(monkeypatch, 40)
+
+    def observe(reader, frame, **kw):
+        index = int(frame[0, 0, 0])
+        if index in bad_frames:
+            raise geometry.CaptionScaleDisagreement("Caption detector scales disagree", [[.3, .72, .7, .79]])
+        return [[.3, .73, .7, .78]]
+
+    monkeypatch.setattr(geometry, 'observe_caption_boxes', observe)
+    cues = [dict(id=1, start=0., end=4., text='字幕')]
+    audit = tmp_path / 'audit.json'
+    if passes:
+        report = geometry.acquire_caption_geometry('source', cues, None, duration=4., audit_path=audit)
+        assert [row['frame'] for row in report['scale_disagreement_frames']] == [3]
+        assert report['passed'] and cues[0]['tracking_blocks']
+    else:
+        with pytest.raises(geometry.CaptionGeometryError, match="frames have disagreeing detector scales"):
+            geometry.acquire_caption_geometry('source', cues, None, duration=4., audit_path=audit)
+        assert len(json.loads(audit.read_text(encoding='utf-8'))['scale_disagreement_frames']) == 5
