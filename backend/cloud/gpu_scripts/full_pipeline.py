@@ -502,6 +502,60 @@ def _asr_uncovered_speech(raw_segments: list[dict], windows: list[dict]) -> list
     return gaps
 
 
+ASR_GAP_REFILL_PAD_SECONDS = 0.3
+
+
+def _refill_uncovered_speech(result: dict, gaps: list[dict], transcribe_clip, audio_samples: int) -> list[dict]:
+    """Re-decode each uncovered speech gap on its own clip and merge the new segments.
+
+    Whisper can skip the tail of a 30-second decoding window (job d98ef8 lost
+    24.38-30.00s of real speech); starting a fresh window at the gap recovers it.
+    Only segments that mostly fall inside the gap are merged, clamped to the gap
+    so they cannot overlap the cues already recognised around it.
+    """
+    report = []
+    if not gaps:
+        return report
+    merged = list(result.get("segments", []))
+    for gap in gaps:
+        g_start, g_end = float(gap["start"]), float(gap["end"])
+        entry = {"start": g_start, "end": g_end, "added": 0}
+        report.append(entry)
+        try:
+            clips = _whisper_clip_timestamps(
+                [{"start": max(0.0, g_start - ASR_GAP_REFILL_PAD_SECONDS),
+                  "end": g_end + ASR_GAP_REFILL_PAD_SECONDS}],
+                audio_samples,
+            )
+            refill = transcribe_clip(clips)
+        except PipelineStageError as exc:
+            entry["error"] = str(exc)
+            continue
+        for segment in refill.get("segments", []) or []:
+            start, end = float(segment["start"]), float(segment["end"])
+            inside = min(end, g_end) - max(start, g_start)
+            if end <= start or inside < 0.5 * (end - start) or not str(segment.get("text", "")).strip():
+                continue
+            clamped = dict(segment, start=max(start, g_start), end=min(end, g_end))
+            if segment.get("words"):
+                clamped["words"] = [
+                    dict(word,
+                         start=min(max(float(word["start"]), clamped["start"]), clamped["end"]),
+                         end=min(max(float(word["end"]), clamped["start"]), clamped["end"]))
+                    for word in segment["words"]
+                ]
+            merged.append(clamped)
+            entry["added"] += 1
+    if any(entry["added"] for entry in report):
+        merged.sort(key=lambda seg: (float(seg["start"]), float(seg["end"])))
+        if any("id" in segment for segment in merged):
+            for index, segment in enumerate(merged):
+                segment["id"] = index
+        result["segments"] = merged
+        result["text"] = "".join(str(seg.get("text", "")) for seg in merged)
+    return report
+
+
 def _asr_low_confidence(raw_segments: list[dict]) -> list[dict]:
     """List every below-threshold decoder segment for retry and audit."""
     failures = []
@@ -659,6 +713,10 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
     # Validate both tracks identically and preserve rejected output for review.
     coverage_windows = audit.get("track_windows_seconds", {}).get("original", windows)
     gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
+    if gaps:
+        audit["gap_refill"] = _refill_uncovered_speech(
+            result, gaps, lambda clip: _transcribe(primary_audio, clip), len(primary_audio))
+        gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
     uncertain = _asr_low_confidence(result.get("segments", []))
     alignment_error = _asr_alignment_error(result.get("segments", []), windows)
     if (gaps or uncertain or alignment_error) and has_original:
@@ -672,6 +730,10 @@ def step3_asr_whisper(audio_path: str, output_srt: str, *, reference_audio_path:
         audit["recognition_track"] = "vocals_retry"
         audit["decoder_clip_timestamps"] = clips
         gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
+        if gaps:
+            audit["vocals_gap_refill"] = _refill_uncovered_speech(
+                result, gaps, lambda clip: _transcribe(audio, clip), len(audio))
+            gaps = _asr_uncovered_speech(result.get("segments", []), coverage_windows)
         uncertain = _asr_low_confidence(result.get("segments", []))
         alignment_error = _asr_alignment_error(result.get("segments", []), windows)
     uncertain, tolerated, blocking, dropped = _partition_asr_low_confidence(result.get("segments", []))

@@ -221,7 +221,12 @@ def test_asr_prefers_original_and_retries_invalid_output_once_then_fails_closed(
         with pytest.raises(full_pipeline.PipelineStageError):
             full_pipeline.step3_asr_whisper("vocals", str(srt), reference_audio_path="original")
         assert not srt.exists()
-    assert calls == [original, vocal]
+    # A coverage gap is re-decoded on its own clip once per track before failing.
+    if retry_cause == "gap":
+        expected_calls = [original, original, vocal] + ([] if retry_recovers else [vocal])
+    else:
+        expected_calls = [original, vocal]
+    assert calls == expected_calls
     audit = json.loads(srt.with_suffix(".asr.json").read_text(encoding="utf-8"))
     assert audit["recognition_track"] == "vocals_retry"
     assert audit["initial_uncovered_speech"] == ([{"start": 2.0, "end": 10.0}] if retry_cause == "gap" else [])

@@ -78,6 +78,7 @@ jobs:
           tests/test_cloud_review_regressions.py
           tests/test_cloud_caption_geometry.py
           tests/test_cloud_per_cue_caption_band.py
+          tests/test_cloud_asr_gap_refill_budget_grace.py
           tests/test_cloud_caption_reviewer.py
           tests/test_cloud_content_repair.py
           tests/test_cloud_subtitle_timing.py

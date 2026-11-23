@@ -458,6 +458,8 @@ class _JobRun:
     stage_timings: Dict[str, float]
     stage_state: Dict[str, Any]
     runtime_start_time: Optional[float] = None
+    last_provider_ok_ts: Optional[float] = None
+    provider_probe_failures: int = 0
     gpu_type: Optional[str] = None
     voice_choice: Optional[str] = None
     validated_input: Any = None
@@ -590,31 +592,53 @@ class _JobRun:
             return CloudCostMeasurementSource.PROVIDER_RATE_ESTIMATE.value
         return CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value
 
+    def _tolerate_provider_probe_failure(self, error: str) -> bool:
+        """Ride out a transient balance-probe failure while the last good probe is fresh.
+
+        Spending stays bounded: record_runtime_usage still enforces the daily
+        budget from the runtime estimate; only the provider balance is unknown.
+        """
+        self.provider_probe_failures += 1
+        grace = float(DEFAULT_CONFIG.get("provider_balance_stale_seconds", 300))
+        if self.last_provider_ok_ts is None or grace <= 0:
+            return False
+        age = time.time() - self.last_provider_ok_ts
+        if age > grace:
+            return False
+        logger.warning(
+            "Cloud Job %s: kiểm tra số dư Colab lỗi lần %d (%s); số dư hợp lệ gần nhất cách %.0fs (≤ %.0fs), tiếp tục chạy.",
+            self.job_id, self.provider_probe_failures, error, age, grace,
+        )
+        return True
+
     def _sync_runtime_usage(self, *, check_provider: bool = False) -> Tuple[bool, str]:
         if not hasattr(self.orchestrator.store, "record_runtime_usage"):
             return True, "ok"
         est_cu = self._estimate_elapsed_cu()
         prov_bal: Optional[float] = None
         if check_provider:
+            probe_error: Optional[str] = None
             try:
                 u = self.orchestrator.adapter.get_usage()
                 if hasattr(self.orchestrator.store, "record_provider_usage_snapshot"):
                     snap = self.orchestrator.store.record_provider_usage_snapshot(u)
                     if not snap.get("ok") or snap.get("is_stale"):
-                        self.budget_abort_reason = (
-                            "Mất kết nối hoặc số dư Colab bị cũ trong lúc đang chạy session."
-                        )
-                        self.budget_abort_code = "budget_uncertain"
-                        return False, "budget_uncertain"
-                    prov_bal = snap.get("balance")
-                    if prov_bal is not None:
-                        self.latest_provider_balance = float(prov_bal)
-                    self._adopt_provider_rate(snap)
+                        probe_error = "Mất kết nối hoặc số dư Colab bị cũ trong lúc đang chạy session."
+                    else:
+                        prov_bal = snap.get("balance")
+                        if prov_bal is not None:
+                            self.latest_provider_balance = float(prov_bal)
+                        self._adopt_provider_rate(snap)
                 elif u.get("ok") and u.get("balance") is not None:
                     prov_bal = float(u["balance"])
                     self.latest_provider_balance = prov_bal
             except Exception as probe_exc:
-                self.budget_abort_reason = redact_secrets(str(probe_exc), extra_secrets=self.extra_secrets)
+                probe_error = redact_secrets(str(probe_exc), extra_secrets=self.extra_secrets)
+            if probe_error is None:
+                self.last_provider_ok_ts = time.time()
+                self.provider_probe_failures = 0
+            elif not self._tolerate_provider_probe_failure(probe_error):
+                self.budget_abort_reason = probe_error
                 self.budget_abort_code = "budget_uncertain"
                 return False, "budget_uncertain"
 
@@ -921,6 +945,7 @@ class _JobRun:
             return False
         if balance is not None:
             self.latest_provider_balance = float(balance)
+        self.last_provider_ok_ts = time.time()
 
         budget_info = self.orchestrator.store.get_cu_budget_info()
         if int(budget_info.get("unreconciled_count", 0)) > 0:
