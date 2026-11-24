@@ -6,7 +6,7 @@ File này được sinh tự động bởi `python scripts/gen_env_docs.py`. Kh�
 Cột *Mặc định* là giá trị viết trong code. Nhiều giá trị nghĩa là các module dùng
 mặc định khác nhau cho cùng một biến; nên xem lại những dòng đó.
 
-Tổng: 225 biến.
+Tổng: 227 biến.
 
 | Biến | Mặc định | Nơi đọc |
 |---|---|---|
@@ -75,7 +75,9 @@ Tổng: 225 biến.
 | `CLOUD_TTS_CONCURRENCY` | `5` | `backend/cloud/gpu_scripts/full_pipeline.py` |
 | `CRAFT_MODEL_PATH` | `(tính lúc chạy)` | `backend/whiteboard_animator/craft_detector.py` |
 | `DEEPSEEK_API_KEY` | — | `backend/ai/translation.py`, `backend/pipeline_v2/video_pipeline.py`, `backend/telegram_bot.py` |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | `backend/ai/translation.py` |
 | `DEEPSEEK_MODEL` | — | `backend/ai/model_policy.py` |
+| `DEEPSEEK_MODELS` | — | `backend/ai/translation.py` |
 | `DEMUCS_FALLBACK_MODEL` | — | `backend/ai/model_policy.py` |
 | `DEMUCS_MODEL` | — | `backend/ai/model_policy.py` |
 | `DOUYIN_API_TIMEOUT_SECONDS` | `12` | `backend/douyin_direct.py` |

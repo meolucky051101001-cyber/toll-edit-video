@@ -1203,15 +1203,18 @@ def translate_with_deepseek(
             domain=kwargs.get("domain", "general"),
             cue_meta=kwargs.get("cue_meta"),
         )
-        models_to_try = [model, "deepseek-v4", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]
+        configured_models = [m.strip() for m in os.getenv("DEEPSEEK_MODELS", "").split(",") if m.strip()]
+        models_to_try = [model, *configured_models] if configured_models else [
+            model, "deepseek-v4", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]
+        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").strip().rstrip("/")
         seen = []
         for m in models_to_try:
-            if m not in seen: seen.append(m)
+            if m and m not in seen: seen.append(m)
             
         for dm in seen:
             try:
                 logger.info(f"Đang gọi DeepSeek ({dm})...")
-                url = "https://api.deepseek.com/v1/chat/completions"
+                url = f"{base_url}/chat/completions"
                 headers = {
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}"
